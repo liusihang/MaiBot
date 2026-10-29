@@ -43,6 +43,10 @@ QQ 收发继续使用 [SnowLuma Adapter](https://github.com/Mai-with-u/MaiBot-Sn
 两个群已使用同一份当前提示词与人格配置。`maisaka_replyer.prompt` 供显式生成入口使用，普通群聊正文不经过它。
 称呼优先级、按场合决定篇幅、政治话题限制及现有工具能力继续保留。
 身份设计、来源与隔离回放的限制见 [ROLEPLAY.md](ROLEPLAY.md)。
+
+2026-10-30 修订保留“贴吧、NGA、B站、虎扑老油条、互联网串子”为身份核心，弱化每句都要较劲或抖包袱的要求。普通接话通常简短，解释按需展开；闲聊句尾通常省句号，不固定字数或句数。Luna 同时识别连续对话、开放求助与面向全群的分享、互损机会，主 Agent 保留沉默选择。
+
+当前主模板直接包含人格正文；面板三段配置是对应副本，修改面板不会自动重写主模板。部署时须同时更新模板和 overlay 的 personality、behavior_style、reply_style，并显式迁移已有 Pi 会话的 System 契约；原有历史保持不变。原生压缩指令位于 `runtime/pi_agent/runtime.mjs`，旧 context_compaction 模板不控制此路径。
 内置普通/Focus 提示词的中文、英文和日文工具约定已同步为 `reply(msg_id, text)`。
 
 - `bot_config.overlay.toml`：基础设置；其中旧人格、表达注入与拆句设置由当前 overlay 覆盖。
