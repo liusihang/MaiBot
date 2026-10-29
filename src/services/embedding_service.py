@@ -1,7 +1,7 @@
 """Embedding 服务层。
 
 该模块负责在宿主侧收口统一的文本嵌入请求，并将其转发到
-`src.llm_models` 中的底层嵌入调度器。
+Node Pi 侧显式嵌入适配器，Python 仅保留业务封装。
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ import asyncio
 from src.common.data_models.embedding_service_data_models import EmbeddingResult, ImageEmbeddingResult
 from src.common.embedding_identity import build_embedding_fingerprint
 from src.common.logger import get_logger
-from src.llm_models.utils_model import LLMOrchestrator, TempMethodsLLMUtils
+from src.llm_models.utils_model import TempMethodsLLMUtils
+from src.services.pi_harness.inference import PiInferenceClient
 from src.services.service_task_resolver import resolve_task_name
 
 logger = get_logger("embedding_service")
@@ -50,7 +51,7 @@ class EmbeddingServiceClient:
         self.task_name = resolve_task_name(task_name)
         self.request_type = request_type
         self.session_id = str(session_id or "").strip()
-        self._orchestrator = LLMOrchestrator(
+        self._inference = PiInferenceClient(
             task_name=self.task_name,
             request_type=request_type,
             session_id=self.session_id,
@@ -70,7 +71,7 @@ class EmbeddingServiceClient:
         Returns:
             EmbeddingResult: 统一嵌入结果对象。
         """
-        raw_result = await self._orchestrator.get_embedding(
+        raw_result = await self._inference.get_embedding(
             embedding_input,
             session_id=self._resolve_effective_session_id(session_id),
         )
@@ -95,7 +96,7 @@ class EmbeddingServiceClient:
             raise ValueError("图片嵌入输入不能为空")
         if not mime_type.startswith("image/"):
             raise ValueError("图片嵌入输入必须提供 image/* MIME 类型")
-        raw_result = await self._orchestrator.get_image_embedding(
+        raw_result = await self._inference.get_image_embedding(
             bytes(image_bytes),
             mime_type=mime_type,
             preprocess_version=preprocess_version,
@@ -256,6 +257,7 @@ class EmbeddingServiceClient:
         except RuntimeError:
             pass
         else:
+            coroutine.close()
             raise RuntimeError("当前线程存在运行中的事件循环，请改用异步 Embedding 接口")
 
         loop = asyncio.new_event_loop()

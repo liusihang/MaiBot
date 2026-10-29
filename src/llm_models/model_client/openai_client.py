@@ -1461,6 +1461,7 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
         Args:
             api_provider: API 提供商配置。
         """
+        raise RuntimeError("Python provider transport retired; use the Node Pi harness")
         super().__init__(api_provider)
         client_config = build_openai_compatible_client_config(api_provider)
         self.reasoning_parse_mode = _normalize_reasoning_parse_mode(api_provider.reasoning_parse_mode)

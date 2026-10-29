@@ -9,7 +9,6 @@ import time
 import uuid
 
 from src.common.logger import get_logger
-from src.common.startup_diagnostics import diagnostic_stage
 from src.config.config import config_manager
 from src.config.model_configs import APIProvider, ModelInfo
 from src.llm_models.request_admission import AdmissionDecision
@@ -318,10 +317,14 @@ class ResponseRequest:
 
     def detached_snapshot(self) -> "ResponseRequest":
         """冻结输入和模型设置，解除中断、回调及诊断上下文的生命周期。"""
-        return copy.deepcopy(self.copy_with(
-            stream_response_handler=None, async_response_parser=None,
-            interrupt_flag=None, trace_context=None,
-        ))
+        return copy.deepcopy(
+            self.copy_with(
+                stream_response_handler=None,
+                async_response_parser=None,
+                interrupt_flag=None,
+                trace_context=None,
+            )
+        )
 
 
 @dataclass(slots=True)
@@ -377,6 +380,16 @@ class BaseClient(ABC):
         Args:
             api_provider: API 提供商配置。
         """
+        if type(self).__module__ in {
+            "src.llm_models.model_client.openai_client",
+            "src.llm_models.model_client.openai_responses_client",
+            "src.llm_models.model_client.gemini_client",
+            "src.llm_models.model_client.plugin_client",
+        }:
+            raise RuntimeError(
+                "Python provider transports are retired; use LLMServiceClient, "
+                "EmbeddingServiceClient or the Pi-backed registry facade"
+            )
         self.api_provider = api_provider
 
     def prepare_sync_resources(self) -> None:
@@ -415,9 +428,7 @@ class BaseClient(ABC):
 
         from src.llm_models.exceptions import ImageEmbeddingUnsupportedError
 
-        raise ImageEmbeddingUnsupportedError(
-            f"Provider 客户端 {type(self).__name__} 未实现图片嵌入协议"
-        )
+        raise ImageEmbeddingUnsupportedError(f"Provider 客户端 {type(self).__name__} 未实现图片嵌入协议")
 
     @abstractmethod
     async def get_audio_transcriptions(self, request: AudioTranscriptionRequest) -> APIResponse:
@@ -676,35 +687,15 @@ class ClientRegistry:
         return loop, api_provider.name
 
     def get_client_class_instance(self, api_provider: APIProvider, force_new: bool = False) -> BaseClient:
-        """获取注册的 API 客户端实例。
+        """Return the Pi facade, never invoke a Python SDK/plugin factory.
 
-        此方法是兼容同步入口；协程应使用 get_client_class_instance_async。
-
-        Args:
-            api_provider: APIProvider 实例。
-            force_new: 是否强制创建新实例。
-
-        Returns:
-            BaseClient: 注册的 API 客户端实例。
+        Registrations are kept for UI/configuration metadata only. Unknown
+        capability adapters are rejected explicitly by Node, not retried here.
         """
-        from . import ensure_client_type_loaded
+        from src.services.pi_harness.legacy_client import PiModelClient
 
-        ensure_client_type_loaded(api_provider.client_type)
-
-        # 如果强制创建新实例，直接创建不使用缓存
-        if force_new:
-            if registration := self.client_registry.get(api_provider.client_type):
-                return self._build_prepared_client(api_provider, registration)
-            raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
-
-        # 异步 HTTP 连接在实际请求时绑定循环，同一调用方循环内按 Provider 复用。
-        cache_key = self._get_client_cache_key(api_provider)
-        if cache_key not in self.client_instance_cache:
-            if registration := self.client_registry.get(api_provider.client_type):
-                self.client_instance_cache[cache_key] = self._build_prepared_client(api_provider, registration)
-            else:
-                raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
-        return self.client_instance_cache[cache_key]
+        del force_new
+        return PiModelClient(api_provider)
 
     def clear_client_instance_cache(self) -> None:
         """清空客户端实例缓存。"""
@@ -715,60 +706,15 @@ class ClientRegistry:
 
     @staticmethod
     def _build_prepared_client(api_provider: APIProvider, registration: ClientProviderRegistration) -> BaseClient:
-        """一次完成客户端构造及 SDK 懒加载，不在工作线程中发起网络请求。"""
-        with diagnostic_stage(f"llm.client_create:{api_provider.client_type}"):
-            client = registration.factory(api_provider)
-            client.prepare_sync_resources()
-            return client
+        """Legacy construction hook is also constrained to the Pi facade."""
+        from src.services.pi_harness.legacy_client import PiModelClient
+
+        del registration
+        return PiModelClient(api_provider)
 
     async def get_client_class_instance_async(self, api_provider: APIProvider) -> BaseClient:
-        """异步获取客户端：重初始化在线程中执行，缓存仍按调用方事件循环隔离。"""
-        from . import ensure_client_type_loaded
-
-        loop = asyncio.get_running_loop()
-        cache_key = (loop, api_provider.name)
-        if cached := self.client_instance_cache.get(cache_key):
-            return cached
-
-        # 新增供应商或配置热重载可能首次导入 SDK，不能在事件循环中导入。
-        generation = self._cache_generation
-        await asyncio.to_thread(ensure_client_type_loaded, api_provider.client_type)
-        registration = self.client_registry.get(api_provider.client_type)
-        if registration is None:
-            raise KeyError(f"'{api_provider.client_type}' 类型的 Client 未注册")
-        if generation == self._cache_generation and (cached := self.client_instance_cache.get(cache_key)):
-            return cached
-
-        initialization_key = (loop, api_provider.name, id(registration), generation)
-        task = self._client_initializations.get(initialization_key)
-        if task is None:
-
-            async def initialize() -> BaseClient:
-                if registration.builtin:
-                    client = await asyncio.to_thread(self._build_prepared_client, api_provider, registration)
-                else:
-                    # 插件代理的工厂可能需要当前循环；宿主内不执行第三方 SDK 的构造。
-                    client = registration.factory(api_provider)
-                if (
-                    generation == self._cache_generation
-                    and self.client_registry.get(api_provider.client_type) is registration
-                ):
-                    self.client_instance_cache[cache_key] = client
-                return client
-
-            task = asyncio.create_task(initialize(), name=f"llm.client_initialize:{api_provider.client_type}")
-            self._client_initializations[initialization_key] = task
-
-            def finish(completed: asyncio.Task[BaseClient]) -> None:
-                self._client_initializations.pop(initialization_key, None)
-                # 所有调用方均被取消时，也完整记录后台初始化异常。
-                if not completed.cancelled() and (error := completed.exception()) is not None:
-                    logger.error("LLM 客户端初始化失败", exc_info=(type(error), error, error.__traceback__))
-
-            task.add_done_callback(finish)
-
-        # 同一循环的并发请求共享初始化；取消单个请求不能取消其他请求使用的客户端。
-        return await asyncio.shield(task)
+        """The facade has no SDK resources or event-loop-bound state to prepare."""
+        return self.get_client_class_instance(api_provider)
 
 
 client_registry = ClientRegistry()

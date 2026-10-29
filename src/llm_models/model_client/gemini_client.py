@@ -861,6 +861,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
         Args:
             api_provider: API 提供商配置。
         """
+        raise RuntimeError("Python provider transport retired; use the Node Pi harness")
         super().__init__(api_provider)
         self.client = genai.Client(
             api_key=api_provider.api_key,

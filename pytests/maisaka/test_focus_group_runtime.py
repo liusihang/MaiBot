@@ -243,6 +243,7 @@ def setup_group(monkeypatch, tmp_path):
     trace: List[Any] = []
     members = {sid: ChatServices(sid, group, trace) for sid in ("A", "B")}
     for runtime in members.values():
+        runtime._reasoning_engine._pi_runner = SimpleNamespace(run=AsyncMock(), record_pending=AsyncMock(), close=AsyncMock())
         group.add_member(runtime)
     monkeypatch.setattr(global_config.capabilities, "tool_result_condense", False)
     monkeypatch.setattr(group_module, "emit_flow_step", AsyncMock())
@@ -352,7 +353,8 @@ async def test_wait_queues_normal_messages_and_background_results_until_at(setup
         called.set()
         return _response()
 
-    group._service.chat_loop_step = planner
+    for member in members.values():
+        member._reasoning_engine._pi_runner.run.side_effect = planner
     group.execute_control("wait", {"seconds": 60}, "A")
     await group.register_message(members["B"], _incoming("B", "normal"), _history("普通消息"))
     group.register_proactive(members["B"], _incoming("B", "background"))
@@ -375,8 +377,8 @@ async def test_new_chat_message_does_not_cancel_inflight_planner(setup_group):
     second_started = asyncio.Event()
     requests = []
 
-    async def planner(history, **kwargs):
-        requests.append(list(history))
+    async def planner(member, sources):
+        requests.append(list(member._chat_history))
         if len(requests) == 1:
             first_started.set()
             await release_first.wait()
@@ -384,7 +386,10 @@ async def test_new_chat_message_does_not_cancel_inflight_planner(setup_group):
             second_started.set()
         return _response()
 
-    group._service.chat_loop_step = planner
+    for member in members.values():
+        async def run(sources, member=member):
+            return await planner(member, sources)
+        member._reasoning_engine._pi_runner.run.side_effect = run
     members["B"]._wait_for_message_quiet_period = asyncio.Event().wait
     await group.register_message(members["A"], _incoming("A", "one"), _history("A 的新消息"))
     await asyncio.wait_for(first_started.wait(), 1)
@@ -394,7 +399,7 @@ async def test_new_chat_message_does_not_cancel_inflight_planner(setup_group):
     assert all("B 的新消息" not in message.processed_plain_text for message in requests[0])
     release_first.set()
     await asyncio.wait_for(second_started.wait(), 1)
-    assert any("A 的新消息" in message.processed_plain_text for message in requests[1])
+    assert all("A 的新消息" not in message.processed_plain_text for message in requests[1])
     assert any("B 的新消息" in message.processed_plain_text for message in requests[1])
     await group.stop()
 
@@ -407,12 +412,15 @@ async def test_each_chat_debounces_independently(setup_group):
     called = asyncio.Event()
     requests = []
 
-    async def planner(history, **kwargs):
-        requests.append(list(history))
+    async def planner(member, sources):
+        requests.append(list(member._chat_history))
         called.set()
         return _response()
 
-    group._service.chat_loop_step = planner
+    for member in members.values():
+        async def run(sources, member=member):
+            return await planner(member, sources)
+        member._reasoning_engine._pi_runner.run.side_effect = run
     await group.register_message(members["A"], _incoming("A", "slow"), _history("A 未结束防抖"))
     await group.register_message(members["B"], _incoming("B", "ready"), _history("B 已就绪"))
     await asyncio.wait_for(called.wait(), 1)
@@ -537,19 +545,22 @@ async def test_failed_summary_discards_old_entries_and_preserves_progress(setup_
 
 
 @pytest.mark.asyncio
-async def test_failed_compaction_continues_to_planner_in_same_turn(setup_group, monkeypatch):
-    group, _, _ = setup_group
+async def test_failed_legacy_compaction_cannot_drop_input_before_isolated_pi_run(setup_group, monkeypatch):
+    group, members, _ = setup_group
     monkeypatch.setattr(global_config.chat, "max_context_size", 2)
     builder = AsyncMock(side_effect=TimeoutError("服务商重试耗尽"))
     monkeypatch.setattr(group_module, "build_context_summary", builder)
     group.entries = [FocusContextEntry([_chat_history(str(i))], {"A"}, i) for i in range(1, 7)]
+    original = list(group.entries)
     _seed_planner_snapshot(group)
     planner = AsyncMock(return_value=_response())
     monkeypatch.setattr(group._service, "chat_loop_step", planner)
-    monkeypatch.setattr(group, "_build_references", AsyncMock(return_value=[]))
     await group._run_turn()
-    planner.assert_awaited_once()
-    assert [message.processed_plain_text for message in planner.await_args.args[0]] == ["2", "3", "4", "5", "6"]
+    members["A"]._reasoning_engine._pi_runner.run.assert_awaited_once_with([])
+    planner.assert_not_awaited()
+    builder.assert_not_awaited()
+    assert group.entries == original
+    assert [message.processed_plain_text for message in members["A"]._chat_history][-6:] == ["1", "2", "3", "4", "5", "6"]
     assert not group._failed
     assert group._considered == {"A": 6}
 
@@ -802,7 +813,7 @@ async def test_regroup_transfers_unprocessed_real_messages_only(setup_group, mon
 
 
 @pytest.mark.asyncio
-async def test_real_chat_services_share_one_planner_without_starting_individual_loops(monkeypatch, tmp_path):
+async def test_real_chat_services_share_focus_scheduler_but_use_independent_pi_runners(monkeypatch, tmp_path):
     from src.config.config import config_manager
     from src.maisaka import runtime as runtime_module
     from src.maisaka.focus import manager as manager_module
@@ -836,28 +847,25 @@ async def test_real_chat_services_share_one_planner_without_starting_individual_
     monkeypatch.setattr(group_module, "FocusCheckpointStore", lambda scope: FocusCheckpointStore(scope, tmp_path))
     a = MaisakaHeartFlowChatting("A")
     b = MaisakaHeartFlowChatting("B")
+    requests = []
+    both_seen = asyncio.Event()
+    for member in (a, b):
+        member._reasoning_engine.restore_pi_pending = AsyncMock()
+
+        async def run(sources, member=member):
+            assert all(source.session_id == member.session_id for source in sources)
+            requests.append((member.session_id, list(sources)))
+            if {sid for sid, _ in requests} == {"A", "B"}:
+                both_seen.set()
+
+        member._reasoning_engine._pi_runner = SimpleNamespace(run=AsyncMock(side_effect=run), record_pending=AsyncMock(), close=AsyncMock())
     try:
         await asyncio.gather(a.start(), b.start())
         group = a._focus_group
         assert b._focus_group is group
         assert a._internal_loop_task is None and b._internal_loop_task is None
         assert len(manager.groups) == 1
-        requests = []
-        both_seen = asyncio.Event()
-
-        async def planner(history, **kwargs):
-            requests.append(list(history))
-            if all(
-                any(
-                    isinstance(message, SessionBackedMessage) and message.original_message.session_id == sid
-                    for message in history
-                )
-                for sid in ("A", "B")
-            ):
-                both_seen.set()
-            return _response()
-
-        group._service.chat_loop_step = planner
+        group._service.chat_loop_step = AsyncMock(side_effect=AssertionError("Shared planner is forbidden"))
         group._build_references = AsyncMock(return_value=[])
         group._emit_response = AsyncMock()
         # Provider 发现不影响此处验证，避免测试查询外部插件/MCP 服务。
@@ -865,6 +873,8 @@ async def test_real_chat_services_share_one_planner_without_starting_individual_
         await a.register_message(_incoming("A", "message-A"))
         await b.register_message(_incoming("B", "message-B"))
         await asyncio.wait_for(both_seen.wait(), 2)
+        group._service.chat_loop_step.assert_not_awaited()
+        assert {sid for sid, _ in requests} == {"A", "B"}
         assert all(
             isinstance(message, SessionBackedMessage) and message.original_message.session_id == "A"
             for message in a._chat_history

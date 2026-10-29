@@ -1,0 +1,40 @@
+name: Pi Harness Tests
+on:
+  pull_request:
+    paths:
+      - "runtime/pi_agent/**"
+      - "src/maisaka/pi_runtime/**"
+      - "src/services/pi_harness/**"
+      - "pytests/maisaka/test_pi_*.py"
+      - "pytests/services/test_pi_harness_bridge.py"
+      - ".github/workflows/pi-harness-tests.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline-harness:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+      - name: Install pinned Pi SDK
+        run: npm --prefix runtime/pi_agent ci --ignore-scripts --no-audit --no-fund
+      - name: Real SDK with mock provider wires
+        run: npm --prefix runtime/pi_agent test
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Python test dependencies
+        run: uv sync --group dev
+      - name: Business bridge and legacy-network rejection tests
+        env:
+          PYTHONPATH: .
+        run: >-
+          uv run pytest -q
+          pytests/maisaka/test_pi_business_store.py
+          pytests/maisaka/test_pi_harness_host.py
+          pytests/maisaka/test_pi_subagents.py
+          pytests/maisaka/test_pi_evidence.py
+          pytests/services/test_pi_harness_bridge.py

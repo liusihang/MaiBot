@@ -749,12 +749,14 @@ class RuntimeCoreCapabilityMixin:
                 llm_api.LLMServiceRequest(
                     task_name=task_name,
                     request_type=f"plugin.{plugin_id}",
+                    retain_replay=False,
                     prompt=prompt,
                     model_name=model_name,
                     temperature=args.get("temperature"),
                     max_tokens=args.get("max_tokens"),
                 )
             )
+            # Native state is not exported; later caller history is portable.
             return result.to_capability_payload()
         except Exception as exc:
             logger.error(f"[cap.llm.generate] 执行失败: {exc}", exc_info=True)
@@ -786,6 +788,7 @@ class RuntimeCoreCapabilityMixin:
                 llm_api.LLMServiceRequest(
                     task_name=task_name,
                     request_type=f"plugin.{plugin_id}",
+                    retain_replay=False,
                     prompt=prompt,
                     model_name=model_name,
                     tool_options=tool_options,
@@ -793,6 +796,7 @@ class RuntimeCoreCapabilityMixin:
                     max_tokens=args.get("max_tokens"),
                 )
             )
+            # Native state is not exported; later caller history is portable.
             return result.to_capability_payload()
         except Exception as exc:
             logger.error(f"[cap.llm.generate_with_tools] 执行失败: {exc}", exc_info=True)
@@ -836,6 +840,95 @@ class RuntimeCoreCapabilityMixin:
             }
         except Exception as exc:
             logger.error(f"[cap.llm.embed] 执行失败: {exc}", exc_info=True)
+            return {"success": False, "error": str(exc)}
+
+    async def _cap_llm_embed_image(self, plugin_id: str, capability: str, args: Dict[str, Any]) -> Any:
+        """显式图片嵌入能力；模型网络请求只在 Node Pi 侧执行。
+
+        插件需要单独声明 ``llm.embed_image`` 权限。仅接受媒体及已配置
+        的模型名称，不接受插件传入的 Provider URL、凭据或请求头。
+        """
+        del capability
+        from src.services.pi_harness.inference import PiInferenceClient
+        from src.services.service_task_resolver import resolve_task_name
+
+        try:
+            image = args.get("image_base64")
+            mime_type = args.get("mime_type")
+            preprocess = args.get("preprocess_version")
+            if not isinstance(image, str) or not image:
+                raise ValueError("image_base64 必须为非空 Base64 字符串")
+            if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
+                raise ValueError("mime_type 必须为 image/* 类型")
+            if not isinstance(preprocess, str) or not preprocess.strip():
+                raise ValueError("preprocess_version 必须显式提供")
+            image_bytes = base64.b64decode(image, validate=True)
+            if not image_bytes:
+                raise ValueError("图片内容不能为空")
+            task_name = resolve_task_name(str(args.get("task_name") or "image_embedding"))
+            model_name = args.get("model_name")
+            if model_name is not None and (not isinstance(model_name, str) or not model_name.strip()):
+                raise ValueError("model_name 必须是已配置的模型名称")
+            if any(key in args for key in ("api_provider", "api_key", "base_url", "headers", "extra_params")):
+                raise ValueError("图片能力不接受插件提供的 Provider 连接或额外路由参数")
+            client = PiInferenceClient(task_name, request_type=f"plugin.{plugin_id}.image_embedding")
+            result = await client.get_image_embedding(
+                image_bytes, mime_type=mime_type, preprocess_version=preprocess, model_name=model_name,
+            )
+            usage = result.usage
+            return {
+                "success": True, "embedding": list(result.embedding), "model_name": result.model_name,
+                "model_identifier": result.model_identifier, "api_provider": result.api_provider,
+                "request_protocol_hash": result.request_protocol_hash,
+                "usage": {
+                    "prompt_tokens": int(usage.get("input", usage.get("prompt_tokens", 0))),
+                    "completion_tokens": int(usage.get("output", usage.get("completion_tokens", 0))),
+                    "total_tokens": int(usage.get("totalTokens", usage.get("total_tokens", 0))),
+                },
+            }
+        except Exception as exc:
+            logger.error(f"[cap.llm.embed_image] 执行失败: {exc}", exc_info=True)
+            return {"success": False, "error": str(exc)}
+
+    async def _cap_llm_generate_image(self, plugin_id: str, capability: str, args: Dict[str, Any]) -> Any:
+        """显式图片生成/编辑能力，返回 Pi 侧已验证的 Base64 图片和公开用量。"""
+        del capability
+        from src.services import llm_service
+        from src.services.pi_harness.inference import PiInferenceClient
+
+        try:
+            prompt = args.get("prompt")
+            if not isinstance(prompt, str) or not prompt.strip():
+                raise ValueError("prompt 必须是非空字符串")
+            task_name, model_name = _resolve_llm_capability_route(args, llm_service.get_available_models())
+            task_name = llm_service.resolve_task_name(task_name)
+            raw_images = args.get("images", [])
+            if not isinstance(raw_images, list):
+                raise ValueError("images 必须是显式图片内容列表")
+            images = []
+            for image in raw_images:
+                if not isinstance(image, dict) or set(image) != {"data", "mimeType"}:
+                    raise ValueError("每张图片只能包含 Base64 data 和 mimeType")
+                if not isinstance(image["mimeType"], str) or not image["mimeType"].startswith("image/"):
+                    raise ValueError("图片 mimeType 必须为 image/*")
+                if not isinstance(image["data"], str) or not base64.b64decode(image["data"], validate=True):
+                    raise ValueError("图片 data 必须为非空 Base64")
+                images.append(dict(image))
+            options = args.get("options", {})
+            allowed = {"n", "size", "quality", "output_format", "output_compression", "background",
+                       "moderation", "response_format", "aspect_ratio", "image_size", "input_fidelity",
+                       "seed", "imageConfig"}
+            if not isinstance(options, dict) or set(options) - allowed:
+                raise ValueError("图片生成 options 包含未支持的字段")
+            if any(key in args for key in ("api_provider", "api_key", "base_url", "headers", "extra_params")):
+                raise ValueError("图片能力不接受插件提供的 Provider 连接或额外路由参数")
+            result = await PiInferenceClient(task_name, request_type=f"plugin.{plugin_id}.generate_image").generate_images(
+                prompt, images=images, model_name=model_name, options=options,
+            )
+            return {"success": True, "output": result["output"], "route": result["route"],
+                    "usage": result.get("usage")}
+        except Exception as exc:
+            logger.error(f"[cap.llm.generate_image] 执行失败: {exc}", exc_info=True)
             return {"success": False, "error": str(exc)}
 
     async def _cap_llm_transcribe_audio(self, plugin_id: str, capability: str, args: Dict[str, Any]) -> Any:

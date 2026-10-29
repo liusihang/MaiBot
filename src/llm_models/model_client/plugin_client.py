@@ -56,6 +56,7 @@ class PluginLLMClient(BaseClient):
             plugin_id: 目标插件 ID。
             client_type: 目标客户端类型。
         """
+        raise RuntimeError("Python provider transport retired; use the Node Pi harness")
         super().__init__(api_provider)
         self._supervisor = supervisor
         self._plugin_id = plugin_id

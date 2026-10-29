@@ -191,6 +191,7 @@ class ParticipationJudge:
                     context_factory=lambda _: context,
                     options=LLMGenerationOptions(
                         model_name=PARTICIPATION_MODEL,
+                        retain_replay=False,
                         response_format=RespFormat(RespFormatType.JSON_SCHEMA, DECISION_SCHEMA),
                     ),
                 ),

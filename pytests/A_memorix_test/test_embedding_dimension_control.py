@@ -17,13 +17,15 @@ class _FakeEmbeddingClient:
         self.natural_dimension = int(natural_dimension)
         self.requests = []
 
-    async def get_embedding(self, request):
+    async def get_embedding(self, text, *, model_name, extra_params, extra_params_replace):
+        request = SimpleNamespace(embedding_input=text, model_name=model_name, extra_params=extra_params)
+        assert extra_params_replace is True
         self.requests.append(request)
         requested_dimension = request.extra_params.get("dimensions")
         if requested_dimension is None:
             requested_dimension = request.extra_params.get("output_dimensionality")
         dimension = int(requested_dimension or self.natural_dimension)
-        return SimpleNamespace(embedding=[1.0] * dimension)
+        return SimpleNamespace(embedding=[1.0] * dimension, model_name=model_name, api_provider="provider-1")
 
 
 def _build_adapter(
@@ -55,11 +57,7 @@ def _build_adapter(
     monkeypatch.setattr(adapter, "_resolve_candidate_model_names", lambda: ["embedding-model"])
     monkeypatch.setattr(adapter, "_find_model_info", lambda model_name: model_info)
     monkeypatch.setattr(adapter, "_find_provider", lambda provider_name: provider)
-    monkeypatch.setattr(
-        api_adapter_module.client_registry,
-        "get_client_class_instance",
-        lambda api_provider, force_new=True: fake_client,
-    )
+    monkeypatch.setattr(api_adapter_module, "PiInferenceClient", lambda **kwargs: fake_client)
     adapter._last_configuration_key = adapter._dimension_cache_key()
     return adapter, fake_client
 
@@ -135,10 +133,11 @@ async def test_encode_uses_canonical_dimension_when_request_mode_is_always(monke
 
 
 @pytest.mark.asyncio
-async def test_encode_explicit_dimension_override_wins(monkeypatch):
+@pytest.mark.parametrize("client_type", ["openai", "openai_responses"])
+async def test_encode_explicit_dimension_override_wins(monkeypatch, client_type):
     adapter, fake_client = _build_adapter(
         monkeypatch,
-        client_type="openai",
+        client_type=client_type,
         configured_dimension=1024,
         effective_dimension=1024,
     )
@@ -309,7 +308,8 @@ async def test_failed_batch_finishes_inflight_calls_and_caches_successes(monkeyp
 @pytest.mark.parametrize("active", ["A", "B"])
 async def test_rebuild_identity_reuses_vector_fingerprint_and_ignores_unused_backups(monkeypatch, active):
     adapter = EmbeddingAPIAdapter(default_dimension=8)
-    candidates = ["A", "B", "C"]
+    alternate = "B" if active == "A" else "A"
+    candidates = [active, alternate, "C"]
     models = {
         name: SimpleNamespace(name=name, api_provider=f"provider-{name}", model_identifier=name, extra_params={})
         for name in candidates
@@ -321,20 +321,20 @@ async def test_rebuild_identity_reuses_vector_fingerprint_and_ignores_unused_bac
     monkeypatch.setattr(adapter, "_resolve_candidate_model_names", lambda: list(candidates))
     monkeypatch.setattr(adapter, "_find_model_info", lambda name: models[name])
     monkeypatch.setattr(adapter, "_find_provider", lambda name: providers[name])
-    monkeypatch.setattr(api_adapter_module.client_registry, "get_client_class_instance", lambda provider: object())
-    async def request(client, model_info, text, extra_params):
-        if active == "B" and model_info.name == "A":
-            raise RuntimeError("primary unavailable")
-        return SimpleNamespace(embedding=[1.0] * 8)
-    monkeypatch.setattr(adapter, "_request_with_retry", request)
+    class FakePiClient:
+        async def get_embedding(self, text, *, model_name, extra_params, extra_params_replace):
+            return SimpleNamespace(
+                embedding=[1.0] * 8, model_name=model_name, api_provider=models[model_name].api_provider,
+            )
+    monkeypatch.setattr(api_adapter_module, "PiInferenceClient", lambda **kwargs: FakePiClient())
     await adapter._get_embedding_direct("test")
     baseline = adapter.get_embedding_configuration_key()
     assert baseline == adapter.get_embedding_fingerprint()["hash"]
 
-    candidates[:] = ["A", "C", "B"]
+    candidates[:] = [active, "C", alternate]
     assert adapter.get_embedding_configuration_key() == baseline
     assert adapter.get_embedding_fingerprint()["hash"] == baseline
-    candidates[:] = ["A", "B", "C"]
+    candidates[:] = [active, alternate, "C"]
     providers[models[active].api_provider].api_key = "new"
     assert adapter.get_embedding_configuration_key() == baseline
 
@@ -352,3 +352,20 @@ async def test_rebuild_identity_reuses_vector_fingerprint_and_ignores_unused_bac
     assert new_primary != changed
     await adapter._get_embedding_direct("test")
     assert adapter.get_embedding_fingerprint()["hash"] == new_primary
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["explicit", "always", "never"])
+async def test_dimension_control_strips_nested_pi_body_without_mutating_model_config(monkeypatch, mode):
+    extra = {"body": {"dimensions": 999, "output_dimensionality": 888, "custom_flag": "keep"}}
+    adapter, fake_client = _build_adapter(
+        monkeypatch, client_type="openai", configured_dimension=7, effective_dimension=7,
+        dimension_request_mode=mode, model_extra_params=extra,
+    )
+
+    await adapter.encode("nested body")
+
+    request = fake_client.requests[-1]
+    assert request.extra_params["body"] == {"custom_flag": "keep"}
+    assert request.extra_params.get("dimensions") == (7 if mode == "always" else None)
+    assert extra["body"]["dimensions"] == 999

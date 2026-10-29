@@ -123,8 +123,13 @@ class PiSubagentService:
             )
 
     def _append(self, handle: str, event: Mapping[str, Any]) -> None:
+        # A child evidence cache is business data, never a second native model
+        # transcript. Project at write time as well as at public read time.
+        projected = self._public_event(event)
+        if projected is None:
+            return
         with self._connect() as connection:
-            connection.execute("INSERT INTO pi_child_events(handle,payload) VALUES(?,?)", (handle, _json(event)))
+            connection.execute("INSERT INTO pi_child_events(handle,payload) VALUES(?,?)", (handle, _json(projected)))
 
     def _finish(self, handle: str, status: str, result: Any, error: str = "") -> None:
         with self._connect() as connection:
@@ -152,7 +157,13 @@ class PiSubagentService:
             await asyncio.to_thread(self._append, handle, event)
 
         try:
-            result = await self.run_child(child_id, parent_session_id, task, selected, on_event)
+            raw_result = await self.run_child(child_id, parent_session_id, task, selected, on_event)
+            result = {
+                "conclusion": self._conclusion(raw_result),
+                "sources": raw_result.get("sources", []),
+                "uncertainty": raw_result.get("uncertainty"),
+                "archive_handles": raw_result.get("archiveHandles", []),
+            }
             await asyncio.to_thread(self._finish, handle, "completed", result)
         except asyncio.CancelledError:
             # Shield the durable terminal marker; no fabricated successful conclusion.
@@ -199,6 +210,8 @@ class PiSubagentService:
     def _public_event(event: Mapping[str, Any]) -> Dict[str, Any] | None:
         """Project evidence, not provider replay or private chain-of-thought."""
         event = event.get("event", event)
+        if event.get("type") in {"tool_evidence", "public_conclusion"}:
+            return {key: event.get(key, "") for key in ("type", "tool_name", "call_id", "text")}
         if event.get("type") != "message_end":
             return None
         message = event.get("message", {})

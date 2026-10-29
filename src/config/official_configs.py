@@ -824,7 +824,7 @@ class ChatConfig(ConfigBase):
         default=True,
         json_schema_extra={"label": {"zh_CN": "Pi 持续主线程", "en_US": "Persistent Pi thread", "ja_JP": "Pi 継続スレッド"}, "x-widget": "switch"},
     )
-    """使用真实 Pi Agent 维护每个会话的连续线程；需要 Node.js 和 runtime/pi_agent 依赖。"""
+    """兼容旧配置键；主线程始终使用 Pi coding-agent，不再允许切回 Python 模型编排。"""
 
     __ui_label__ = "聊天"
     __ui_order__ = 20

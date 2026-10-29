@@ -101,3 +101,19 @@ async def test_apply_profile_uses_runtime_hot_rebuild_hook():
     assert result["validation_passed"] is True
     assert plugin.applied_validate is False
     assert plugin.applied_profile["retrieval"]["top_k_final"] == 12
+
+
+@pytest.mark.asyncio
+async def test_llm_rejection_is_not_retried_with_identical_parameters(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from src.A_memorix.core.utils import retrieval_tuning_manager as module
+
+    manager = RetrievalTuningManager(_FakePlugin())
+    model = SimpleNamespace(task_config=SimpleNamespace(temperature=0.7, max_tokens=25600))
+    monkeypatch.setattr(manager, "_select_llm_model", AsyncMock(return_value=model))
+    call = AsyncMock(return_value=SimpleNamespace(success=False, error="KNOWN_BUDGET_EXCEEDED"))
+    monkeypatch.setattr(module, "generate_with_resolved_model", call)
+    with pytest.raises(RuntimeError, match="KNOWN_BUDGET_EXCEEDED"):
+        await manager._llm_call_text("same request", request_type="fixture")
+    call.assert_awaited_once()

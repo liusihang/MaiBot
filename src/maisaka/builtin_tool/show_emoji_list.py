@@ -2,7 +2,6 @@
 
 from base64 import b64encode
 from datetime import datetime
-from itertools import count
 from random import sample
 from typing import Optional
 
@@ -21,9 +20,6 @@ from src.maisaka.visual.mode_utils import resolve_enable_visual_planner
 
 from .context import BuiltinToolRuntimeContext
 from .send_emoji import _get_emoji_candidate_count, _load_emoji_bytes, _merge_emoji_tiles
-
-# 历史只存在于进程内；使用进程级单调序号，聊天切换、历史复制或裁剪后也不复用旧编号。
-_emoji_indices = count(1)
 
 
 def get_tool_spec() -> ToolSpec:
@@ -52,9 +48,10 @@ async def handle_tool(
     if not available:
         return tool_ctx.build_failure_result(invocation.tool_name, "当前表情包库中没有可用表情。")
     candidates = sample(available, min(len(available), _get_emoji_candidate_count()))
-    # 在任何 await 之前一次性分配连续编号，并发调用也不会分配到重复编号。
-    indices = [next(_emoji_indices) for _ in candidates]
     try:
+        # 整批编号先在业务存储提交；并发或重启不复用，失败拼图留下的空号也不回收。
+        emoji_hashes = await tool_ctx.allocate_emoji_candidates([emoji.file_hash for emoji in candidates])
+        indices = list(emoji_hashes)
         images = await asyncio.gather(*[_load_emoji_bytes(emoji) for emoji in candidates])
         collage = await asyncio.to_thread(_merge_emoji_tiles, list(images), indices[0])
     except Exception as exc:
@@ -74,8 +71,9 @@ async def handle_tool(
             meta=ContextItemMeta.create(timestamp=timestamp),
             parts=(ContextTextPart(text), ContextImagePart("png", b64encode(collage).decode("ascii"))),
         ),
-        emoji_hashes={index: emoji.file_hash for index, emoji in zip(indices, candidates, strict=True)},
+        emoji_hashes=emoji_hashes,
         visible_text=text,
         timestamp=timestamp,
+        session_id=tool_ctx.runtime.session_id,
     )
     return tool_ctx.build_success_result(invocation.tool_name, text, post_history_messages=[message])

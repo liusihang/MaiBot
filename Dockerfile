@@ -35,7 +35,7 @@ ENV MAIBOT_LEGACY_0X_UPGRADE_CONFIRMED=1
 ENV PATH="/MaiMBot/.venv/bin:${PATH}"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git libatomic1 libstdc++6 \
+    && apt-get install -y --no-install-recommends git libatomic1 libstdc++6 util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # Install system libraries required by Playwright Chromium. The browser binary

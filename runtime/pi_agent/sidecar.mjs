@@ -1,10 +1,11 @@
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import { PiRuntime, RuntimeError } from './runtime.mjs';
+import { createInferenceDispatcher } from './inference.mjs';
 
 /** Duplex JSONL. Requests and callbacks use separate IDs, and callbacks may settle out of order. */
 export class StdioBridge {
-  constructor({ input = process.stdin, output = process.stdout, diagnostic = process.stderr } = {}) {
+  constructor({ input = process.stdin, output = process.stdout, diagnostic = process.stderr, runtime, inference } = {}) {
     this.input = input;
     this.output = output;
     this.diagnostic = diagnostic;
@@ -12,7 +13,9 @@ export class StdioBridge {
     this.requests = new Set();
     this.nextId = 0;
     this.closed = false;
-    this.runtime = new PiRuntime((method, params, signal) => this.callback(method, params, signal));
+    this.runtime = runtime ?? new PiRuntime((method, params, signal) => this.callback(method, params, signal));
+    this.inference = inference ?? createInferenceDispatcher();
+    this.operations = new Map();
   }
 
   send(message) {
@@ -65,14 +68,22 @@ export class StdioBridge {
     }
     this.requests.add(id);
     try {
-      const result = await this.runtime.handle(method, message.params ?? {});
+      const params = message.params ?? {};
+      let result;
+      if (method.startsWith('model.')) {
+        const controller = new AbortController();
+        this.operations.set(id, controller);
+        result = await this.inference.handle(method, params, { signal: controller.signal });
+      } else result = await this.runtime.handle(method, params);
       this.send({ id, result });
     } catch (error) {
       if (!this.closed) this.send({ id, error: {
         code: error.code ?? 'RUNTIME_ERROR', message: error instanceof Error ? error.message : String(error),
+        ...(error.safeDiagnostics ? { details: error.safeDiagnostics } : {}),
       } });
     } finally {
       this.requests.delete(id);
+      this.operations.delete(id);
     }
   }
 
@@ -97,22 +108,26 @@ export class StdioBridge {
   }
 
   close() {
-    if (this.closed) return;
+    if (this.closed) return this.closePromise;
     this.closed = true;
-    this.runtime.shutdown();
+    for (const controller of this.operations.values()) controller.abort();
+    // Both lifecycles may still append terminal SDK records after cancellation.
+    // SIGTERM/EOF must wait before process exit or temporary archive cleanup.
+    this.closePromise = Promise.allSettled([this.runtime.shutdown(), this.inference.close()]);
     for (const pending of this.pending.values()) {
       pending.cleanup();
       pending.reject(new RuntimeError('TRANSPORT_CLOSED', 'Python host disconnected'));
     }
     this.pending.clear();
+    return this.closePromise;
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const bridge = new StdioBridge().start();
   for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.once(signal, () => {
-      bridge.close();
+    process.once(signal, async () => {
+      await bridge.close();
       process.exit(0);
     });
   }

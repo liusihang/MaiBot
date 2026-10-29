@@ -1,0 +1,764 @@
+"""Real coding-agent subprocess and local mock wire: no Python model callback."""
+
+from contextlib import contextmanager
+from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import asyncio
+import json
+
+import pytest
+
+from src.common.data_models.message_component_data_model import MessageSequence
+from src.core.tooling import ToolExecutionResult, ToolSpec
+from src.maisaka.context.messages import ContentContextMessage
+from src.maisaka.pi_runtime.runner import PiGroupRunner
+
+
+def history(text, identifier):
+    return ContentContextMessage(
+        raw_message=MessageSequence([]), visible_text=text, timestamp=datetime.now(), context_item_id=identifier
+    )
+
+
+def engine():
+    invoked = []
+    specs = [
+        ToolSpec(
+            name=name,
+            description=name,
+            parameters_schema={"type": "object", "properties": {"text": {"type": "string"}}},
+            provider_name="maisaka_builtin",
+        )
+        for name in ("web_search", "web_fetch", "reply")
+    ]
+
+    async def invoke(invocation, context, **kwargs):
+        invoked.append(invocation)
+        return ToolExecutionResult(invocation.tool_name, True, content="source:" + invocation.tool_name)
+
+    runtime = SimpleNamespace(
+        session_id="real-chat",
+        _chat_history=[],
+        _chat_loop_service=SimpleNamespace(
+            passive_replyer_override=None, _build_chat_system_prompt=lambda: "Stable group persona"
+        ),
+        _tool_registry=SimpleNamespace(list_tools=AsyncMock(return_value=specs), invoke=invoke),
+        set_current_action_tool_names=lambda names: None,
+        _start_planner_continuation=lambda: None,
+        _end_planner_continuation=lambda: None,
+        _agent_state="idle",
+        _STATE_RUNNING="running",
+        _enter_stop_state=lambda: None,
+        _update_stage_status=lambda *args: None,
+        _running=False,
+        _schedule_message_turn=lambda: None,
+        _has_pending_messages=lambda: False,
+        _trigger_pi_source_learning=AsyncMock(),
+        expand_message_id_aliases=lambda args: args,
+    )
+    return SimpleNamespace(
+        _runtime=runtime,
+        _build_tool_availability_context=lambda: None,
+        _build_tool_execution_context=lambda _: None,
+        _record_tool_execution_effects=AsyncMock(),
+        _build_tool_result_media_messages=lambda call, result: [],
+    ), invoked
+
+
+@contextmanager
+def wire_server(calls=()):
+    requests = []
+    scripted = iter(calls)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append(request)
+            call = next(scripted, None)
+            if callable(call):
+                call = call(request, requests)
+            delta = {"content": call["text"] if isinstance(call, dict) else "done"}
+            finish = "stop"
+            if call and not isinstance(call, dict):
+                name, arguments = call
+                delta = {
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call-" + str(len(requests)),
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(arguments)},
+                        }
+                    ]
+                }
+                finish = "tool_calls"
+            data = [
+                {
+                    "id": "answer",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "mock-model",
+                    "choices": [{"index": 0, "delta": {"role": "assistant", **delta}, "finish_reason": None}],
+                },
+                {
+                    "id": "answer",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "mock-model",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                },
+            ]
+            body = ("".join("data: " + json.dumps(item) + "\n\n" for item in data) + "data: [DONE]\n\n").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    worker = Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    config = {
+        "api_providers": [
+            {
+                "name": "mock",
+                "client_type": "openai",
+                "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+                "api_key": "test",
+            }
+        ],
+        "models": [
+            {
+                "name": "mock",
+                "model_type": "llm",
+                "model_identifier": "mock-model",
+                "api_provider": "mock",
+                "max_tokens": 1000,
+            }
+        ],
+        "model_task_config": {name: {"model_list": ["mock"], "max_tokens": 1000} for name in ("planner",)},
+    }
+    try:
+        yield config, requests
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join()
+
+
+@pytest.mark.asyncio
+async def test_real_harness_search_read_reply_stable_wire_prefix(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([("web_search", {}), ("web_fetch", {}), ("reply", {"text": "main exact text"})]) as (
+        config,
+        requests,
+    ):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        host._runtime._chat_history.append(history("first", "m1"))
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            assert [item.tool_name for item in invoked] == ["web_search", "web_fetch", "reply"]
+            assert invoked[-1].arguments["text"] == "main exact text"
+            before = requests[-1]["messages"]
+            host._runtime._chat_history.append(history("second", "m2"))
+            await runner.run([])
+            assert requests[-1]["messages"][: len(before)] == before
+            assert not hasattr(runner.ledger, "snapshot")
+            assert not hasattr(runner, "provider")
+            with pytest.raises(ValueError, match="does not implement model"):
+                await runner._callback("model", {"sessionId": runner.session_id})
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_ignored_messages_persist_in_real_sdk_and_restart_once(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server() as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        host._runtime._chat_history.append(history("ignored unique message", "ignored"))
+        first = PiGroupRunner(host, data_dir=tmp_path)
+        await first.ingest()
+        assert not requests
+        await first.close()
+        second = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await second.run([])
+            wire = json.dumps(requests[0]["messages"])
+            assert wire.count("ignored unique message") == 1
+        finally:
+            await second.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["exception", "partial_send"])
+async def test_actual_registry_unknown_send_stops_model_and_restart(monkeypatch, tmp_path, failure):
+    from src.core.tooling import ToolRegistry
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    effects = []
+
+    class Provider:
+        provider_name = "maisaka_builtin"
+        provider_type = "builtin"
+
+        async def list_tools(self, context):
+            return [
+                ToolSpec(
+                    name="reply",
+                    description="reply",
+                    parameters_schema={"type": "object"},
+                    provider_name=self.provider_name,
+                    provider_type=self.provider_type,
+                )
+            ]
+
+        async def invoke(self, invocation, context):
+            effects.append(invocation.call_id)
+            if failure == "exception":
+                raise OSError("fake send happened, acknowledgement lost")
+            return ToolExecutionResult(
+                "reply", False, error_message="second segment failed", metadata={"sent_message_ids": ["sent-1"]}
+            )
+
+    with wire_server([("reply", {"text": "message"})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        registry = ToolRegistry()
+        registry.register_provider(Provider())
+        host._runtime._tool_registry = registry
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            with pytest.raises(RuntimeError):
+                await runner.run([])
+            assert effects == ["call-1"]
+            assert len(requests) == 1
+            receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            assert receipt.status == "unknown"
+            if failure == "partial_send":
+                assert receipt.result["metadata"]["sent_message_ids"] == ["sent-1"]
+        finally:
+            await runner.close()
+        restored = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            with pytest.raises(RuntimeError):
+                await restored.run([])
+            assert effects == ["call-1"] and len(requests) == 1
+        finally:
+            await restored.close()
+
+
+def original_source_message():
+    from src.chat.message_receive.message import SessionMessage
+    from src.common.data_models.mai_message_data_model import GroupInfo, MessageInfo, UserInfo
+    from src.common.data_models.message_component_data_model import (
+        AtComponent,
+        ImageComponent,
+        ReplyComponent,
+        TextComponent,
+    )
+
+    message = SessionMessage(message_id="source-immutable", timestamp=datetime(2026, 1, 2), platform="qq")
+    message.session_id = "real-chat"
+    message.message_info = MessageInfo(UserInfo("sender", "old alias"), GroupInfo("group-id", "old group"))
+    message.raw_message = MessageSequence(
+        [
+            TextComponent("original text"),
+            ImageComponent(binary_hash="image-hash", content="old generated image description", binary_data=b"fixture"),
+            AtComponent("target", "old target alias"),
+            ReplyComponent("quoted-message", target_message_content="old quote preview"),
+        ]
+    )
+    return message
+
+
+@pytest.mark.asyncio
+async def test_record_pending_uses_original_source_identity_not_mutable_rendering(monkeypatch, tmp_path):
+    from copy import deepcopy
+
+    from src.maisaka.pi_runtime.business_store import LedgerConflict
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server() as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        host._build_history_message = AsyncMock(return_value=history("frozen original source", "render-id"))
+        source = original_source_message()
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        await runner.record_pending(source)
+        await runner.record_pending(source)
+        assert runner.bridge._process is None
+        assert await runner.pending_source_ids() == [source.message_id]
+        assert host._build_history_message.await_count == 1
+
+        derived = deepcopy(source)
+        derived.message_info.user_info.user_nickname = "new alias"
+        derived.message_info.group_info.group_name = "new group name"
+        derived.raw_message.components[1].content = "new generated image description"
+        derived.raw_message.components[2].target_user_nickname = "new target alias"
+        derived.raw_message.components[3].target_message_content = "new quote preview"
+        derived.received_at = datetime.now()
+        await runner.record_pending(derived)
+        assert host._build_history_message.await_count == 1
+        mutations = [
+            lambda item: setattr(item.raw_message.components[0], "text", "different original text"),
+            lambda item: setattr(item.raw_message.components[1], "binary_hash", "different-image"),
+            lambda item: setattr(item.raw_message.components[2], "target_user_id", "another-target"),
+            lambda item: setattr(item.raw_message.components[3], "target_message_id", "another-quote"),
+            lambda item: setattr(item.message_info.user_info, "user_id", "another-sender"),
+        ]
+        for mutate in mutations:
+            changed = deepcopy(source)
+            mutate(changed)
+            with pytest.raises(LedgerConflict, match="original content"):
+                await runner.record_pending(changed)
+        await runner.close()
+        restored = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await restored.run([])
+            assert json.dumps(requests[0]["messages"]).count("frozen original source") == 1
+            await restored.record_pending(derived)
+            assert await restored.pending_source_ids() == []
+            assert host._build_history_message.await_count == 1
+        finally:
+            await restored.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lose_ack", [False, True])
+async def test_generic_emoji_media_receipt_survives_lost_ack_and_restart(monkeypatch, tmp_path, lose_ack):
+    from src.llm_models.payload_content.context_item import (
+        ContextImagePart,
+        ContextItemMeta,
+        ContextTextPart,
+        UserMessageItem,
+    )
+    from src.maisaka.context.emoji_candidates import EmojiCandidateMessage
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    image_data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+    with wire_server([("web_fetch", {})]) as (config, requests):
+        config["models"][0]["visual"] = True
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, effects = engine()
+
+        async def invoke(invocation, context, **kwargs):
+            effects.append(invocation)
+            candidate = EmojiCandidateMessage(
+                item=UserMessageItem(
+                    ContextItemMeta.create(), (ContextTextPart("durable collage"), ContextImagePart("png", image_data))
+                ),
+                emoji_hashes={1000000000: "emoji-hash"},
+                visible_text="durable collage",
+                timestamp=datetime.now(),
+                session_id=host._runtime.session_id,
+            )
+            return ToolExecutionResult("web_fetch", True, content="collage receipt", post_history_messages=[candidate])
+
+        host._runtime._tool_registry.invoke = invoke
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        original_send = runner.bridge._send
+        lost = False
+
+        async def lose_completed_tool_ack(payload):
+            nonlocal lost
+            result = payload.get("result", {})
+            if not lost and isinstance(result, dict) and result.get("details", {}).get("hostReceipt"):
+                lost = True
+                raise OSError("fixture acknowledgement lost after durable receipt")
+            await original_send(payload)
+
+        if lose_ack:
+            monkeypatch.setattr(runner.bridge, "_send", lose_completed_tool_ack)
+        try:
+            if lose_ack:
+                with pytest.raises(RuntimeError):
+                    await runner.run([])
+            else:
+                await runner.run([])
+            receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            assert receipt.status == "succeeded"
+            assert receipt.result["content"][-1] == {"type": "image", "data": image_data, "mimeType": "image/png"}
+            assert len(effects) == 1 and len(requests) == (1 if lose_ack else 2)
+            before = requests[-1]["messages"]
+        finally:
+            await runner.close()
+        restored = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await restored.run([])
+            assert requests[-1]["messages"][: len(before)] == before
+            assert len(effects) == 1
+            assert json.dumps(requests[-1]["messages"]).count(image_data) == 1
+            state = await restored.bridge.request("state", sessionId=restored.session_id)
+            assert state["unresolvedToolCalls"] == []
+            entries = [
+                json.loads(line)
+                for file in (tmp_path / "sessions").rglob("*.jsonl")
+                for line in file.read_text().splitlines()
+            ]
+            results = [
+                entry["message"]
+                for entry in entries
+                if entry.get("type") == "message"
+                and entry.get("message", {}).get("role") == "toolResult"
+                and entry["message"].get("toolCallId") == "call-1"
+            ]
+            image_part = {"type": "image", "data": image_data, "mimeType": "image/png"}
+            if lose_ack:
+                # Keep the original SDK error result unchanged; reconcile the
+                # already-known receipt append-only rather than rewriting history.
+                reconciled = [entry for entry in entries if entry.get("customType") == "maibot.receipt_reconciled"]
+                assert len(reconciled) == 1 and image_part in reconciled[0]["content"]
+                assert all(result["isError"] is True for result in results)
+            else:
+                assert len(results) == 1 and image_part in results[0]["content"]
+        finally:
+            await restored.close()
+
+
+@pytest.mark.asyncio
+async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads(monkeypatch, tmp_path):
+    from src.maisaka.pi_runtime.evidence import DurableEvidenceStore
+    from src.maisaka.tool_result_store import ToolResultStore
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+
+    def read_delegation(request, requests):
+        tool_outputs = [message["content"] for message in request["messages"] if message.get("role") == "tool"]
+        delegation = next(json.loads(text) for text in tool_outputs if "pi-child-" in text)
+        return "read_subagent", {"handle": delegation["handle"]}
+
+    with wire_server(
+        [
+            ("subagent", {"task": "child-only research task", "tools": ["web_fetch", "reply"]}),
+            ("web_fetch", {}),
+            {"text": "child-only source-grounded conclusion"},
+            read_delegation,
+            None,
+        ]
+    ) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, effects = engine()
+        source_store = ToolResultStore()
+
+        async def invoke(invocation, context, **kwargs):
+            effects.append(invocation)
+            handle = source_store.save(invocation.session_id, "web_fetch", "child original evidence only")
+            return ToolExecutionResult("web_fetch", True, content="child preview only", metadata={"result_id": handle})
+
+        host._runtime._tool_registry.invoke = invoke
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.ensure_initialized()
+            runner.evidence = DurableEvidenceStore(tmp_path / "evidence.sqlite3", source_store)
+            await runner.run([])
+            assert [item.tool_name for item in effects] == ["web_fetch"]
+            assert len(requests) == 5
+            # Existing business sub-agent requests use the planner task mapping;
+            # ModelTaskConfig has no independent "sub_agent" task to invent.
+            assert set(config["model_task_config"]) == {"planner"}
+            assert requests[1]["model"] == requests[0]["model"] == "mock-model"
+            assert {item["function"]["name"] for item in requests[1]["tools"]} == {"web_fetch"}
+            assert "child-only research task" in json.dumps(requests[1]["messages"])
+            assert "child preview only" not in json.dumps(requests[3]["messages"])
+            assert "child preview only" in json.dumps(requests[4]["messages"])
+            receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            delegation = json.loads(receipt.result["content"][0]["text"])
+            assert delegation["conclusion"] == "child-only source-grounded conclusion"
+            [source] = delegation["sources"]
+            assert source["kind"] == "host_tool_receipt"
+            detail = await runner.subagents.read(runner.session_id, delegation["handle"])
+            assert "child preview only" in detail["text"]
+            raw = await runner.evidence.read(runner.session_id, source["result_id"])
+            assert "child original evidence only" in json.dumps(raw)
+            with pytest.raises(PermissionError):
+                await runner.subagents.read("other-group", delegation["handle"])
+            with pytest.raises(PermissionError):
+                await runner.evidence.read("other-group", source["result_id"])
+        finally:
+            await runner.close()
+        restored = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await restored._ensure_storage()
+            assert (await restored.subagents.read(restored.session_id, delegation["handle"]))["text"] == detail["text"]
+            assert await restored.evidence.read(restored.session_id, source["result_id"]) == raw
+        finally:
+            await restored.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name, arguments",
+    [
+        ("read_subagent", {"handle": "invalid-child-handle"}),
+        ("read_tool_result", {"result_id": "rdeadbeef"}),
+        ("read_thread_archive", {"event_ids": ["invalid-archive-entry"]}),
+    ],
+)
+async def test_bad_evidence_handle_is_known_failed_result_not_unknown_effect(monkeypatch, tmp_path, name, arguments):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([(name, arguments)]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            assert receipt.status == "failed" and receipt.result["isError"] is True
+            assert len(requests) == 2 and not invoked
+            await runner._db("assert_no_unresolved_executions", runner.session_id)
+            assert (await runner.bridge.request("state", sessionId=runner.session_id))["unresolvedToolCalls"] == []
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["schema", "provider"])
+async def test_real_restored_frozen_tool_contract_rebinding_fails_closed(monkeypatch, tmp_path, change):
+    with wire_server() as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        host._runtime._chat_history.append(history("persist before contract check", "one"))
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        await runner.ingest()
+        await runner.close()
+        spec = host._runtime._tool_registry.list_tools.return_value[0]
+        if change == "schema":
+            spec.parameters_schema = {"type": "object", "required": ["new-argument"]}
+        else:
+            spec.provider_name = "different-owner"
+        restored = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            with pytest.raises(RuntimeError, match="migration|contract|differ"):
+                await restored.ensure_initialized()
+            assert not invoked and not requests
+        finally:
+            await restored.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["schema", "provider", "removed"])
+async def test_real_hot_tool_rebinding_rejects_before_any_effect(monkeypatch, tmp_path, change):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([("web_search", {})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.ensure_initialized()
+            specs = host._runtime._tool_registry.list_tools.return_value
+            if change == "schema":
+                specs[0].parameters_schema = {"type": "object", "required": ["changed"]}
+            elif change == "provider":
+                specs[0].provider_name = "different-owner"
+            else:
+                specs.pop(0)
+            with pytest.raises(RuntimeError):
+                await runner.run([])
+            assert not invoked and len(requests) == 1
+            assert await runner._db("lookup_tool_execution", runner.session_id, "call-1") is None
+            await runner._db("assert_no_unresolved_executions", runner.session_id)
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_actual_registry_revalidates_contract_after_runner_await(monkeypatch, tmp_path):
+    from src.core.tooling import ToolRegistry
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    effects = []
+
+    class Provider:
+        provider_name = "maisaka_builtin"
+        provider_type = "builtin"
+        count = 0
+
+        async def list_tools(self, context):
+            self.count += 1
+            await asyncio.sleep(0)
+            schema = {"type": "object"} if self.count <= 2 else {"type": "object", "required": ["changed"]}
+            return [
+                ToolSpec(
+                    name="reply",
+                    description="reply",
+                    parameters_schema=schema,
+                    provider_name=self.provider_name,
+                    provider_type=self.provider_type,
+                )
+            ]
+
+        async def invoke(self, invocation, context):
+            effects.append(invocation)
+            return ToolExecutionResult("reply", True, content="must not execute")
+
+    with wire_server([("reply", {"text": "do not send"})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        registry = ToolRegistry()
+        registry.register_provider(Provider())
+        host._runtime._tool_registry = registry
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            assert not effects and len(requests) == 2
+            receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            assert receipt.status == "failed" and receipt.result["isError"] is True
+            await runner._db("assert_no_unresolved_executions", runner.session_id)
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_real_web_provider_child_grants_and_main_reply_schema():
+    from src.maisaka.builtin_tool.reply import get_tool_spec
+    from src.maisaka.pi_runtime.runner import child_tool_allowed, pi_tool
+    from src.web_search.provider import WebSearchToolProvider
+
+    config = SimpleNamespace(
+        enabled=True, search="search", fetch="fetch", services={"search": SimpleNamespace(adapter="anysearch")}
+    )
+    provider = WebSearchToolProvider(None, lambda: config)
+    specs = await provider.list_tools()
+    assert {spec.name for spec in specs} == {"web_search", "web_fetch"}
+    assert all(child_tool_allowed(spec) for spec in specs)
+    assert pi_tool(specs[0].to_llm_definition())["parameters"]["required"] == ["query"]
+    specs[0].annotation.read_only = False
+    assert not child_tool_allowed(specs[0])
+    specs[1].provider_name = "untrusted-provider"
+    assert not child_tool_allowed(specs[1])
+    reply = get_tool_spec()
+    assert not child_tool_allowed(reply)
+    converted = pi_tool(reply.to_llm_definition())
+    assert converted["parameters"]["required"] == ["msg_id", "text"]
+    assert converted["parameters"]["additionalProperties"] is False
+
+
+def test_child_request_kind_keeps_real_chat_service_model_task_mapping():
+    from src.maisaka.chat_loop_service import MaisakaChatLoopService
+    from src.config.model_configs import ModelTaskConfig
+
+    service = SimpleNamespace(_model_task_name="planner")
+    assert MaisakaChatLoopService._resolve_model_task_name(service, "sub_agent") == "planner"
+    assert "sub_agent" not in ModelTaskConfig.model_fields
+
+
+@pytest.mark.asyncio
+async def test_host_explicit_sdk_compaction_and_archive_remain_reachable(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server() as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        host._runtime._chat_history.append(history("original archive source", "source-1"))
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            before = await runner.bridge.request("state", sessionId=runner.session_id)
+            result = await runner.compact(summary="explicit useful summary")
+            assert result["compacted"]
+            assert result["revision"] > before["revision"]
+            archived = await runner.bridge.request(
+                "read_archive",
+                sessionId=runner.session_id,
+                eventIds=[result["compaction"]["archiveHandle"]],
+                limit=12000,
+            )
+            assert "original archive source" in json.dumps(archived)
+            await runner.run([])
+            wire = json.dumps(requests[-1])
+            assert "explicit useful summary" in wire
+            assert "original archive source" not in wire
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_high_watermark_uses_real_sdk_summary_and_failed_batch_is_not_retried(monkeypatch, tmp_path):
+    from src.config.config import global_config
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    monkeypatch.setattr(global_config.chat, "context_visible_char_high_watermark", 10000)
+    with wire_server([{"text": "old main answer"}, {"text": "real summary"}, {"text": "main answer"}]) as (
+        config,
+        requests,
+    ):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        host._runtime._chat_history.append(history("unique-source-" + "x" * 11000, "source-long"))
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            assert len(requests) == 1  # First unprocessed batch must never be summarized away.
+            host._runtime._chat_history.append(history("new request preserved verbatim", "new-tail"))
+            await runner.run([])
+            assert len(requests) == 3
+            assert "unique-source-" in json.dumps(requests[1])
+            assert "real summary" in json.dumps(requests[2])
+            assert "new request preserved verbatim" in json.dumps(requests[2])
+            assert "unique-source-" not in json.dumps(requests[2])
+            host._runtime._chat_history.append(history("z" * 11000, "next-long"))
+            await runner.ingest()
+            before = await runner.bridge.request("state", sessionId=runner.session_id)
+            original = runner.bridge.request
+            failed_calls = []
+
+            async def request(method, **params):
+                if method == "compact":
+                    failed_calls.append(params)
+                    raise RuntimeError("summary unavailable")
+                return await original(method, **params)
+
+            monkeypatch.setattr(runner.bridge, "request", request)
+            with pytest.raises(RuntimeError, match="summary unavailable"):
+                await runner.run([])
+            with pytest.raises(RuntimeError, match="unchanged history"):
+                await runner.run([])
+            assert len(failed_calls) == 1
+            after = await original("state", sessionId=runner.session_id)
+            assert after["archive"] == before["archive"]
+            assert len(requests) == 3
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_source_learning_is_independent_of_participation_and_sdk_compaction(monkeypatch, tmp_path):
+    from types import MethodType
+    from src.common.data_models.message_component_data_model import TextComponent
+    from src.maisaka.context.messages import SessionBackedMessage
+    from src.maisaka.runtime import MaisakaHeartFlowChatting
+
+    source = original_source_message()
+    source.raw_message = MessageSequence([TextComponent("real learning source")])
+    message = SessionBackedMessage.from_session_message(
+        source, raw_message=source.raw_message, visible_text="real learning source"
+    )
+    with wire_server() as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        host._runtime._pi_learning_source_ids = set()
+        host._runtime._trigger_trimmed_history_learning = AsyncMock()
+        host._runtime._trigger_pi_source_learning = MethodType(
+            MaisakaHeartFlowChatting._trigger_pi_source_learning, host._runtime
+        )
+        host._runtime._chat_history.extend([message, history("not a learning source", "reference-like")])
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.ingest()
+            await runner.ingest()
+            host._runtime._trigger_trimmed_history_learning.assert_awaited_once_with([message])
+            assert requests == []  # Neither Luna decision nor main model/compaction is needed.
+            assert await runner.pending_source_ids() == []
+        finally:
+            await runner.close()

@@ -1,4 +1,4 @@
-"""每个 Focus 共享组唯一的前台 Planner；聊天服务保持独立归属。"""
+"""Focus 只协调就绪、等待与目标调度；每个聊天独占自己的 Pi 主会话。"""
 
 from __future__ import annotations
 
@@ -32,7 +32,6 @@ from src.maisaka.context.messages import (
 from src.maisaka.context.emoji_candidates import EmojiCandidateMessage
 from src.maisaka.context.compaction import ContextSummaryMessage, build_context_summary
 from src.maisaka.context.post_processor import process_chat_history_after_cycle
-from src.maisaka.mode_policy import build_consecutive_wait_reminders
 from src.maisaka.monitor.events import emit_flow_step, emit_planner_snapshot
 from src.maisaka.tool_result_condenser import condense_tool_result, should_condense_tool_result
 
@@ -299,7 +298,9 @@ class FocusGroupRuntime:
             )
         )
 
-    async def unprocessed_messages(self, session_id: str) -> List[SessionMessage]:
+    async def unprocessed_messages(
+        self, session_id: str, *, through_sequence: Optional[int] = None
+    ) -> List[SessionMessage]:
         """分组变更只交接未判断的真实输入，不搬运旧组思考或跨聊天摘要。"""
         entries = [*self.entries, *self._pending.get(session_id, [])]
         records = sorted(
@@ -308,6 +309,7 @@ class FocusGroupRuntime:
                 for entry in entries
                 for sequence, message_id in entry.inputs.get(session_id, [])
                 if sequence > self._considered.get(session_id, 0)
+                and (through_sequence is None or sequence <= through_sequence)
             }
         )
         runtime = self.members[session_id]
@@ -319,6 +321,8 @@ class FocusGroupRuntime:
                 if not stored:
                     raise RuntimeError(f"Focus 待处理消息不存在：session_id={session_id} message_id={message_id}")
                 message = stored[0]
+            if message.session_id != session_id:
+                raise PermissionError("Focus 输入来源不属于目标聊天")
             messages.append(message)
         return messages
 
@@ -445,7 +449,7 @@ class FocusGroupRuntime:
             self._queue_entry(
                 sid,
                 ReferenceMessage(
-                    content=f"session_id={sid} 发起的整组等待已结束：{reason}。请结合所有聊天的新消息继续判断。",
+                    content=f"session_id={sid} 发起的整组等待已结束：{reason}。请结合本聊天的新消息继续判断。",
                     timestamp=datetime.now(),
                     remaining_uses_value=None,
                     display_prefix="[Focus 等待结束]",
@@ -493,72 +497,67 @@ class FocusGroupRuntime:
             await self.checkpoint()
 
     async def _run_turn(self) -> None:
-        from src.maisaka.runtime import MAX_INTERNAL_ROUNDS
+        """按就绪水位调度隔离的 Pi 会话，不再组装共享模型上下文或执行第二套工具循环。"""
+        self._take_ready_inputs()
+        # 只冻结已经结束各自防抖的输入。准备来源、参考或模型执行期间的新
+        # 到达者保留在下一批；不能因另一个聊天已就绪而越过自己的防抖边界。
+        covered: Dict[str, int] = {}
+        first_sequence: Dict[str, int] = {}
+        for entry in self.entries:
+            for sid, sequence in entry.progress.items():
+                if sid not in self.members or sequence <= self._considered.get(sid, 0):
+                    continue
+                covered[sid] = max(covered.get(sid, 0), sequence)
+                first_sequence[sid] = min(first_sequence.get(sid, sequence), sequence)
+        generation = self._generation
+        for sid in sorted(covered, key=lambda key: (first_sequence[key], key)):
+            if self._closed or self._wait_until is not None or generation != self._generation:
+                return
+            member = self.members.get(sid)
+            if member is None or not self.is_member_valid(member):
+                continue
+            watermark = covered[sid]
+            source_messages = await self.unprocessed_messages(sid, through_sequence=watermark)
+            runner = member._reasoning_engine._get_pi_runner()
+            # 恢复旧 Focus 调度检查点时仍从真实聊天消息重建业务输入；不把
+            # 旧共享 assistant、签名、工具协议或跨聊天摘要作为新会话历史。
+            for message in source_messages:
+                await runner.record_pending(message)
+            from src.maisaka.pi_runtime.runner import history_identity
 
-        for _ in range(MAX_INTERNAL_ROUNDS):
-            if self._closed or self._wait_until is not None:
-                return
-            self._take_ready_inputs()
-            await self._compact()
-            await self.tools.refresh()
-            generation = self._generation
-            references = await self._build_references()
-            # 整理参考信息期间到达的就绪输入也接入本次请求；请求发出后使用固定快照。
-            self._take_ready_inputs()
-            related = set(self.members)
-            covered = [(sid, sequence) for entry in self.entries for sid, sequence in entry.progress.items()]
-            history = self.history
-            self._cycle += 1
-            logical_turn_id = uuid.uuid4().hex
-            self._set_stage("Planner", f"汇合 {len(self.members)} 个聊天，等待模型响应")
-            started = time.time()
-            self._planner_started_at = started
-            response = await self._service.chat_loop_step(
-                history,
-                tool_definitions=self.tools.definitions(),
-                injected_user_messages=[self._roster(), self.tools.deferred_notice(), *references],
-                tail_user_messages=build_consecutive_wait_reminders(self._consecutive_waits),
-                max_context_size=max(self.max_context_size, sum(message.count_in_context for message in history) + 1),
-                logical_turn_id=logical_turn_id,
-            )
-            self._planner_ended_at = time.time()
-            if generation != self._generation or self._closed:
-                self._service.planner_request_snapshot = None
-                return
-            # 有效模型响应确认本次快照覆盖的消息；工具成功与否单独记录，不能误认为已回复。
-            for sid, sequence in covered:
-                self._considered[sid] = max(self._considered.get(sid, 0), sequence)
+            existing = {history_identity(message) for message in member._chat_history if message.role == "user"}
             for entry in self.entries:
-                entry.inputs = {
-                    sid: [
-                        (sequence, message_id)
-                        for sequence, message_id in records
-                        if sequence > self._considered.get(sid, 0)
-                    ]
-                    for sid, records in entry.inputs.items()
-                }
-            batch = FocusContextEntry(list(response.raw_messages), related)
-            self.entries.append(batch)
-            await self.checkpoint()
-            await self._emit_response(
-                response,
-                [],
-                started,
-                False,
-                event_type="planner.progress",
-                active_tool_call_id=response.tool_calls[0].call_id if response.tool_calls else "",
-            )
-            monitor_tools, paused = await self._execute_tools(response, batch, logical_turn_id, generation)
-            if self._sent:
-                self.entries.extend(self._sent)
-                self._sent.clear()
-            await self._emit_response(response, monitor_tools, started, paused)
-            await self.checkpoint()
-            if paused or not response.tool_calls:
-                if self._wait_until is None:
-                    self._consecutive_waits = 0
+                sequence = entry.progress.get(sid, 0)
+                if (entry.session_ids != {sid} or entry.inputs.get(sid)
+                        or not self._considered.get(sid, 0) < sequence <= watermark):
+                    continue
+                for message in entry.messages:
+                    if message.role != "user" or isinstance(message, ContextSummaryMessage):
+                        continue
+                    identity = history_identity(message)
+                    if identity is not None and identity not in existing:
+                        member._chat_history.append(message)
+                        existing.add(identity)
+            if self._closed or generation != self._generation or not self.is_member_valid(member):
                 return
-        logger.info("Focus 达到本轮内部思考上限: scope=%s", self.scope_id)
+            self._cycle += 1
+            self._state = "running"
+            member._agent_state = member._STATE_RUNNING
+            member._update_stage_status("Pi 主会话", "Focus 调度本聊天；其他聊天上下文保持隔离")
+            await runner.run(source_messages)
+            # 仅成功完成的这个聊天水位可确认。取消、未知工具结果、失效成员
+            # 或失败都会留住原始业务输入；另一个聊天不会被顺带确认。
+            if self._closed or generation != self._generation or not self.is_member_valid(member):
+                return
+            self._considered[sid] = max(self._considered.get(sid, 0), watermark)
+            for entry in self.entries:
+                if sid in entry.inputs:
+                    entry.inputs[sid] = [
+                        (sequence, message_id) for sequence, message_id in entry.inputs[sid]
+                        if sequence > self._considered[sid]
+                    ]
+            await self.checkpoint()
+
 
     async def _build_references(self) -> List[str]:
         """沿用各聊天的自动记忆/人物注入，并为每份参考信息标明真实来源。"""

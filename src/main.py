@@ -326,6 +326,7 @@ async def main() -> None:
         from src.plugin_runtime.integration import get_plugin_runtime_manager
         from src.services.expression_vector_service import expression_vector_service
         from src.services.memory_flow_service import memory_automation_service
+        from src.services.pi_harness.client import get_harness_client
 
         emoji_manager.shutdown()
         await image_manager.shutdown()
@@ -336,6 +337,7 @@ async def main() -> None:
         await get_plugin_runtime_manager().stop()
         await async_task_manager.stop_and_wait_all_tasks()
         await get_mcp_service().close()
+        await get_harness_client().close()
         await config_manager.stop_file_watcher()
         set_main_loop(None)
 

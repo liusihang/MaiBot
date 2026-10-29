@@ -7,7 +7,7 @@ import asyncio
 import re
 
 from src.chat.utils.utils import is_bot_self
-from src.common.data_models.llm_service_data_models import LLMResponseResult
+from src.common.data_models.llm_service_data_models import LLMGenerationOptions, LLMResponseResult
 from src.common.logger import get_logger
 from src.config.config import global_config
 from src.llm_models.payload_content.context_item import ContextItem, ContextItemBuilder, RoleType
@@ -275,6 +275,7 @@ class JargonLearner:
             learning_messages = self._build_multi_learning_messages(source_items, prompt)
             generation_result = await jargon_learn_model.generate_response_with_context(
                 lambda _client: learning_messages,
+                options=LLMGenerationOptions(retain_replay=False),
                 session_id=learning_session_id,
             )
             self._log_learning_context_preview(

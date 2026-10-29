@@ -1,13 +1,14 @@
 """LLM 服务层。
 
 该模块负责在宿主侧收口统一的 LLM 服务请求模型，并将其转发到
-`src.llm_models` 中的底层请求调度器。
+Node Pi coding-agent harness；Python 不再执行模型 Provider 网络请求。
 """
 
 from dataclasses import replace
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Tuple
 
+import asyncio
 import hashlib
 import inspect
 import json
@@ -24,6 +25,7 @@ from src.common.data_models.llm_service_data_models import (
     PromptInput,
     PromptMessage,
 )
+from src.config.model_configs import TaskConfig
 from src.common.logger import get_logger
 from src.common.utils.utils_image import ImageUtils
 from src.llm_models.model_client.base_client import BaseClient, ResponseRequest
@@ -43,7 +45,7 @@ from src.llm_models.payload_content.context_item import (
     get_item_text,
 )
 from src.llm_models.payload_content.tool_option import ToolCall
-from src.llm_models.utils_model import LLMOrchestrator
+from src.services.pi_harness.inference import PiInferenceClient
 from src.services.llm_cache_stats import record_llm_cache_usage
 from src.services.service_task_resolver import (
     get_available_models as _get_available_models,
@@ -65,7 +67,10 @@ class LLMServiceClient:
     - `transcribe_audio`
     """
 
-    def __init__(self, task_name: str, request_type: str = "", session_id: str = "") -> None:
+    def __init__(
+        self, task_name: str, request_type: str = "", session_id: str = "", *,
+        task_config_override: TaskConfig | None = None, model_override: str | None = None,
+    ) -> None:
         """初始化 LLM 服务门面。
 
         Args:
@@ -75,10 +80,12 @@ class LLMServiceClient:
         self.task_name = _resolve_task_name(task_name)
         self.request_type = request_type
         self.session_id = str(session_id or "").strip()
-        self._orchestrator = LLMOrchestrator(
+        self._inference = PiInferenceClient(
             task_name=self.task_name,
             request_type=request_type,
             session_id=self.session_id,
+            task_config_override=task_config_override,
+            model_override=model_override,
         )
 
     def _resolve_effective_session_id(self, session_id: str = "") -> str:
@@ -288,7 +295,7 @@ class LLMServiceClient:
             tool_options=active_options.tool_options,
             response_format=active_options.response_format,
         )
-        result = await self._orchestrator.generate_response_async(
+        result = await self._inference.generate_response_async(
             prompt=prompt,
             temperature=active_options.temperature,
             max_tokens=active_options.max_tokens,
@@ -298,6 +305,7 @@ class LLMServiceClient:
             raise_when_empty=active_options.raise_when_empty,
             interrupt_flag=active_options.interrupt_flag,
             force_stream_mode=active_options.force_stream_mode,
+            retain_replay=active_options.retain_replay if active_options.retain_replay is not None else False,
             session_id=self._resolve_effective_session_id(session_id),
         )
         self._record_cache_stats(result, prompt_text=prompt_text, session_id=session_id)
@@ -305,7 +313,7 @@ class LLMServiceClient:
 
     async def generate_response_from_snapshot(self, snapshot: ResponseRequest) -> LLMResponseResult:
         """复用已发送的模型、参数和工具定义，不重新选择任务默认模型。"""
-        result = await self._orchestrator.generate_response_from_snapshot_async(snapshot)
+        result = await self._inference.generate_response_from_snapshot_async(snapshot)
         self._record_cache_stats(result, prompt_text=None, session_id=self.session_id)
         return result
 
@@ -344,7 +352,7 @@ class LLMServiceClient:
             )
             return context_items
 
-        result = await self._orchestrator.generate_response_with_context_async(
+        result = await self._inference.generate_response_with_context_async(
             context_factory=cache_stats_context_factory,
             temperature=active_options.temperature,
             max_tokens=active_options.max_tokens,
@@ -354,6 +362,7 @@ class LLMServiceClient:
             raise_when_empty=active_options.raise_when_empty,
             interrupt_flag=active_options.interrupt_flag,
             force_stream_mode=active_options.force_stream_mode,
+            retain_replay=active_options.retain_replay if active_options.retain_replay is not None else True,
             session_id=self._resolve_effective_session_id(session_id),
         )
         self._record_cache_stats(result, prompt_text=prompt_text_holder.get("prompt_text"), session_id=session_id)
@@ -381,7 +390,8 @@ class LLMServiceClient:
         """
         active_options = self._normalize_image_options(options)
         original_image_base64_size = len(image_base64)
-        image_base64, image_format, resized_for_model = ImageUtils.normalize_image_base64_for_model(
+        image_base64, image_format, resized_for_model = await asyncio.to_thread(
+            ImageUtils.normalize_image_base64_for_model,
             image_base64,
             image_format,
         )
@@ -415,13 +425,14 @@ class LLMServiceClient:
             ensure_ascii=False,
             sort_keys=True,
         )
-        result = await self._orchestrator.generate_response_for_image(
+        result = await self._inference.generate_response_for_image(
             prompt=prompt,
             image_base64=image_base64,
             image_format=image_format,
             temperature=active_options.temperature,
             max_tokens=active_options.max_tokens,
             interrupt_flag=active_options.interrupt_flag,
+            retain_replay=active_options.retain_replay,
             session_id=self._resolve_effective_session_id(session_id),
         )
         self._record_cache_stats(result, prompt_text=prompt_text, session_id=session_id)
@@ -436,7 +447,7 @@ class LLMServiceClient:
         Returns:
             LLMAudioTranscriptionResult: 音频转写结果对象。
         """
-        return await self._orchestrator.generate_response_for_voice(
+        return await self._inference.generate_response_for_voice(
             voice_base64,
             session_id=self._resolve_effective_session_id(session_id),
         )
@@ -764,6 +775,24 @@ def _build_prompt_context_factory(prompt: PromptInput) -> ContextFactory:
     return build_context
 
 
+async def release_response(result: LLMResponseResult, *, session_id: str = "") -> int:
+    """Explicitly retire an auxiliary native handle once no caller can replay it.
+
+    Keep results/items alive for continuation and editable diagnostics until their
+    owner calls this method. Public-only plugin/MCP exports release immediately;
+    other results remain Node-owned until explicit release or harness shutdown.
+    """
+    payload = result.provider_response
+    if not isinstance(payload, dict) or not isinstance(payload.get("responseHandle"), str):
+        return 0
+    from src.services.pi_harness.client import get_harness_client
+
+    released = await get_harness_client().request(
+        "model.release", handles=[payload["responseHandle"]], sessionId=session_id,
+    )
+    return int(released["released"])
+
+
 async def generate(request: LLMServiceRequest) -> LLMServiceResult:
     """执行统一的 LLM 服务请求。
 
@@ -796,6 +825,7 @@ async def generate(request: LLMServiceRequest) -> LLMServiceResult:
                 tool_options=request.tool_options,
                 response_format=request.response_format,
                 interrupt_flag=request.interrupt_flag,
+                retain_replay=request.retain_replay,
             ),
         )
         return LLMServiceResult.from_response_result(generation_result)

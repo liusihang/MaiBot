@@ -2,12 +2,12 @@
 [inner]
 version = "1.17.26"
 
-# Pi requests require verified final-payload capacity, even if a model's legacy
-# request_admission.mode is audit. Configure each route's authoritative window,
-# output/reasoning semantics and input counter before enabling Pi. No values are
-# guessed here from the model name. Opaque replay, images and custom routing
-# headers are unknown unless the admission adapter supports their exact contract;
-# the current generic byte-bound counter does not support them and fails closed.
+# Pi preserves each model's explicit admission mode. Default audit mode permits
+# unknown capacity and makes no hard context guarantee; it is not forced strict.
+# Explicit strict rejects unknown proof or known excess before dispatch. Never
+# guess capacity from model names, clamp output budgets, or drop native replay.
+# Non-chat adapters without operation-specific proof reject explicit strict.
+# See docs/pi-harness-migration.md for provider and deployment boundaries.
 
 [[models]]
 model_type = "llm"

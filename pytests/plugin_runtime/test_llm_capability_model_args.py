@@ -17,7 +17,9 @@ AVAILABLE_MODEL_NAMES = {"deepseek-v4-flash", "glm-5.2", "replyer"}
 
 
 class _StubGenerateResult:
-    """模拟服务层返回对象。"""
+    """模拟服务层返回对象（无原生 Pi replay handle）。"""
+
+    completion = llm_service.LLMResponseResult()
 
     def to_capability_payload(self) -> Dict[str, Any]:
         return {"success": True, "response": "ok"}

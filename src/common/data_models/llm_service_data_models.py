@@ -51,6 +51,7 @@ class LLMServiceRequest(BaseDataModel):
     max_tokens: int | None = None
     response_format: RespFormat | None = None
     interrupt_flag: asyncio.Event | None = None
+    retain_replay: bool | None = None
 
     def __post_init__(self) -> None:
         """校验请求对象的必要字段。
@@ -258,6 +259,8 @@ class LLMGenerationOptions(BaseDataModel):
     interrupt_flag: asyncio.Event | None = None
     raise_when_empty: bool = True
     force_stream_mode: bool = False
+    retain_replay: bool | None = None
+    """None uses the API default: single-shot False, context factories True."""
 
 
 @dataclass(slots=True)
@@ -267,6 +270,7 @@ class LLMImageOptions(BaseDataModel):
     temperature: float | None = None
     max_tokens: int | None = None
     interrupt_flag: asyncio.Event | None = None
+    retain_replay: bool = False
 
 
 @dataclass(slots=True)
@@ -285,6 +289,8 @@ class LLMEmbeddingResult(BaseDataModel):
     model_identifier: str = field(default_factory=str)
     api_provider: str = field(default_factory=str)
     request_protocol_hash: str = field(default_factory=str)
+    usage: Dict[str, Any] = field(default_factory=dict)
+    """Pi 侧适配器返回的用量投影，不含模型原生上下文。"""
 
 
 __all__ = [

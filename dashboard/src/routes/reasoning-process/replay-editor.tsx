@@ -603,6 +603,7 @@ export function ReasoningReplayPanel({
         try {
           const replayResult = await replayReasoningPrompt({
             source_path: selected?.json_path ?? null,
+            session_id: selected?.resolved_session_id ?? '',
             stage: selected?.stage ?? structuredPrompt?.request?.kind ?? '',
             model_name: normalizedModelName,
             item_schema_version: 1,

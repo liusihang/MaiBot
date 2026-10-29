@@ -93,12 +93,13 @@ def test_no_eviction_restart_pagination_and_bounded_parent_output(tmp_path):
         assert len(original["result"]["conclusion"]) == 9000
         assert "opaque-private" not in "".join(pages)
         assert "PRIVATE_THINKING" not in "".join(pages)
-        # Full provider packets remain internal for replay, not parent evidence.
+        # Provider packets remain only in Node SessionManager, not the Python business cache.
         with restarted._connect() as connection:
             stored = connection.execute(
                 "SELECT payload FROM pi_child_events WHERE handle=?", (first["handle"],)
             ).fetchall()
-            assert "opaque-private" in stored[0][0]
+            assert "opaque-private" not in stored[0][0]
+            assert "PRIVATE_THINKING" not in str(stored)
         with pytest.raises(ValueError):
             await restarted.read("parent", first["handle"], -1)
         with pytest.raises(ValueError):

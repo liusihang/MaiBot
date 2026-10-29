@@ -66,7 +66,7 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.prompt_patch = patch.object(part, "load_prompt_template", return_value=NS(template=PROMPT))
         self.prompt_patch.start()
-        # These tests exercise the retained legacy loop, not the new Pi entrypoint.
+        # A stale compatibility flag must not select a second, legacy main loop.
         self.pi_patch = patch.object(part.global_config.chat, "pi_agent_enabled", False)
         self.pi_patch.start()
 
@@ -192,10 +192,11 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
         engine._refresh_visual_placeholders_for_cycle = AsyncMock()
         engine._post_process_chat_history_after_cycle = AsyncMock()
 
-        async def main_request(**kwargs):
+        async def pi_request(source_messages):
             r._running = False
 
-        engine._run_planner_request = AsyncMock(side_effect=main_request)
+        engine._run_planner_request = AsyncMock(side_effect=AssertionError("Legacy planner must not run"))
+        engine._pi_runner = NS(ingest=AsyncMock(), run=AsyncMock(side_effect=pi_request), close=AsyncMock())
         engine._handle_planner_response_actions = AsyncMock(return_value=True)
         engine._finalize_cycle = AsyncMock(return_value=engine_mod.CycleEnd("stop", "test"))
         return engine, r, m
@@ -239,7 +240,7 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
         engine._post_process_chat_history_after_cycle.assert_not_called()
         engine._run_planner_request.assert_not_called()
 
-    async def test_native_engine_skip_does_not_start_terra_or_lose_history(self):
+    async def test_pi_engine_skip_preserves_sources_without_main_inference_or_python_compaction(self):
         engine, r, m = self.engine_fixture()
         saved = list(r._chat_history)
 
@@ -251,17 +252,20 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
         await engine.run_loop()
         engine._run_planner_request.assert_not_called()
         self.assertEqual(r._chat_history, saved)
-        engine._post_process_chat_history_after_cycle.assert_awaited_once()
-        self.assertFalse(engine._post_process_chat_history_after_cycle.call_args.kwargs["enable_compaction"])
-        self.assertFalse(engine._post_process_chat_history_after_cycle.call_args.kwargs["consume_references"])
+        engine._pi_runner.ingest.assert_awaited_once()
+        engine._pi_runner.run.assert_not_called()
+        engine._pi_runner.close.assert_awaited_once()
+        engine._post_process_chat_history_after_cycle.assert_not_called()
 
-    async def test_native_engine_accept_keeps_main_agent_full_context(self):
+    async def test_pi_engine_accept_passes_complete_original_sources_to_same_runner(self):
         engine, r, m = self.engine_fixture()
         saved = list(r._chat_history)
         engine._participation_judge.should_enter = AsyncMock(return_value=True)
         await engine.run_loop()
-        engine._run_planner_request.assert_awaited_once()
-        self.assertEqual(engine._run_planner_request.call_args.kwargs["source_messages"], [m])
+        engine._pi_runner.ingest.assert_awaited_once()
+        engine._pi_runner.run.assert_awaited_once_with([m])
+        engine._pi_runner.close.assert_awaited_once()
+        engine._run_planner_request.assert_not_called()
         self.assertEqual(r._chat_history, saved)
 
     async def test_new_message_during_negative_decision_is_not_dropped(self):
@@ -276,9 +280,12 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
 
         engine._ingest_pending_messages = AsyncMock(side_effect=ingest)
         await engine.run_loop()
-        engine._run_planner_request.assert_awaited_once()
-        self.assertEqual(engine._run_planner_request.call_args.kwargs["source_messages"], [m, new])
-        self.assertIs(engine._run_planner_request.call_args.kwargs["trigger_message"], m)
+        engine._pi_runner.run.assert_awaited_once_with([m, new])
+        self.assertEqual(engine._pi_runner.ingest.await_count, 2)
+        self.assertIs(engine._pi_runner.run.call_args.args[0][0], m)
+        self.assertIs(r._chat_history[-1].original_message, new)
+        engine._run_planner_request.assert_not_called()
+        engine._post_process_chat_history_after_cycle.assert_not_called()
 
 
 def ready_runtime():

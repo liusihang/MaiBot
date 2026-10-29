@@ -2,7 +2,7 @@
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, Iterator, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterator, Mapping, Optional
 
 import asyncio
 import json
@@ -15,7 +15,7 @@ READ_THREAD_ARCHIVE_TOOL_DEFINITION = {
     "type": "function",
     "function": {
         "name": "read_thread_archive",
-        "description": "Read public original chat, reference and tool evidence from archived events in this chat. Provider replay and private reasoning are not exposed.",
+        "description": "Read public original chat, reference and tool evidence from this chat. Pass event IDs or the pi-archive handle supplied by a compaction summary. Provider replay and private reasoning are not exposed.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -174,25 +174,3 @@ class DurableEvidenceStore:
         row = await asyncio.to_thread(self._read, parent_session_id, handle, child_namespace)
         page = await asyncio.to_thread(_page, row["raw"], offset, limit, keyword)
         return {"result_id": handle, "tool_name": row["tool_name"], "metadata": json.loads(row["metadata"]), **page}
-
-    async def read_archive(
-        self,
-        ledger: Any,
-        parent_session_id: str,
-        event_ids: Sequence[str],
-        offset: int = 0,
-        limit: int = 2800,
-    ) -> Dict[str, Any]:
-        if not event_ids or len(event_ids) > 20 or any(not isinstance(item, str) or not item for item in event_ids):
-            raise ValueError("Provide between 1 and 20 archived event IDs")
-        events = await asyncio.to_thread(ledger.archive_events, parent_session_id, event_ids)
-
-        def render() -> Dict[str, Any]:
-            text = json.dumps(
-                [{"event_id": event.event_id, **public_archive_payload(event.payload)} for event in events],
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            return {"content_type": "archived_public_text_and_tool_evidence", **_page(text, offset, limit)}
-
-        return await asyncio.to_thread(render)

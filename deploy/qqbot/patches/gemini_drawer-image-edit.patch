@@ -1,3 +1,29 @@
+Pi harness migration boundary -- deployment prerequisite, not an applied source change
+
+This checkout does not contain the external gemini_drawer plugin's complete
+core/pipeline.py or its installed provider execution path. The diff below preserves
+reference-message image lookup, strict edit-with-reference behavior, multi-image
+editing and sent-message receipts. It does NOT prove the external drawing plugin
+has stopped issuing provider HTTP requests; do not treat this patch as a completed
+or verified Pi image-transport migration.
+
+Required integration when that exact plugin source/version is available:
+* Retain reference image bytes/order and the current stream authorization checks.
+* Replace only model execution with the SDK host call:
+  ctx.call_capability("llm.generate_image", task_name=<configured host task>,
+      model_name=<configured host model name>, prompt=<prompt>,
+      images=[{"data": <base64>, "mimeType": <image MIME>}], options=<image options>)
+  Declare the exact llm.generate_image capability in that plugin's manifest.
+* Host model configuration must select extra_params.pi.operation="image" and its
+  explicit Pi image API. Provider URLs/keys stay in host configuration, not the
+  plugin call. The host returns {success, output, route, usage}; output contains
+  Pi text/image blocks with image data in base64, not an already-sent QQ message.
+* Keep existing send/outbox behavior and actual message-ID receipts. An edit
+  lacking source images must still fail, never silently become text-to-image.
+* Do not retain a direct HTTP fallback, silently switch models, or fabricate a
+  successful deployment. Verify this integration against the real source and
+  mock the host capability before applying/deploying the external plugin.
+
 --- a/commands/actions.py
 +++ b/commands/actions.py
 @@ -21,7 +21,7 @@

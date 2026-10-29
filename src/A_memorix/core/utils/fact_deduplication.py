@@ -308,6 +308,7 @@ class FactDeduplicator:
                 llm_service.LLMServiceRequest(
                     task_name=self.task_name,
                     request_type="A_Memorix.FactDeduplication",
+                    retain_replay=False,
                     prompt=load_prompt(
                         "a_memorix_fact_deduplication",
                         payload=json.dumps(

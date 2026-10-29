@@ -2,8 +2,8 @@
   "manifest_version": 2,
   "id": "local.qwen3vl-image-provider",
   "name": "Qwen3-VL 图片嵌入",
-  "version": "1.0.0",
-  "description": "通过现有 Qwen retrieval-v1 服务处理图片向量。",
+  "version": "1.1.0",
+  "description": "通过宿主 Node Pi 侧 retrieval-v1 适配器处理图片向量，不在插件进程访问模型。",
   "author": {
     "name": "Local",
     "url": "http://localhost"
@@ -21,7 +21,9 @@
     "max_version": "2.99.99"
   },
   "dependencies": [],
-  "capabilities": [],
+  "capabilities": [
+    "llm.embed_image"
+  ],
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": [
@@ -33,7 +35,7 @@
       "client_type": "qwen3vl_image",
       "name": "Qwen3-VL 图片嵌入",
       "description": "既有 retrieval-v1 Qwen 服务的图片 messages 协议",
-      "version": "1.0.0"
+      "version": "1.1.0"
     }
   ]
 }

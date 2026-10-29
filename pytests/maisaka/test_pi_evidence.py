@@ -46,26 +46,18 @@ def test_full_raw_survives_memory_eviction_and_restart_with_parent_child_scope(t
     asyncio.run(run())
 
 
-def test_archive_projection_never_exposes_replay_thinking_and_stays_scoped(tmp_path):
-    from src.maisaka.pi_runtime.ledger import ThreadLedger
-
-    async def run():
-        ledger = await asyncio.to_thread(ThreadLedger, str(tmp_path / "ledger.sqlite"))
-        payload = {
-            "role": "assistant",
-            "content": [{"type": "text", "text": "public answer"}, {"type": "thinking", "thinking": "PRIVATE"}],
-            "native": {"items": "OPAQUE"},
-        }
-        await asyncio.to_thread(ledger.append_event, "parent", "event-1", payload)
-        service = DurableEvidenceStore(str(tmp_path / "evidence.sqlite"))
-        result = await service.read_archive(ledger, "parent", ["event-1"])
-        assert "public answer" in result["text"]
-        assert "PRIVATE" not in result["text"] and "OPAQUE" not in result["text"]
-        with pytest.raises(KeyError):
-            await service.read_archive(ledger, "other-parent", ["event-1"])
-        assert "secret" not in json.dumps(public_archive_payload({"role": "system", "content": "secret"}))
-
-    asyncio.run(run())
+def test_archive_public_projection_never_exposes_replay_or_reasoning():
+    payload = {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "public answer"}, {"type": "thinking", "thinking": "PRIVATE"}],
+        "native": {"items": "OPAQUE"},
+    }
+    result = json.dumps(public_archive_payload(payload))
+    assert "public answer" in result
+    assert "PRIVATE" not in result and "OPAQUE" not in result
+    assert "secret" not in json.dumps(public_archive_payload({"role": "system", "content": "secret"}))
+    # Scoped archive/pagination/compaction handles are tested against actual
+    # SessionManager in runtime/pi_agent/test/runtime.test.mjs, not a Python head.
 
 
 def test_archived_summary_preserves_next_hop_original_handles():

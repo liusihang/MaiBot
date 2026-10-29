@@ -850,6 +850,7 @@ class SummaryImporter:
                 llm_api.LLMServiceRequest(
                     task_name=task_name_to_use,
                     request_type="A_Memorix.ChatSummarization",
+                    retain_replay=False,
                     prompt=prompt,
                     temperature=model_config_to_use.temperature,
                     max_tokens=model_config_to_use.max_tokens,

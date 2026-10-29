@@ -102,9 +102,11 @@ class MCPHostLLMBridge:
                     temperature=self._coerce_float(getattr(params, "temperature", None)),
                     max_tokens=int(getattr(params, "maxTokens", 1024) or 1024),
                     tool_options=tool_definitions,
+                    retain_replay=False,
                 ),
             )
 
+            # Sampling exports public blocks, so native replay is not retained.
             if tool_choice_mode == "required" and tool_definitions and not generation_result.tool_calls:
                 return mcp_types.ErrorData(
                     code=mcp_types.INTERNAL_ERROR,

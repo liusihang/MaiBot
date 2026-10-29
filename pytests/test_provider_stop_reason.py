@@ -1,4 +1,8 @@
-"""Provider terminal signals survive the Python/Pi boundary; no network or tools execute."""
+"""Retained pure legacy provider parsers; no network or tools execute.
+
+Pi outcome validation now lives in test_pi_harness_bridge.py and the real Node
+provider/session tests, rather than the retired Python LLMOrchestrator converter.
+"""
 
 from types import SimpleNamespace
 
@@ -11,7 +15,6 @@ from src.config.model_configs import ReasoningParseMode, ToolArgumentParseMode
 from src.llm_models.exceptions import RespParseException
 from src.llm_models.model_client import gemini_client, openai_client, openai_responses_client
 from src.llm_models.model_client.base_client import APIResponse
-from src.llm_models.utils_model import LLMOrchestrator
 
 
 OPENAI_OPTIONS = {
@@ -58,7 +61,6 @@ def test_openai_nonstream_preserves_terminal_reason_with_valid_arguments(reason,
     result, _ = openai_client._default_normal_response_parser(_openai_response(reason), **OPENAI_OPTIONS)
     assert result.tool_calls[0].args == {"text": "partial"}
     assert result.stop_reason == expected
-    assert LLMOrchestrator._build_generation_result(result, "test").stop_reason == expected
 
 
 async def _stream(chunks):

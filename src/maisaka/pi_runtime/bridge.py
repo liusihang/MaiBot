@@ -7,7 +7,12 @@ import json
 
 
 class PiBridgeError(RuntimeError):
-    """The sidecar failed; never silently fall back to a second agent loop."""
+    """Safe typed sidecar failure; never silently fall back to another model."""
+
+    def __init__(self, message: str, *, code: str = "", details: Dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = dict(details or {})
 
 
 class PiBridge:
@@ -20,6 +25,16 @@ class PiBridge:
         self._callbacks: Dict[str, asyncio.Task] = {}
         self._counter = 0
         self._write_lock = asyncio.Lock()
+
+    @property
+    def is_running(self) -> bool:
+        """Whether this transport can accept a new operation (not a retry)."""
+        return (
+            self._process is not None
+            and self._process.returncode is None
+            and self._reader_task is not None
+            and not self._reader_task.done()
+        )
 
     async def start(self) -> None:
         if self._process is not None:
@@ -93,7 +108,18 @@ class PiBridge:
                     future = self._pending.get(payload.get("id"))
                     if future is not None and not future.done():
                         if "error" in payload:
-                            future.set_exception(PiBridgeError(str(payload["error"])))
+                            error_payload = payload["error"]
+                            if isinstance(error_payload, dict):
+                                details = error_payload.get("details")
+                                future.set_exception(
+                                    PiBridgeError(
+                                        str(error_payload.get("message", "Pi operation failed")),
+                                        code=str(error_payload.get("code", "")),
+                                        details=details if isinstance(details, dict) else None,
+                                    )
+                                )
+                            else:
+                                future.set_exception(PiBridgeError("Pi operation failed"))
                         else:
                             future.set_result(payload.get("result"))
         except asyncio.CancelledError:
@@ -111,7 +137,11 @@ class PiBridge:
         if self._process is None:
             return
         if self._process.returncode is None:
-            self._process.terminate()
+            try:
+                self._process.terminate()
+            except ProcessLookupError:
+                # The reader can observe EOF before asyncio records exit status.
+                pass
         await self._process.wait()
         if self._reader_task is not None:
             await asyncio.gather(self._reader_task, return_exceptions=True)

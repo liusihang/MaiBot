@@ -998,11 +998,9 @@ class MaisakaReasoningEngine:
                     continue
 
                 cached_messages = turn_start_context.cached_messages
-                trigger_message = turn_start_context.trigger_message
-
-                if global_config.chat.pi_agent_enabled:
-                    # Participation controls execution, never durable ingestion.
-                    await self._get_pi_runner().ingest()
+                # Pi is the sole main-thread harness; participation controls
+                # execution, never durable ingestion or framework selection.
+                await self._get_pi_runner().ingest()
 
                 if turn_start_context.silent_reply_frequency:
                     await self._handle_silent_turn(
@@ -1022,123 +1020,14 @@ class MaisakaReasoningEngine:
                         should_enter = True
                         if self._pi_runner is not None:
                             await self._pi_runner.ingest()
-                if global_config.chat.pi_agent_enabled:
-                    if should_enter:
-                        await self._pi_runner.run(cached_messages)
-                    else:
-                        self._runtime._enter_stop_state()
-                        self._runtime._update_stage_status("空闲", "Luna 判断无需参与；消息已追加到 Pi 主线程")
-                        if self._runtime._running:
-                            self._runtime._schedule_message_turn()
-                    continue
-
-                if not should_enter:
-                    # Keep native history bounds and background learning even when
-                    # the main Agent is not needed; do not spend a main-model call on compaction.
-                    await self._post_process_chat_history_after_cycle(
-                        CycleDetail(cycle_id=self._runtime._cycle_counter),
-                        enable_compaction=False,
-                        consume_references=False,
-                    )
+                if should_enter:
+                    await self._pi_runner.run(cached_messages)
+                else:
                     self._runtime._enter_stop_state()
-                    self._finish_task_workspace(preserve_wait=False)
-                    self._runtime._update_stage_status("空闲", "Luna 判断本批无需参与；消息已保留在历史中")
+                    self._runtime._update_stage_status("空闲", "Luna 判断无需参与；消息已追加到 Pi 主线程")
                     if self._runtime._running:
                         self._runtime._schedule_message_turn()
-                    continue
 
-                try:
-                    self._turn_passive_replyer = global_config.experimental.passive_replyer
-                    self._runtime._chat_loop_service.passive_replyer_override = self._turn_passive_replyer
-                    self._active_logical_turn_id = turn_start_context.logical_turn_id or uuid.uuid4().hex
-                    trigger_message = self._start_task_workspace(
-                        self._active_logical_turn_id, trigger_message, cached_messages,
-                    )
-                    if force_continue_reason := self._runtime._consume_forced_turn_reason():
-                        logger.info(f"{self._runtime.log_prefix} {force_continue_reason}")
-                    round_index = 0
-                    while round_index < self._runtime._max_internal_rounds:
-                        # 工具执行或整理上下文期间收到的消息，在下一次模型请求前补齐。
-                        pending_round_messages = await self._ingest_pending_messages() if round_index > 0 else []
-                        if pending_round_messages:
-                            cached_messages = pending_round_messages
-
-                        cycle_detail, round_text = await self._start_cycle_round(round_index)
-                        state = CycleRuntimeState()
-                        try:
-                            await self._refresh_visual_placeholders_for_cycle(cycle_detail)
-                            await self._post_process_chat_history_after_cycle(cycle_detail, consume_references=False)
-
-                            self._runtime._start_planner_continuation()
-                            await self._run_planner_request(
-                                trigger_message=trigger_message,
-                                source_messages=cached_messages or [trigger_message],
-                                round_index=round_index,
-                                round_text=round_text,
-                                state=state,
-                            )
-                            cycle_detail.time_records["planner"] = state.planner_duration_ms / 1000
-                            # logger.info(
-                            #     f"{self._runtime.log_prefix} 规划器执行完成: "
-                            #     f"回合={round_index + 1} "
-                            #     f"耗时={cycle_detail.time_records['planner']:.3f} 秒"
-                            # )
-                            should_break_after_action = await self._handle_planner_response_actions(
-                                response=state.response,
-                                cycle_detail=cycle_detail,
-                                state=state,
-                                planner_extra_lines=state.planner_extra_lines,
-                            )
-                            if should_break_after_action:
-                                break
-                            continue
-                        except ReqAbortException as exc:
-                            state.planner_interrupted = True
-                            state.cycle_end = CycleEnd("planner_interrupted", "Planner 被新消息打断，当前轮结束。")
-                            interrupt_result = await self._handle_planner_interrupt(
-                                exc=exc,
-                                round_index=round_index,
-                                round_text=round_text,
-                                current_stage_started_at=state.current_stage_started_at,
-                                action_tool_count=state.action_tool_count,
-                            )
-                            state.response = interrupt_result.response
-                            state.planner_extra_lines = interrupt_result.extra_lines
-                            if not interrupt_result.retry_messages:
-                                break
-
-                            cached_messages = interrupt_result.retry_messages
-                            continue
-                        except asyncio.CancelledError:
-                            state.cycle_end = CycleEnd("cancelled", "思考任务已取消，本轮结束。")
-                            raise
-                        except Exception as exc:
-                            state.cycle_end = CycleEnd("cycle_error", f"本轮处理异常：{exc}")
-                            raise
-                        finally:
-                            state.cycle_end = await self._finalize_cycle(
-                                cycle_detail=cycle_detail,
-                                round_index=round_index,
-                                state=state,
-                            )
-                            if not state.planner_interrupted:
-                                round_index += 1
-                finally:
-                    self._finish_task_workspace(
-                        preserve_wait=self._runtime._running
-                        and self._runtime._agent_state == self._runtime._STATE_WAIT
-                        and self._runtime._has_pending_wait_tool_call(),
-                    )
-                    self._turn_passive_replyer = None
-                    self._runtime._chat_loop_service.passive_replyer_override = None
-                    self._active_logical_turn_id = None
-                    if self._runtime._agent_state == self._runtime._STATE_RUNNING:
-                        self._runtime._enter_stop_state()
-                    if self._runtime._running:
-                        if self._runtime._agent_state == self._runtime._STATE_WAIT:
-                            self._runtime._update_stage_status("等待", "等待后继续思考")
-                        else:
-                            self._runtime._update_stage_status("空闲", "本轮处理结束")
         except asyncio.CancelledError:
             self._runtime._log_internal_loop_cancelled()
             raise

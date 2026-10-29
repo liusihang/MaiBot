@@ -1,4 +1,4 @@
-"""Offline task-anchor, receipt and logical-turn lifecycle regressions."""
+"""Business workspace utilities and the sole Pi main-thread lifecycle contract."""
 
 from datetime import datetime
 from types import SimpleNamespace as NS
@@ -14,7 +14,6 @@ from src.common.data_models.llm_service_data_models import LLMResponseResult
 from src.common.data_models.mai_message_data_model import MessageInfo, UserInfo
 from src.common.data_models.message_component_data_model import MessageSequence, TextComponent
 from src.core.tooling import ToolExecutionResult
-from src.llm_models.exceptions import ReqAbortException
 from src.llm_models.payload_content.tool_option import ToolCall
 from src.maisaka import reasoning_engine as engine_module
 from src.maisaka.chat_loop_service import ChatResponse
@@ -31,14 +30,12 @@ from src.maisaka.reasoning_engine import (
     CycleEnd,
     CycleRuntimeState,
     MaisakaReasoningEngine,
-    PlannerInterruptResult,
-    TurnStartContext,
 )
 
 
 @pytest.fixture(autouse=True)
-def legacy_task_workspace_mode(monkeypatch):
-    # This file verifies the explicitly retained legacy task-workspace engine.
+def compatibility_flag_cannot_restore_legacy_main_loop(monkeypatch):
+    # Utility methods remain testable; this flag cannot select a legacy main loop.
     monkeypatch.setattr(engine_module.global_config.chat, "pi_agent_enabled", False)
 
 
@@ -196,87 +193,148 @@ async def test_planner_default_target_stays_original_while_arrivals_and_cancella
     assert runtime._chat_history[-1].original_message is correction
 
 
+def actual_pi_engine(monkeypatch, tmp_path):
+    from pytests.maisaka.test_pi_harness_host import engine as harness_engine
+    from src.maisaka.pi_runtime.runner import PiGroupRunner
+
+    host, effects = harness_engine()
+    runtime = host._runtime
+    runtime.session_id = "offline-session"
+    runtime.log_prefix = "[offline Pi workspace contract]"
+    engine = MaisakaReasoningEngine(runtime)
+    for name in (
+        "_build_tool_availability_context",
+        "_build_tool_execution_context",
+        "_record_tool_execution_effects",
+        "_build_tool_result_media_messages",
+    ):
+        monkeypatch.setattr(engine, name, getattr(host, name))
+    engine._run_planner_request = AsyncMock(side_effect=AssertionError("Legacy planner must not run"))
+    engine._handle_planner_interrupt = AsyncMock(side_effect=AssertionError("Pi arrivals must not retry a planner"))
+    engine._start_task_workspace = Mock(side_effect=AssertionError("Pi must not create a semantic task workspace"))
+    engine._pi_runner = PiGroupRunner(engine, data_dir=tmp_path)
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    return engine, runtime, effects
+
+
+def assert_no_semantic_workspace(requests):
+    encoded = json.dumps(requests, ensure_ascii=False)
+    for field in (
+        "original_request",
+        "default_reply_target_id",
+        "tool_receipts_not_verified_facts",
+        "arrivals_relationship_not_inferred",
+        "Goal",
+        "NextSteps",
+    ):
+        assert field not in encoded
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("interrupted", [False, True])
-async def test_tool_round_or_interrupt_retry_does_not_replace_original_trigger(interrupted):
-    engine, runtime = loop_engine()
-    origin, other = message(), message("b", "B", "new unrelated message")
-    engine._prepare_turn_start_context = AsyncMock(return_value=TurnStartContext([origin], origin, False, False, False))
-    runtime._internal_turn_queue.put_nowait("message")
-    requests = []
+@pytest.mark.parametrize("steering", [False, True])
+async def test_pi_tool_turn_preserves_original_and_new_sources_without_workspace_or_interrupt_retry(
+    monkeypatch,
+    tmp_path,
+    steering,
+):
+    from pytests.maisaka.test_pi_harness_host import wire_server
+    from src.maisaka.runtime import MaisakaHeartFlowChatting, PlannerInterruptController
 
-    async def request(**kwargs):
-        requests.append(kwargs)
-        if len(requests) == 1 and interrupted:
-            raise ReqAbortException("offline interrupt")
-        if len(requests) == 2:
-            runtime._running = False
+    origin = message(text="original lookup request")
+    other = message("b", "B", "new unrelated message")
+    correction = message("cancel", "A", "cancel the earlier request explicitly")
+    with wire_server([("web_fetch", {}), ("reply", {"msg_id": origin.message_id, "text": "explicit target"})]) as (
+        config,
+        requests,
+    ):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        monkeypatch.setattr(engine_module.global_config.chat.reply_timing, "planner_message_steering", steering)
+        engine, runtime, effects = actual_pi_engine(monkeypatch, tmp_path)
+        runtime._chat_history.append(history(origin))
+        runtime._planner_interrupt = PlannerInterruptController()
+        interrupt_flag = asyncio.Event()
+        runtime._planner_interrupt.bind(interrupt_flag)
+        runner = engine._pi_runner
 
-    async def ingest():
-        runtime._chat_history.append(history(other))
-        engine._task_workspace.observe_messages([other])
-        return [other]
+        async def invoke(invocation, context, **kwargs):
+            effects.append(invocation)
+            if invocation.tool_name == "web_fetch":
+                runtime._chat_history.extend([history(other), history(correction)])
+                MaisakaHeartFlowChatting._request_planner_interrupt_for_message(runtime, other)
+                await runner.ingest()
+            return ToolExecutionResult(invocation.tool_name, True, content="source receipt")
 
-    engine._run_planner_request = AsyncMock(side_effect=request)
-    engine._handle_planner_response_actions = AsyncMock(side_effect=[False, True] if not interrupted else [True])
-    engine._ingest_pending_messages = AsyncMock(side_effect=ingest)
-
-    async def interrupt(**kwargs):
-        await ingest()
-        return PlannerInterruptResult(NS(), [], [other])
-
-    engine._handle_planner_interrupt = AsyncMock(side_effect=interrupt)
-    await engine.run_loop()
-    assert [request["trigger_message"] for request in requests] == [origin, origin]
-    assert requests[-1]["source_messages"] == [other]
-    assert runtime._chat_history[-1].original_message is other
-    assert engine.task_workspace_snapshot is None
+        runtime._tool_registry.invoke = invoke
+        try:
+            await runner.run([origin])
+            assert [item.tool_name for item in effects] == ["web_fetch", "reply"]
+            assert effects[-1].arguments["msg_id"] == origin.message_id
+            assert not interrupt_flag.is_set()
+            encoded = json.dumps(requests[-1]["messages"], ensure_ascii=False)
+            for source in (origin, other, correction):
+                assert encoded.count(source.processed_plain_text) == 1
+            assert engine.task_workspace_snapshot is None
+            engine._start_task_workspace.assert_not_called()
+            engine._run_planner_request.assert_not_called()
+            engine._handle_planner_interrupt.assert_not_called()
+            assert_no_semantic_workspace(requests)
+        finally:
+            await runner.close()
 
 
 @pytest.mark.asyncio
-async def test_wait_resumes_same_workspace_then_new_logical_turn_clears_receipts():
-    engine, runtime = loop_engine()
-    origin, other = message(), message("b", "B", "later arrival")
-    engine._prepare_turn_start_context = AsyncMock(
-        side_effect=[
-            TurnStartContext([origin], origin, False, False, False, "turn-a"),
-            TurnStartContext([other], other, True, False, False, "turn-a"),
-        ]
-    )
-    runtime._internal_turn_queue.put_nowait("message")
-    runtime._internal_turn_queue.put_nowait("timeout")
-    requests = []
+async def test_pi_wait_and_later_turn_keep_sdk_prefix_and_business_receipt_without_semantic_workspace(
+    monkeypatch, tmp_path
+):
+    from pytests.maisaka.test_pi_harness_host import wire_server
+    from src.core.tooling import ToolSpec
+    from src.maisaka.context.messages import ToolResultMessage
 
-    async def request(**kwargs):
-        requests.append((kwargs["trigger_message"], engine.task_workspace_snapshot))
-
-    async def actions(**kwargs):
-        if len(requests) == 1:
-            engine._task_workspace.record_tool_result(
-                "search-a",
-                ToolExecutionResult(
-                    "search",
-                    True,
-                    structured_content={"result_id": "source-a"},
-                ),
+    origin, other, fresh = message(), message("b", "B", "later arrival"), message("c", "C", "new logical turn")
+    with wire_server([("wait", {}), None, None]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        engine, runtime, effects = actual_pi_engine(monkeypatch, tmp_path)
+        runtime._chat_history.append(history(origin))
+        runtime._tool_registry.list_tools.return_value.append(
+            ToolSpec(
+                name="wait",
+                description="wait",
+                parameters_schema={"type": "object"},
+                provider_name="maisaka_builtin",
             )
-            runtime._agent_state = "wait"
-            runtime._has_pending_wait_tool_call.return_value = True
-        else:
-            runtime._running = False
-            runtime._agent_state = "stop"
-        return True
+        )
+        runner = engine._pi_runner
 
-    engine._run_planner_request = AsyncMock(side_effect=request)
-    engine._handle_planner_response_actions = AsyncMock(side_effect=actions)
-    await engine.run_loop()
-    assert [item[0] for item in requests] == [origin, origin]
-    assert requests[1][1]["tool_receipts_not_verified_facts"][0]["result_references"] == ["source-a"]
-    assert requests[1][1]["arrivals_relationship_not_inferred"][0]["message_id"] == "b"
-    assert engine.task_workspace_snapshot is None
-    engine._start_task_workspace("new-task", other, [other])
-    assert engine.task_workspace_snapshot["original_request"]["message_id"] == "b"
-    assert engine.task_workspace_snapshot["tool_receipts_not_verified_facts"] == []
+        async def invoke(invocation, context, **kwargs):
+            effects.append(invocation)
+            return ToolExecutionResult("wait", True, content="waiting receipt", stop_after_execution=True)
+
+        runtime._tool_registry.invoke = invoke
+        try:
+            await runner.run([origin])
+            assert len(requests) == 1
+            receipt = await runner._db("lookup_tool_execution", runtime.session_id, "call-1")
+            assert receipt.status == "succeeded"
+            runtime._chat_history.extend(
+                [
+                    ToolResultMessage("wait completed", datetime.now(), "call-1", "business-wait", tool_name="wait"),
+                    history(other),
+                ]
+            )
+            await runner.run([other])
+            before = requests[-1]["messages"]
+            assert "wait completed" in json.dumps(before)
+            runtime._chat_history.append(history(fresh))
+            await runner.run([fresh])
+            assert requests[-1]["messages"][: len(before)] == before
+            assert len(effects) == 1
+            assert await runner._db("lookup_tool_execution", runtime.session_id, "call-1") == receipt
+            assert engine.task_workspace_snapshot is None
+            engine._start_task_workspace.assert_not_called()
+            engine._run_planner_request.assert_not_called()
+            assert_no_semantic_workspace(requests)
+        finally:
+            await runner.close()
 
 
 @pytest.mark.asyncio
