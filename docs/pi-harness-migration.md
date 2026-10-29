@@ -19,6 +19,17 @@ Python retains source repositories and business learner buffers, inbox delivery
 receipts, tool permission checks, QQ outbox/idempotence, and public result
 projections. These are not canonical model history. SDK assistant reasoning,
 signatures, provider replay data, finalized calls and results remain in Node.
+
+Public Pi response/tool events also feed the existing monitor timeline and the
+shared model-usage/cache accounting services. Each provider response is a monitor
+round with its actual route, usage and tool receipts. These observation records
+do not reconstruct or modify authoritative SDK history or expose native thinking
+and signatures. Auxiliary inference uses the same accounting implementation.
+
+Delegated research defaults to the approved read-only tool set when `tools` is
+omitted. The default `gpt_web_search` and `gpt_read_search_result` tools require
+the exact host plugin ownership `local.gpt-web-search`; the child cannot obtain
+`reply` or image-sending permissions through a matching tool name.
 One-shot text/VLM and known single-turn context callers use `retain_replay=False`;
 context APIs retain scoped handles by default for real multi-turn work. Release
 retained results explicitly with `release_response` / `release_responses`. Reusing

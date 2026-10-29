@@ -112,22 +112,31 @@ function publicMessage(message) {
   const content = typeof message.content === 'string' ? [{ type: 'text', text: message.content }]
     : (message.content ?? []).flatMap((part) => {
       if (part.type === 'text') return [{ type: 'text', text: part.text }];
-      if (part.type === 'toolCall') return [{ type: 'toolCall', id: part.id, name: part.name }];
+      if (part.type === 'toolCall') return [{ type: 'toolCall', id: part.id, name: part.name, arguments: clone(part.arguments) }];
       return [];
     });
   return { role, content, ...(message.toolCallId ? { toolCallId: message.toolCallId, toolName: message.toolName, isError: message.isError === true } : {}),
     ...(message.stopReason ? { stopReason: message.stopReason } : {}),
-    ...(message.sourceMessageId ? { sourceMessageId: message.sourceMessageId } : {}) };
+    ...(message.sourceMessageId ? { sourceMessageId: message.sourceMessageId } : {}),
+    ...(role === 'assistant' && message.usage ? { usage: clone(message.usage) } : {}),
+    ...(role === 'toolResult' && message.details?.hostSearch ? { hostSearch: clone(message.details.hostSearch) } : {}),
+    ...(role === 'assistant' && typeof message.durationMs === 'number' ? { durationMs: message.durationMs } : {}) };
 }
-function publicEvent(event, manager) {
+function publicEvent(event, manager, owner) {
   const result = { type: event.type };
-  if (event.type === 'message_end' || event.type === 'turn_end') {
+  if (event.type === 'message_start' || event.type === 'message_end' || event.type === 'turn_end') {
     result.message = publicMessage(event.message);
     result.messageEntryId = event.messageEntryId ?? manager.getEntries().findLast((entry) => entry.type === 'message' && entry.message === event.message)?.id;
+  }
+  if (owner && event.message?.role === 'assistant') {
+    result.route = { modelName: owner.resolved.hostModelName, modelIdentifier: owner.resolved.model.id, apiProvider: owner.resolved.apiProvider };
+    result.contextMessageCount = manager.buildSessionProjection().messages.length;
+    result.toolCount = owner.tools.length;
   }
   if (event.type === 'turn_end') {
     result.toolResults = event.toolResults.map(publicMessage);
     result.toolResultEntryIds = event.toolResultEntryIds;
+    result.terminatedByTool = owner?.terminated === true;
   }
   if (event.type.startsWith('tool_execution_')) {
     result.toolCallId = event.toolCallId;
@@ -313,7 +322,7 @@ class BusinessSession {
   }
 
   async notify(event) {
-    try { await this.callback('event', { sessionId: this.id, event: publicEvent(event, this.manager) }); }
+    try { await this.callback('event', { sessionId: this.id, event: publicEvent(event, this.manager, this) }); }
     catch (error) { this.lastError = 'Host business event notification failed'; this.session?.agent.abort(); throw error; }
   }
 

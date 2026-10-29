@@ -23,6 +23,8 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "view_forward_message",
         "web_search",
         "web_fetch",
+        "gpt_web_search",
+        "gpt_read_search_result",
     }
 )
 MAX_CONCLUSION_CHARS = 4000

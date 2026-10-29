@@ -16,6 +16,27 @@ const ref = (version = 1, content = 'source details') => ({ namespace: 'fact', s
 const rows = (owned) => readFileSync(owned.manager.getSessionFile(), 'utf8').trim().split('\n').map(JSON.parse);
 const strings = (state) => state.messages.filter((m) => m.role === 'user').map((m) => m.content);
 
+test('public monitor receives actual model usage and tool arguments without native reasoning or signatures', async (t) => {
+  const h = harness(t, { response: (n) => n === 1 ? [reasoning(), call('lookup', { query: 'verify' })] : [answer('verified')] });
+  await h.initialize('group-a', [tool('lookup')]);
+  await h.prompt('question');
+  const starts = h.events.filter(({ event }) => event.type === 'message_start' && event.message?.role === 'assistant');
+  const ends = h.events.filter(({ event }) => event.type === 'message_end' && event.message?.role === 'assistant');
+  assert.equal(starts.length, 2);
+  assert.equal(ends.length, 2);
+  for (const { event } of ends) {
+    assert.ok(event.messageEntryId);
+    assert.equal(typeof event.message.usage.input, 'number');
+    assert.equal(typeof event.message.usage.cacheRead, 'number');
+    assert.ok(event.contextMessageCount > 0);
+    assert.equal(event.toolCount, 1);
+    assert.equal(event.route.modelName, 'main');
+    assert.equal(event.message.content.some((part) => part.type === 'thinking'), false);
+  }
+  assert.deepEqual(ends[0].event.message.content.find((part) => part.type === 'toolCall').arguments, { query: 'verify' });
+  assert.equal(JSON.stringify(h.events).includes('opaque-encrypted-preserve-exactly'), false);
+});
+
 function harness(t, { response, execute = async () => success(), event = async () => {}, authorize = async () => ({ allowed: true }), beforePersist, summarize, syncFile, root } = {}) {
   const dir = root ?? mkdtempSync(join(tmpdir(), 'maibot-runtime-test-'));
   const wires = [], events = [], calls = [];
