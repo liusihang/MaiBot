@@ -377,9 +377,12 @@ class PiGroupRunner:
             )
             await self._db("assert_no_unresolved_executions", self.session_id)
             await self._maintain_context()
+            from src.services.daily_topics.service import daily_topic_service
+
+            daily_references = await daily_topic_service.reference(self.session_id)
             references = [
                 {"namespace": ref.namespace, "sourceId": ref.source_id, "version": ref.version, "content": ref.content}
-                for ref in await build_references(self.runtime, source_messages)
+                for ref in [*await build_references(self.runtime, source_messages), *daily_references]
             ]
             self.engine._active_logical_turn_id = uuid.uuid4().hex
             self.runtime._start_planner_continuation()
@@ -495,13 +498,23 @@ class PiGroupRunner:
                             wait=arguments.get("wait", False),
                         )
                     elif name == "read_thread_archive":
-                        value = await self.bridge.request(
-                            "read_archive",
-                            sessionId=self.session_id,
-                            eventIds=arguments["event_ids"],
-                            offset=arguments.get("offset", 0),
-                            limit=arguments.get("limit", 2800),
-                        )
+                        from src.services.daily_topics.service import SOURCE_PREFIX, daily_topic_service
+
+                        if any(str(item).startswith(SOURCE_PREFIX) for item in arguments["event_ids"]):
+                            value = await daily_topic_service.read_sources(
+                                self.session_id,
+                                arguments["event_ids"],
+                                arguments.get("offset", 0),
+                                arguments.get("limit", 2800),
+                            )
+                        else:
+                            value = await self.bridge.request(
+                                "read_archive",
+                                sessionId=self.session_id,
+                                eventIds=arguments["event_ids"],
+                                offset=arguments.get("offset", 0),
+                                limit=arguments.get("limit", 2800),
+                            )
                     else:
                         value = await self.evidence.read(
                             self.session_id,

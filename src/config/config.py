@@ -18,6 +18,7 @@ from src.agent.config import AgentConfig
 from src.computer.config import ComputerConfig
 from src.desktop_pet.config import DesktopPetConfig
 from src.files.config import FilesConfig
+from src.services.daily_topics.config import DailyTopicsConfig
 from src.web_search.config import WebConfig, resolve_web_search_config
 
 from .config_base import AttributeData, ConfigBase, Field
@@ -74,7 +75,7 @@ BOT_CONFIG_PATH: Path = (CONFIG_DIR / "bot_config.toml").resolve().absolute()
 MODEL_CONFIG_PATH: Path = (CONFIG_DIR / "model_config.toml").resolve().absolute()
 LEGACY_ENV_PATH: Path = (PROJECT_ROOT / ".env").resolve().absolute()
 MMC_VERSION: str = read_project_version(PROJECT_ROOT)
-CONFIG_VERSION: str = "8.15.65"
+CONFIG_VERSION: str = "8.15.66"
 MODEL_CONFIG_VERSION: str = "1.17.26"
 
 logger = get_logger("config")
@@ -123,6 +124,9 @@ class Config(ConfigBase):
 
     chat: ChatConfig = Field(default_factory=ChatConfig)
     """聊天配置类"""
+
+    daily_topics: DailyTopicsConfig = Field(default_factory=DailyTopicsConfig)
+    """每群夜间更新的最近话题板。"""
 
     capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
     """能力配置类"""
