@@ -12,6 +12,7 @@ from src.common.logger import get_logger
 from src.common.startup_diagnostics import diagnostic_stage
 from src.config.config import config_manager
 from src.config.model_configs import APIProvider, ModelInfo
+from src.llm_models.request_admission import AdmissionDecision
 from src.llm_models.payload_content.context_item import (
     ContextItem,
     ModelOutputItem,
@@ -142,6 +143,11 @@ class APIResponse:
     """图片嵌入客户端计算的协议指纹；自动适配图片嵌入协议时填充，
     编排器据此透传给上层，其余场景保持 None 并沿用默认指纹算法。"""
 
+    stop_reason: str = "unknown"
+    """真实终止信号的规范化结果：stop/length/toolUse/error/aborted/unknown。
+    缺失终止信号不按工具参数能否解析猜测完成；工具执行方必须对 unknown 保守处理。
+    """
+
     @property
     def content(self) -> str | None:
         """只读派生模型可见正文。"""
@@ -251,6 +257,8 @@ class RequestTraceContext:
     current_attempt_started_at: float = 0.0
     rate_limit_wait_seconds: float = 0.0
     generation_attempts: List[GenerationAttempt] = field(default_factory=list)
+    pending_admission: AdmissionDecision | None = None
+    """计量尚未完成时保留；task 超时不可误报 Provider 故障。"""
 
     def replace_attempt_status(self, attempt_number: int, status: str) -> None:
         """更新指定 Provider 尝试的后续调度状态。"""
@@ -360,6 +368,8 @@ class BaseClient(ABC):
     """
 
     api_provider: APIProvider
+    supports_final_wire_admission: bool = False
+    """Only implementations guarding their final serialized HTTP body may opt in."""
 
     def __init__(self, api_provider: APIProvider) -> None:
         """初始化基础客户端。

@@ -87,6 +87,7 @@ class LLMResponseResult(BaseDataModel):
     wire_protocol: str = ""
     request_wire_payload: Any = field(default=None, repr=False)
     request_snapshot: ResponseRequest | None = field(default=None, repr=False)
+    stop_reason: str = "unknown"
 
     @property
     def response(self) -> str:

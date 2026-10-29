@@ -6,6 +6,7 @@ import asyncio
 from src.common.logger import get_logger
 from src.config.model_configs import ModelInfo
 from src.llm_models.exceptions import RespNotOkException
+from src.llm_models.request_admission import guard_unsupported_route
 from src.llm_models.payload_content.context_protocol import ContextProtocolMode, validate_context_items
 
 from .base_client import (
@@ -121,6 +122,8 @@ class AdapterClient(BaseClient, ABC, Generic[RawStreamT, RawResponseT]):
         Returns:
             APIResponse: 解析完成的统一响应对象。
         """
+        if not self.supports_final_wire_admission:
+            guard_unsupported_route(request.model_info, self.api_provider, operation=self.api_provider.client_type)
         validate_context_items(request.context_items, ContextProtocolMode.REQUEST_CONTEXT)
         stream_response_handler = self._resolve_stream_response_handler(request)
         response_parser = self._resolve_response_parser(request)
@@ -193,6 +196,9 @@ class AdapterClient(BaseClient, ABC, Generic[RawStreamT, RawResponseT]):
         Returns:
             APIResponse: 解析完成的统一音频转录响应。
         """
+        guard_unsupported_route(
+            request.model_info, self.api_provider, operation=f"{self.api_provider.client_type}.audio_transcription",
+        )
         response, usage_record = await self._execute_audio_transcription_request(request)
         return self._attach_usage_record(response, request.model_info, usage_record)
 

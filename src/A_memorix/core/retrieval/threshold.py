@@ -4,7 +4,7 @@
 根据当前检索结果的分布特征自适应计算阈值。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -12,6 +12,7 @@ import numpy as np
 
 from src.common.logger import get_logger
 
+from ..utils.metadata import coerce_metadata_dict
 from .dual_path import RetrievalResult
 
 logger = get_logger("A_Memorix.DynamicThresholdFilter")
@@ -133,6 +134,7 @@ class DynamicThresholdFilter:
 
         # 计算阈值
         threshold = self._compute_threshold(scores, results)
+        evidence_threshold = threshold
 
         # 应用阈值过滤
         filtered_results = [r for r in results if r.score >= threshold]
@@ -143,6 +145,23 @@ class DynamicThresholdFilter:
             sorted_results = sorted(results, key=lambda x: x.score, reverse=True)
             filtered_results = sorted_results[: self.config.min_results]
             threshold = filtered_results[-1].score if filtered_results else 0.0
+
+        # 保留召回下限，但不要把补齐候选伪装成通过相关性阈值的证据。
+        # 复制结果以免把本次查询的判定写回缓存或其他调用方持有的元数据。
+        filtered_results = [
+            replace(
+                item,
+                metadata={
+                    **coerce_metadata_dict(item.metadata),
+                    "retrieval_evidence": {
+                        "threshold": float(evidence_threshold),
+                        "passed": bool(item.score >= evidence_threshold),
+                        "backfilled": not bool(item.score >= evidence_threshold),
+                    },
+                },
+            )
+            for item in filtered_results
+        ]
 
         # 记录实际使用的阈值，仅用于统计展示。
         threshold_value = float(threshold)

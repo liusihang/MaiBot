@@ -159,6 +159,19 @@ class ToolSpec:
         return definition
 
 
+    def execution_contract(self) -> Dict[str, Any]:
+        """Freeze schema and host routing identity for durable agent dispatch."""
+        return {"definition": self.to_llm_definition(), "provider_name": self.provider_name,
+                "provider_type": self.provider_type,
+                "safety": None if self.annotation is None else {
+                    "read_only": self.annotation.read_only, "destructive": self.annotation.destructive,
+                    "idempotent": self.annotation.idempotent, "open_world": self.annotation.open_world,
+                }, "routing": {
+                    key: deepcopy(self.metadata[key])
+                    for key in ("server_name", "plugin_id", "registry_original_name") if key in self.metadata
+                }}
+
+
 @dataclass(slots=True)
 class ToolInvocation:
     """统一工具调用请求。"""
@@ -381,6 +394,7 @@ class ToolRegistry:
         self,
         invocation: ToolInvocation,
         context: Optional[ToolExecutionContext] = None,
+        *, expected_contract: Optional[Dict[str, Any]] = None,
     ) -> ToolExecutionResult:
         """执行一次工具调用。
 
@@ -406,6 +420,12 @@ class ToolRegistry:
         route = (await self._list_routes(availability_context)).get(invocation.tool_name)
         if route is not None:
             provider, spec = route
+            if expected_contract is not None and spec.execution_contract() != expected_contract:
+                return ToolExecutionResult(
+                    tool_name=invocation.tool_name, success=False,
+                    error_message="Frozen tool execution contract changed; nothing was executed.",
+                    metadata={"execution_outcome": "not_executed", "host_contract_rejected": True},
+                )
             metadata = dict(invocation.metadata)
             if provider.provider_type == "mcp":
                 # 服务器选择来自注册表，不接受调用方伪造的路由元数据。
@@ -431,12 +451,14 @@ class ToolRegistry:
                     tool_name=invocation.tool_name,
                     success=False,
                     error_message=error_message,
+                    metadata={"execution_outcome": "unknown"},
                 )
 
         return ToolExecutionResult(
             tool_name=invocation.tool_name,
             success=False,
             error_message=f"未找到工具：{invocation.tool_name}",
+            metadata={"execution_outcome": "not_executed", "host_contract_rejected": True},
         )
 
     async def close(self) -> None:

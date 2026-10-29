@@ -17,9 +17,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Store the Playwright package separately so it can be mounted when the runtime image installs.
 RUN mkdir /playwright && cp -a .venv/lib/python3*/site-packages/playwright /playwright/
 
+# Official Pi agent runtime; dependencies are locked and installed at build time.
+FROM node:24.22.2-bookworm-slim AS pi-deps
+WORKDIR /pi
+COPY runtime/pi_agent/package.json runtime/pi_agent/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+
 # Runtime image
 FROM base
 COPY --from=uv /uv /uvx /bin/
+COPY --from=pi-deps /usr/local/bin/node /usr/local/bin/node
 
 # Working directory
 WORKDIR /MaiMBot
@@ -28,7 +35,7 @@ ENV MAIBOT_LEGACY_0X_UPGRADE_CONFIRMED=1
 ENV PATH="/MaiMBot/.venv/bin:${PATH}"
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git libatomic1 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install system libraries required by Playwright Chromium. The browser binary
@@ -49,6 +56,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Copy project source
 COPY . .
+COPY --from=pi-deps /pi/node_modules ./runtime/pi_agent/node_modules
 
 RUN chmod +x docker-entrypoint.sh
 

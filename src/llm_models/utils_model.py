@@ -47,6 +47,7 @@ from src.llm_models.model_client.base_client import (
 )
 from src.llm_models.generation_diagnostics import sanitize_diagnostic_url
 from src.llm_models.image_normalizer import normalize_context_images
+from src.llm_models.request_admission import AdmissionDenied, guard_unsupported_route
 from src.llm_models.request_snapshot import (
     attach_request_snapshot,
     format_request_snapshot_log_info,
@@ -314,6 +315,7 @@ class LLMOrchestrator:
         """
         return LLMResponseResult(
             output_items=response.output_items,
+            stop_reason=response.stop_reason,
             generation_trace=response.generation_trace,
             generation_attempts=response.generation_attempts,
             model_name=model_name,
@@ -1090,6 +1092,10 @@ class LLMOrchestrator:
                     self.task_name, model_info.name, model_info.model_identifier, api_provider.name,
                 ):
                     if isinstance(active_request, ResponseRequest):
+                        if not client.supports_final_wire_admission:
+                            guard_unsupported_route(
+                                active_request.model_info, api_provider, operation=api_provider.client_type,
+                            )
                         response = await client.get_response(active_request)
                     elif isinstance(active_request, EmbeddingRequest):
                         response = await client.get_embedding(active_request)
@@ -1273,7 +1279,8 @@ class LLMOrchestrator:
                 await asyncio.to_thread(update_failed_request_attempt, e, status="retrying", retry_interval=api_provider.retry_interval)
                 await asyncio.sleep(api_provider.retry_interval)
 
-            except ReqAbortException:
+            except (AdmissionDenied, ReqAbortException):
+                # Local admission is not a provider outage: no retry or fallback.
                 raise
 
             except Exception as e:
@@ -1313,6 +1320,12 @@ class LLMOrchestrator:
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError as e:
+            if isinstance(request, ResponseRequest) and request.trace_context is not None:
+                pending = request.trace_context.pending_admission
+                if pending is not None:
+                    # No provider call has been admitted yet. Unknown counting
+                    # cannot cause a provider penalty or fallback to a new model.
+                    raise AdmissionDenied(pending) from e
             task_display = self.request_type or self.task_name or "未知任务"
             timeout_error = LLMTaskTimeoutError(
                 task_name=task_display,
@@ -1445,6 +1458,11 @@ class LLMOrchestrator:
                     model_info=model_info,
                     request_started_at=datetime.fromtimestamp(trace_context.current_attempt_started_at),
                 )
+
+            except AdmissionDenied:
+                # Local capacity denial is neither an outage nor an interruption.
+                self._adjust_model_usage(model_info.name, usage_penalty_delta=-1)
+                raise
 
             except (ReqAbortException, asyncio.CancelledError) as e:
                 self._adjust_model_usage(model_info.name, usage_penalty_delta=-1)

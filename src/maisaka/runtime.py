@@ -282,6 +282,8 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             await self._init_mcp()
 
         await self._restore_recent_context_from_db()
+        if global_config.chat.pi_agent_enabled and not self._is_focus_mode_active_for_current_chat():
+            await self._reasoning_engine.restore_pi_pending()
         self._running = True
         if self._is_focus_mode_active_for_current_chat():
             await focus_mode_manager.attach(self)
@@ -1026,6 +1028,10 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._last_message_received_at = max(self._last_message_received_at, received_at)
         self._update_message_trigger_state(message)
         self._observe_message_debounce(message, received_at)
+        if global_config.chat.pi_agent_enabled and self._focus_group is None:
+            # Persist in a separate inbox before any cooldown/wait gate. Moving it
+            # into canonical history happens only at a complete protocol boundary.
+            await self._reasoning_engine.record_pi_pending(message)
         self.message_cache.append(message)
         self._emit_monitor_message_ingested(message)
         self._prune_processed_message_cache()
@@ -1046,6 +1052,10 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
 
     def _request_planner_interrupt_for_message(self, message: SessionMessage) -> None:
         """快速反应模式下，用新消息打断运行中的 Planner。"""
+        # Pi admits new messages at a protocol-complete turn boundary; do not
+        # cancel native reasoning or an in-flight effect merely for an arrival.
+        if global_config.chat.pi_agent_enabled:
+            return
         if not global_config.chat.reply_timing.planner_message_steering or self._agent_state != self._STATE_RUNNING:
             return
 

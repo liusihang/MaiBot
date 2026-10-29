@@ -52,6 +52,8 @@ class DirectReplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.send = AsyncMock(side_effect=send)
         self.patches = [
+            # Assert direct-body identity without the independently configured random typo effect.
+            patch.object(reply.config_module.global_config.chinese_typo, "enable", False),
             patch.object(reply.send_service, "_send_to_target_with_message", self.send),
             patch.object(
                 reply.replyer_manager, "get_replyer", side_effect=AssertionError("Replyer generation forbidden")

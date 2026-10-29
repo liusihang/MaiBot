@@ -1,0 +1,13 @@
+{
+  "name": "maibot-pi-agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MaiBot persistent Pi agent stdio bridge; provider and tools stay in Python",
+  "engines": {"node": ">=22.19.0"},
+  "scripts": {"start": "node sidecar.mjs", "test": "node --test test/*.test.mjs"},
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0"
+  }
+}

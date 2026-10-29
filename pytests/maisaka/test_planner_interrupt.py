@@ -11,7 +11,7 @@ def _runtime(monkeypatch, *, steering: bool) -> MaisakaHeartFlowChatting:
     monkeypatch.setattr(
         runtime_module,
         "global_config",
-        SimpleNamespace(chat=SimpleNamespace(reply_timing=SimpleNamespace(planner_message_steering=steering))),
+        SimpleNamespace(chat=SimpleNamespace(pi_agent_enabled=False, reply_timing=SimpleNamespace(planner_message_steering=steering))),
     )
     instance = object.__new__(MaisakaHeartFlowChatting)
     instance._agent_state = MaisakaHeartFlowChatting._STATE_RUNNING

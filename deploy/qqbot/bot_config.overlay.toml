@@ -57,6 +57,10 @@ nickname = "马斯克"
 alias_names = ["马斯克"]
 
 [chat]
+pi_agent_enabled = true
+# Config schema 8.15.64. Safe compaction triggers, not model context hard limits.
+context_visible_char_high_watermark = 120000
+context_prompt_token_high_watermark = 48000
 max_context_size = 40
 max_private_context_size = 60
 context_compaction_summary_max_chars = 6000

@@ -806,7 +806,15 @@ class ComponentQueryService:
             Dict[str, Any]: 发往 Runner 的参数字典。
         """
 
-        payload = dict(invocation.arguments)
+        # Session ownership is host-only. user_id/group_id/platform can also be
+        # legitimate business arguments (e.g. look up another person), but only
+        # when the tool explicitly declares them in its model-facing schema.
+        schema = ComponentQueryService._build_tool_parameters_schema(entry) or {}
+        declared_arguments = set(schema.get("properties", {}))
+        reserved_context_fields = {"stream_id", "chat_id", "session_id"} | (
+            {"group_id", "user_id", "platform"} - declared_arguments
+        )
+        payload = {key: value for key, value in invocation.arguments.items() if key not in reserved_context_fields}
         context_payload = ComponentQueryService._build_tool_context_payload(context)
         if entry.invoke_method == "plugin.invoke_action":
             stream_id = str(
@@ -826,7 +834,7 @@ class ComponentQueryService:
             return payload
 
         for key, value in context_payload.items():
-            if key not in payload or not payload.get(key):
+            if key in reserved_context_fields or key not in payload:
                 payload[key] = value
         return payload
 

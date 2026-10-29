@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -14,6 +16,10 @@ def message(text="今天什么情况", mid="new-1", uid="user-1", is_at=False):
     return NS(
         message_id=mid,
         processed_plain_text=text,
+        session_id="offline-participation-test",
+        timestamp=datetime(2026, 1, 1),
+        is_notify=False,
+        reply_to=None,
         is_at=is_at,
         is_mentioned=False,
         received_at=None,
@@ -60,9 +66,13 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.prompt_patch = patch.object(part, "load_prompt_template", return_value=NS(template=PROMPT))
         self.prompt_patch.start()
+        # These tests exercise the retained legacy loop, not the new Pi entrypoint.
+        self.pi_patch = patch.object(part.global_config.chat, "pi_agent_enabled", False)
+        self.pi_patch.start()
 
     def tearDown(self):
         self.prompt_patch.stop()
+        self.pi_patch.stop()
 
     async def test_parse_rejects_extra_guidance_and_fails_open(self):
         self.assertEqual(part.parse_decision('{"decision":"engage"}'), "engage")
@@ -190,6 +200,40 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
         engine._finalize_cycle = AsyncMock(return_value=engine_mod.CycleEnd("stop", "test"))
         return engine, r, m
 
+    async def test_pi_ignore_persists_before_judgment_without_legacy_selection(self):
+        engine, r, m = self.engine_fixture()
+        order = []
+        async def ingest():
+            order.append("persist")
+        async def no(_):
+            order.append("judge")
+            r._running = False
+            return False
+        runner = NS(ingest=AsyncMock(side_effect=ingest), run=AsyncMock(), close=AsyncMock())
+        engine._pi_runner = runner
+        engine._participation_judge.should_enter = AsyncMock(side_effect=no)
+        with patch.object(part.global_config.chat, "pi_agent_enabled", True):
+            await engine.run_loop()
+        self.assertEqual(order, ["persist", "judge"])
+        runner.run.assert_not_called()
+        runner.close.assert_awaited_once()
+        engine._post_process_chat_history_after_cycle.assert_not_called()
+        engine._run_planner_request.assert_not_called()
+
+    async def test_pi_engage_uses_same_runner_and_does_not_start_legacy_loop(self):
+        engine, r, m = self.engine_fixture()
+        async def run(_):
+            r._running = False
+        runner = NS(ingest=AsyncMock(), run=AsyncMock(side_effect=run), close=AsyncMock())
+        engine._pi_runner = runner
+        engine._participation_judge.should_enter = AsyncMock(return_value=True)
+        with patch.object(part.global_config.chat, "pi_agent_enabled", True):
+            await engine.run_loop()
+        runner.ingest.assert_awaited_once()
+        runner.run.assert_awaited_once()
+        engine._post_process_chat_history_after_cycle.assert_not_called()
+        engine._run_planner_request.assert_not_called()
+
     async def test_native_engine_skip_does_not_start_terra_or_lose_history(self):
         engine, r, m = self.engine_fixture()
         saved = list(r._chat_history)
@@ -229,7 +273,7 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
         await engine.run_loop()
         engine._run_planner_request.assert_awaited_once()
         self.assertEqual(engine._run_planner_request.call_args.kwargs["source_messages"], [m, new])
-        self.assertIs(engine._run_planner_request.call_args.kwargs["trigger_message"], new)
+        self.assertIs(engine._run_planner_request.call_args.kwargs["trigger_message"], m)
 
 
 def ready_runtime():

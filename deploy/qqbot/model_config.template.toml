@@ -1,6 +1,13 @@
 # QQ group deployment profile, revision 1.
 [inner]
-version = "1.17.25"
+version = "1.17.26"
+
+# Pi requests require verified final-payload capacity, even if a model's legacy
+# request_admission.mode is audit. Configure each route's authoritative window,
+# output/reasoning semantics and input counter before enabling Pi. No values are
+# guessed here from the model name. Opaque replay, images and custom routing
+# headers are unknown unless the admission adapter supports their exact contract;
+# the current generic byte-bound counter does not support them and fails closed.
 
 [[models]]
 model_type = "llm"
