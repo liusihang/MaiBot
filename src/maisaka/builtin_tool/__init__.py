@@ -10,6 +10,8 @@ from src.core.tooling import ToolAvailabilityContext, ToolExecutionContext, Tool
 from src.llm_models.payload_content.tool_option import ToolDefinitionInput
 
 from .context import BuiltinToolRuntimeContext
+from .remember_memory import get_tool_spec as get_remember_memory_tool_spec
+from .remember_memory import handle_tool as handle_remember_memory_tool
 from .query_memory import get_tool_spec as get_query_memory_tool_spec
 from .query_memory import handle_tool as handle_query_memory_tool
 from .query_image_memory import get_tool_spec as get_query_image_memory_tool_spec
@@ -98,6 +100,7 @@ BUILTIN_TOOL_ENTRIES: List[BuiltinToolEntry] = [
         stage="action",
         visibility="deferred",
     ),
+    BuiltinToolEntry("remember_memory", get_remember_memory_tool_spec, handle_remember_memory_tool, stage="action"),
     BuiltinToolEntry("query_memory", _get_query_memory_tool_spec, handle_query_memory_tool, stage="action"),
     BuiltinToolEntry(
         "query_image_memory",

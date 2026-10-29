@@ -279,186 +279,49 @@ async def get_embedding(text: str, request_type: str = "embedding") -> Optional[
 
 
 def _split_into_sentence_segments(text: str) -> list[tuple[str, str]]:
-    """将文本分割成 (句子, 尾随分隔符) 元组，并根据概率合并
-    1. 识别分割点（, ， 。 ; 空格），但如果分割点左右都是英文字母则不分割。
-    2. 将文本分割成 (内容, 分隔符) 的元组。
-    3. 根据原始文本长度计算合并概率，概率性地合并相邻段落。
-    注意：此函数假定颜文字已在上层被保护。
-    Args:
-        text: 要分割的文本字符串 (假定颜文字已被保护)
-    Returns:
-        List[Tuple[str, str]]: 分割和合并后的 (句子, 尾随分隔符) 列表，
-        尾随分隔符是原始文本中紧跟该句的分隔符（最后一句为空字符串），
-        供后续把多句压缩回一条消息时恢复句间停顿。
-    """
-    # 预处理：处理多余的换行符
-    # 1. 将连续的换行符替换为单个换行符（保留换行符用于分割）
-    text = re.sub(r"\n\s*\n+", "\n", text)
-    # 2. 处理换行符和其他分隔符的组合（保留换行符，删除其他分隔符）
-    text = re.sub(r"\n\s*([，,。;\s])", r"\n\1", text)
-    text = re.sub(r"([，,。;\s])\s*\n", r"\1\n", text)
+    """Split at sentence endings or line breaks, keeping commas and technical text intact."""
+    protected = re.compile(
+        r'(```[\s\S]*?```|`[^`\n]+`|“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"|https?://[^\s。！？]+)'
+    )
+    result: list[tuple[str, str]] = []
+    current = ""
 
-    # 处理两个汉字中间的换行符（保留换行符，不替换为句号，让换行符强制分割）
-    # text = re.sub(r"([\u4e00-\u9fff])\n([\u4e00-\u9fff])", r"\1。\2", text)  # 注释掉，保留换行符用于分割
+    def flush(separator: str = "") -> None:
+        nonlocal current
+        content = current.strip()
+        if content:
+            result.append((content, separator))
+        current = ""
 
-    len_text = len(text)
-    if len_text < 3:
-        if random.random() < 0.01:
-            return [(char, "") for char in text]
-        return [(text, "")]
-
-    # 先标记哪些位置位于成对引号内部，避免在引号内部进行句子分割
-    # 支持的引号包括：中英文单/双引号和常见中文书名号/引号
-    quote_chars = {
-        '"',
-        "'",
-        "“",
-        "”",
-        "‘",
-        "’",
-        "「",
-        "」",
-        "『",
-        "』",
-    }
-    inside_quote = [False] * len_text
-    in_quote = False
-    current_quote_char = ""
-    for idx, ch in enumerate(text):
-        if ch in quote_chars:
-            # 遇到引号时切换状态（英文引号本身开闭相同，用同一个字符表示）
-            if not in_quote:
-                in_quote = True
-                current_quote_char = ch
-                inside_quote[idx] = False
+    for chunk in protected.split(text):
+        if not chunk:
+            continue
+        if protected.fullmatch(chunk):
+            if chunk.startswith("```"):
+                flush("\n")
+                result.append((chunk, "\n"))
             else:
-                # 只有遇到同一类引号才视为关闭
-                if ch == current_quote_char or ch in {'"', "'"} and current_quote_char in {'"', "'"}:
-                    in_quote = False
-                    current_quote_char = ""
-                inside_quote[idx] = False
-        else:
-            inside_quote[idx] = in_quote
-
-    # 定义分隔符（包含换行符）
-    separators = {"，", ",", " ", "。", ";", "\n"}
-    segments = []
-    current_segment = ""
-
-    # 1. 分割成 (内容, 分隔符) 元组
-    i = 0
-    while i < len(text):
-        char = text[i]
-        if char in separators:
-            # 引号内部一律不作为分割点（包括换行）
-            if inside_quote[i]:
-                can_split = False
+                current += chunk
+            continue
+        index = 0
+        while index < len(chunk):
+            char = chunk[index]
+            if char == "。":
+                flush("。")
+            elif char in "\r\n":
+                flush("\n")
+            elif char in "？！?!":
+                end = index + 1
+                while end < len(chunk) and chunk[end] in "？！?!":
+                    end += 1
+                current += chunk[index:end]
+                flush()
+                index = end - 1
             else:
-                # 换行符在不在引号内时都强制分割
-                if char == "\n":
-                    can_split = True
-                else:
-                    # 检查分割条件
-                    can_split = True
-                    # 检查分隔符左右是否有冒号（中英文），如果有则不分割
-                    if i > 0:
-                        prev_char = text[i - 1]
-                        if prev_char in {":", "："}:
-                            can_split = False
-                    if i < len(text) - 1:
-                        next_char = text[i + 1]
-                        if next_char in {":", "："}:
-                            can_split = False
-
-                    # 如果左右没有冒号，再检查空格的特殊情况
-                    if can_split and char == " " and i > 0 and i < len(text) - 1:
-                        prev_char = text[i - 1]
-                        next_char = text[i + 1]
-                        dash_chars = {"-", "—"}
-                        if prev_char in dash_chars or next_char in dash_chars:
-                            can_split = False
-                        else:
-                            # 不分割数字和数字、数字和英文、英文和数字、英文和英文之间的空格
-                            prev_is_alnum = prev_char.isdigit() or is_english_letter(prev_char)
-                            next_is_alnum = next_char.isdigit() or is_english_letter(next_char)
-                            if prev_is_alnum and next_is_alnum:
-                                can_split = False
-
-            if can_split:
-                # 只有当当前段不为空时才添加
-                if current_segment:
-                    segments.append((current_segment, char))
-                # 如果当前段为空，但分隔符是空格或换行符，则也添加一个空段（保留分隔符）
-                elif char in {" ", "\n"}:
-                    segments.append(("", char))
-                current_segment = ""
-            else:
-                # 不分割，将分隔符加入当前段
-                current_segment += char
-        else:
-            current_segment += char
-        i += 1
-
-    # 添加最后一个段（没有后续分隔符）
-    if current_segment:
-        segments.append((current_segment, ""))
-
-    # 过滤掉完全空的段（内容和分隔符都为空）
-    segments = [(content, sep) for content, sep in segments if content or sep]
-
-    # 如果分割后为空（例如，输入全是分隔符且不满足保留条件），恢复颜文字并返回
-    # 如果原始文本非空，则返回原始文本（可能只包含未被分割的字符或颜文字占位符）
-    if not segments:
-        return [(text, "")] if text else []
-
-    # 2. 概率合并
-    if len_text < 12:
-        split_strength = 0.2
-    elif len_text < 32:
-        split_strength = 0.6
-    else:
-        split_strength = 0.7
-    # 合并概率与分割强度相反
-    merge_probability = 1.0 - split_strength
-
-    merged_segments = []
-    idx = 0
-    while idx < len(segments):
-        current_content, current_sep = segments[idx]
-
-        # 检查是否可以与下一段合并
-        # 条件：不是最后一段，且随机数小于合并概率，且当前段有内容（避免合并空段）
-        if idx + 1 < len(segments) and current_content and current_sep != "\n" and random.random() < merge_probability:
-            next_content, next_sep = segments[idx + 1]
-            # 合并: (内容1 + 分隔符1 + 内容2, 分隔符2)
-            # 只有当下一段也有内容时才合并文本，否则只传递分隔符
-            if next_content:
-                merged_content = current_content + current_sep + next_content
-                merged_segments.append((merged_content, next_sep))
-            else:  # 下一段内容为空，只保留当前内容和下一段的分隔符
-                merged_segments.append((current_content, next_sep))
-
-            idx += 2  # 跳过下一段，因为它已被合并
-        else:
-            # 不合并，直接添加当前段
-            merged_segments.append((current_content, current_sep))
-            idx += 1
-
-    # 提取最终的句子内容（保留尾随分隔符，供压缩拼接时恢复停顿）
-    sentence_segments = [(content, sep) for content, sep in merged_segments if content]  # 只保留有内容的段
-
-    # 清理可能引入的空字符串和仅包含空白的字符串
-    sentence_segments = [
-        (sentence, sep) for sentence, sep in sentence_segments if sentence.strip()
-    ]  # 过滤掉空字符串以及仅包含空白（如换行符、空格）的字符串
-    sentence_segments = [
-        (normalized_sentence, sep)
-        for sentence, sep in sentence_segments
-        if (normalized_sentence := re.sub(r"[^\S\r\n]*[\r\n]+[^\S\r\n]*", " ", sentence).strip())
-    ]
-
-    logger.debug(f"分割并合并后的句子: {[sentence for sentence, _sep in sentence_segments]}")
-    return sentence_segments
+                current += char
+            index += 1
+    flush()
+    return result
 
 
 def split_into_sentences_w_remove_punctuation(text: str) -> list[str]:
@@ -592,11 +455,8 @@ def process_llm_response_segments(
     else:
         protected_text = text
         kaomoji_mapping = {}
-    # 提取被 () 或 [] 或 （）包裹且包含中文的内容
-    pattern = re.compile(r"[(\[（](?=.*[一-鿿]).*?[)\]）]")
-    _extracted_contents = pattern.findall(protected_text)  # 在保护后的文本上查找
-    # 去除 () 和 [] 及其包裹的内容
-    cleaned_text = pattern.sub("", protected_text)
+    # 保留回复中的括号、说明和代码；这里只处理分句，不删除正文内容。
+    cleaned_text = protected_text
 
     if cleaned_text == "":
         return [ProcessedResponseSegment("呃呃")]

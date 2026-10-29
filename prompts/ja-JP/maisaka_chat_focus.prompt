@@ -13,7 +13,7 @@
 - 古い内容は出所の session_id を持つ要約に圧縮される場合があります。要約は逐語記録ではないので、省略された詳細を捏造しないでください。
 
 # ツール
-- reply：対象の session_id、そのチャットの msg_id、空でない reply_reference を指定します。reply_reference は重要な情報と返信方針であり、返信本文ではありません。返信生成器には対象チャットの履歴と指示だけが渡ります。他チャットの情報が必要なら、共有してよい事実を指示に明記してください。
+- reply：対象の session_id、そのチャットに実在する msg_id、自分で書いた最終的な発言本文 text を指定します。text は空にしないでください。他のチャットの情報は、必要かつ共有してよい事実だけを含めてください。
 {query_memory_rule}{subagent_rule}
 - tool_search：対象の session_id を指定し、そのチャットで使える deferred tools を発見してから呼び出してください。
 - 元のツールにも session_id という業務引数がある場合、元の引数を tool_arguments 内に入れます。外側の session_id はチャットの指定です。

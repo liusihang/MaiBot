@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -13,6 +14,19 @@ def _fake_global_config(**integration_values):
             integration=SimpleNamespace(**integration_values),
         )
     )
+
+
+def _summary_source_messages(count: int):
+    return [
+        SimpleNamespace(
+            message_id=f"source-{index}", session_id="session-1", timestamp=float(index + 1),
+            message_info=SimpleNamespace(
+                user_info=SimpleNamespace(user_id="user-1"),
+                group_info=SimpleNamespace(group_id="group-1"),
+            ),
+        )
+        for index in range(count)
+    ]
 
 
 def test_person_fact_parse_fact_list_deduplicates_and_filters_short_items():
@@ -268,7 +282,8 @@ async def test_person_fact_writeback_uses_resolved_person_id(monkeypatch):
         assert person.person_id == "person-target"
         assert "我长期用青轴键盘" in user_evidence_text
         del reply_text
-        return ["重名用户长期使用青轴键盘"]
+        return [{"fact": "重名用户长期使用青轴键盘", "evidence_message_id": "user-1",
+                 "evidence_quote": "我长期用青轴键盘。"}]
 
     async def fake_store_person_memory_from_answer(person_name: str, memory_content: str, chat_id: str, **kwargs):
         stored_payloads.append(
@@ -281,6 +296,8 @@ async def test_person_fact_writeback_uses_resolved_person_id(monkeypatch):
         )
 
     service._extract_facts = fake_extract_facts
+    monkeypatch.setattr(memory_flow_module.memory_service, "fact_admin",
+                        AsyncMock(return_value={"success": True, "items": []}))
     monkeypatch.setattr(memory_flow_module, "store_person_memory_from_answer", fake_store_person_memory_from_answer)
     monkeypatch.setattr(
         memory_flow_module,
@@ -335,6 +352,8 @@ async def test_person_fact_writeback_marks_verified_user_statement_stable(monkey
         stored_payloads.append(kwargs)
 
     service._extract_facts = fake_extract_facts
+    monkeypatch.setattr(memory_flow_module.memory_service, "fact_admin",
+                        AsyncMock(return_value={"success": True, "items": []}))
     monkeypatch.setattr(memory_flow_module, "store_person_memory_from_answer", fake_store)
     monkeypatch.setattr(memory_flow_module, "find_messages", lambda **kwargs: [user_message])
     monkeypatch.setattr(memory_flow_module, "is_bot_self", lambda platform, user_id: False)
@@ -372,11 +391,12 @@ async def test_chat_summary_writeback_service_triggers_when_threshold_reached(mo
             chat_summary_writeback_context_length=7,
         ),
     )
-    monkeypatch.setattr(memory_flow_module, "count_messages", lambda **kwargs: 5)
+    monkeypatch.setattr(memory_flow_module, "count_messages", lambda **kwargs: 0 if "before_time" in kwargs else 5)
+    monkeypatch.setattr(memory_flow_module, "find_messages", lambda **kwargs: _summary_source_messages(5))
 
     async def fake_ingest_summary(**kwargs):
         events.append(("ingest_summary", kwargs))
-        return SimpleNamespace(success=True, detail="ok")
+        return SimpleNamespace(success=True, detail="ok", stored_ids=["summary-1"], skipped_ids=[])
 
     async def fake_load_last_trigger_message_count(self, *, session_id: str, total_message_count: int) -> int:
         del self, session_id, total_message_count
@@ -396,12 +416,12 @@ async def test_chat_summary_writeback_service_triggers_when_threshold_reached(mo
 
     assert len(events) == 1
     _, payload = events[0]
-    assert payload["external_id"] == "chat_auto_summary:session-1:5"
+    assert payload["external_id"] == "chat_auto_summary:v2:session-1:5"
     assert payload["chat_id"] == "session-1"
     assert payload["text"] == ""
     assert payload["metadata"]["generate_from_chat"] is True
     assert payload["metadata"]["context_length"] == 5
-    assert payload["metadata"]["configured_context_length"] == 7
+    assert payload["metadata"]["writeback_version"] == 2
     assert payload["metadata"]["previous_trigger_message_count"] == 0
     assert payload["metadata"]["pending_message_count"] == 5
     assert payload["metadata"]["trigger"] == "message_threshold"
@@ -462,10 +482,11 @@ async def test_chat_summary_writeback_service_restores_previous_trigger_count(mo
         ),
     )
     monkeypatch.setattr(memory_flow_module, "count_messages", lambda **kwargs: 8)
+    monkeypatch.setattr(memory_flow_module, "find_messages", lambda **kwargs: _summary_source_messages(8))
 
     async def fake_ingest_summary(**kwargs):
         events.append(("ingest_summary", kwargs))
-        return SimpleNamespace(success=True, detail="ok")
+        return SimpleNamespace(success=True, detail="ok", stored_ids=["summary-1"], skipped_ids=[])
 
     async def fake_load_last_trigger_message_count(self, *, session_id: str, total_message_count: int) -> int:
         del self, session_id, total_message_count
@@ -485,7 +506,7 @@ async def test_chat_summary_writeback_service_restores_previous_trigger_count(mo
 
     assert len(events) == 1
     _, payload = events[0]
-    assert payload["external_id"] == "chat_auto_summary:session-1:8"
+    assert payload["external_id"] == "chat_auto_summary:v2:session-1:8"
     assert service._states["session-1"].last_trigger_message_count == 8
 
 
@@ -610,15 +631,18 @@ async def test_chat_summary_writeback_service_falls_back_to_current_count_for_le
 async def test_chat_summary_writeback_service_loads_trigger_count_from_summary_metadata(monkeypatch):
     class FakeMetadataStore:
         @staticmethod
-        def get_summary_checkpoint_count(chat_id: str) -> int:
-            return 0
+        def query(sql: str, params: tuple):
+            assert "chat_summary_checkpoints" in sql
+            assert params == ("session-1", "chat_auto_summary:v2:session-1:%")
+            return [{"count": 0}]
 
         @staticmethod
         def get_paragraphs_by_source(source: str):
             assert source == "chat_summary:session-1"
             return [
-                {"created_at": 1.0, "metadata": {"trigger_message_count": 3}},
-                {"created_at": 2.0, "metadata": {"trigger_message_count": 6}},
+                {"created_at": 1.0, "metadata": {"trigger_message_count": 3, "writeback_version": 2}},
+                {"created_at": 2.0, "metadata": {"trigger_message_count": 6, "writeback_version": 2}},
+                {"created_at": 3.0, "metadata": {"trigger_message_count": 8}},
             ]
 
     class FakeRuntimeManager:

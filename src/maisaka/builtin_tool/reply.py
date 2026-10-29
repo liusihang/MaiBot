@@ -1,4 +1,4 @@
-﻿"""reply 工具适配与共用回复执行服务。"""
+"""reply 工具适配与共用回复执行服务。"""
 
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional, Tuple
@@ -12,7 +12,9 @@ from src.chat.message_receive.message import SessionMessage
 from src.chat.utils.utils import is_bot_self
 from src.cli.maisaka_cli_sender import CLI_PLATFORM_NAME, render_cli_message
 from src.common.data_models.message_component_data_model import TextComponent
-from src.common.data_models.reply_generation_data_models import ReplyGenerationResult, build_reply_monitor_detail
+from src.common.data_models.reply_generation_data_models import (
+    GenerationMetrics, LLMCompletionResult, ReplyGenerationResult, build_reply_monitor_detail,
+)
 from src.common.logger import get_logger
 from src.config import config as config_module
 from src.core.tooling import ToolAvailabilityContext, ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
@@ -31,7 +33,7 @@ if TYPE_CHECKING:
     from src.maisaka.reply_supplement import ReplySupplement
 
 logger = get_logger("maisaka_builtin_reply")
-_REPLY_TOOL_INTERNAL_ARGUMENTS = {"msg_id", "_reply_id", "_plugin_reply_prompt"}
+_REPLY_TOOL_INTERNAL_ARGUMENTS = {"msg_id", "text", "_reply_id", "_plugin_reply_prompt"}
 _DUPLICATE_TARGET_REPLY_REMINDER_ARG = "_duplicate_target_reply_reminder"
 _DUPLICATE_TARGET_REPLY_REMINDER_TEMPLATE = (
     "你刚刚已经回复过这条消息，你刚刚的发言是：“{previous_reply}”\n"
@@ -128,56 +130,12 @@ def get_tool_spec(context: Optional[ToolAvailabilityContext] = None) -> ToolSpec
             "type": "string",
             "description": "要回复的消息msg_id。",
         },
-        "reply_reference": {
+        "text": {
             "type": "string",
             "minLength": 1,
-            "description": (
-                "提供本次回复的上下文关键信息与回复方向，"
-                "包括当前聊天状态、人物关系、事实信息、回忆信息；不是回复正文。"
-            ),
-        },
-        "reply_style": {
-            "type": "string",
-            "description": "可选。控制本次回复的篇幅和表达方式",
-            "enum": ["简短表达", "正常回复", "长回复"],
+            "description": "你已经写好的最终消息正文，将直接发送；只填群友应看到的文字。",
         },
     }
-    if _use_expression_intent():
-        properties["expression_intent"] = {
-            "type": "object",
-            "description": (
-                "可选。给 replyer 表达方式选择使用的结构化意图，不是回复正文。"
-                "当这次回复需要特定语气、场景或话术时填写，避免表达选择只按关键词匹配。"
-            ),
-            "properties": {
-                "focus": {
-                    "type": "string",
-                    "description": "本次表达主要应该贴合的目标消息、片段或话题。",
-                },
-                "reply_act": {
-                    "type": "string",
-                    "description": "这次回复要完成的动作，例如澄清、安抚、调侃、追问、解释边界。",
-                },
-                "scene": {
-                    "type": "string",
-                    "description": "当前表达场景，例如技术排查、截图分享、撒娇玩笑、价格询问。",
-                },
-                "tone": {
-                    "type": "string",
-                    "description": "期望语气，例如轻松、可靠、吐槽、委婉、简短肯定。",
-                },
-                "prefer": {
-                    "type": "array",
-                    "description": "优先考虑的表达类型或话术倾向。",
-                    "items": {"type": "string"},
-                },
-                "avoid": {
-                    "type": "array",
-                    "description": "需要避免的表达类型、误判方向或不该注入的具体结论。",
-                    "items": {"type": "string"},
-                },
-            },
-        }
     properties["attach_pic"] = {
         "type": "array",
         "description": (
@@ -226,15 +184,17 @@ def get_tool_spec(context: Optional[ToolAvailabilityContext] = None) -> ToolSpec
 
     return ToolSpec(
         name="reply",
-        description="根据当前思考生成并发送可见回复；可以使用参数附加回复内容。",
+        description="发送你已写好的消息正文，可附带图片、表情和@。成功返回发送回执，失败返回原因；不会再调用模型改写。",
         parameters_schema={
             "type": "object",
             "properties": properties,
-            "required": ["msg_id", "reply_reference"],
+            "required": ["msg_id", "text"],
+            "additionalProperties": False,
         },
         provider_name="maisaka_builtin",
         provider_type="builtin",
     )
+
 
 
 def _build_monitor_metadata(reply_result: ReplyGenerationResult, reply_id: str = "") -> Dict[str, object]:
@@ -252,6 +212,11 @@ def _build_monitor_metadata(reply_result: ReplyGenerationResult, reply_id: str =
         ]
     if isinstance(monitor_detail, dict):
         metadata["monitor_detail"] = monitor_detail
+    if reply_result.metrics.extra.get("reply_mode") == "single_agent":
+        metadata["reply_mode"] = "single_agent"
+        metadata["replyer_llm_calls"] = 0
+        metadata.setdefault("monitor_detail", {})["generation_attempts"] = []
+        metadata["monitor_detail"]["reply_mode"] = "single_agent"
     return metadata
 
 
@@ -382,6 +347,10 @@ async def handle_tool(
             f"{tool_ctx.runtime.log_prefix} 检测到 reply 工具参数被重复包裹，已自动解包: "
             f"调用编号={invocation.call_id}"
         )
+    if not isinstance(invocation_arguments.get("text"), str) or not invocation_arguments["text"].strip():
+        return tool_ctx.build_failure_result(
+            "reply", "reply 需要非空的 text 正文，例如 {\"msg_id\":\"123\",\"text\":\"要发送的话\"}。"
+        )
     return await execute_reply(tool_ctx, invocation_arguments, call_id=invocation.call_id)
 
 
@@ -403,13 +372,18 @@ async def execute_reply(
     invocation_arguments = deepcopy(arguments)
     if type(invocation_arguments.get("attach_emoji")) is int and invocation_arguments["attach_emoji"] == 0:
         invocation_arguments.pop("attach_emoji")
-    reply_reference = invocation_arguments.get("reply_reference")
-    if not isinstance(reply_reference, str) or not reply_reference.strip():
-        return tool_ctx.build_failure_result(
-            "reply",
-            "reply 工具必须提供非空字符串 `reply_reference`，请填写本次回复的上下文关键信息与回复方向后重新调用。",
-        )
-    invocation_arguments["reply_reference"] = reply_reference.strip()
+    direct_text = invocation_arguments.get("text")
+    if "text" in invocation_arguments:
+        if not isinstance(direct_text, str) or not direct_text.strip():
+            return tool_ctx.build_failure_result("reply", "text 必须是非空的最终消息正文。")
+        direct_text = direct_text.strip()
+    else:
+        # Existing plugin APIs call this service with reply_reference to request generation.
+        # The Agent-facing reply schema and handle_tool require text and never enter this branch.
+        reply_reference = invocation_arguments.get("reply_reference")
+        if not isinstance(reply_reference, str) or not reply_reference.strip():
+            return tool_ctx.build_failure_result("reply", "缺少非空 text 正文。")
+        invocation_arguments["reply_reference"] = reply_reference.strip()
     target_message_id = str(invocation_arguments.get("msg_id") or "").strip()
     if invocation_arguments.get("attach_at") and not config_module.global_config.chat.enable_reply_at:
         return tool_ctx.build_failure_result("reply", "回复时 @ 用户已关闭，不能使用 attach_at。")
@@ -467,82 +441,95 @@ async def execute_reply(
         reply_tool_args["_reply_id"] = extension_execution.reply_id
         reply_tool_args["_plugin_reply_prompt"] = extension_execution.extra_prompt
 
-    try:
-        replyer = replyer_manager.get_replyer(
-            chat_stream=tool_ctx.runtime.chat_stream,
-            request_type="maisaka.replyer",
-            replyer_type="maisaka",
-        )
-    except Exception:
-        logger.exception(f"{tool_ctx.runtime.log_prefix} 获取回复生成器时发生异常: 目标消息编号={target_message_id}")
-        logger.info(traceback.format_exc())
-        return tool_ctx.build_failure_result(
-            "reply",
-            "获取 Maisaka 回复生成器时发生异常。",
-            metadata={"reply_id": extension_execution.reply_id},
-        )
-
-    if replyer is None:
-        logger.error(f"{tool_ctx.runtime.log_prefix} 获取 Maisaka 回复生成器失败")
-        return tool_ctx.build_failure_result(
-            "reply",
-            "Maisaka 回复生成器当前不可用。",
-            metadata={"reply_id": extension_execution.reply_id},
-        )
-
-    replyer_chat_history = list(tool_ctx.runtime._chat_history)
-    if config_module.global_config.debug.replyer_retro_prompt:
-        replyer_chat_history = await tool_ctx.runtime.build_retro_reply_history()
-    # 并行编排的引用目标尚未确定，不能把请求快照的最后一条消息强制指定为正文回复对象。
-    previous_target_reply = (
-        _find_recent_reply_to_target(replyer_chat_history, target_message_id) if supplement_runner is None else ""
-    )
-    if previous_target_reply:
-        reply_tool_args = _with_duplicate_target_reply_reminder(reply_tool_args, previous_target_reply)
     supplement: Optional["ReplySupplement"] = None
-    try:
-        tool_ctx.runtime._update_stage_status("Replyer", "生成可见回复及富文本编排" if supplement_runner else "生成可见回复")
-        generation = replyer.generate_reply_with_context(
-            reply_reason="",
-            stream_id=tool_ctx.runtime.session_id,
-            reply_message=target_message if supplement_runner is None else None,
-            chat_history=replyer_chat_history,
-            image_recognition_refresher=lambda history: (
-                tool_ctx.runtime._reasoning_engine._refresh_chat_history_visual_placeholders(
-                    chat_history=history,
-                    wait_for_text_model=True,
-                )
+    if direct_text is not None:
+        success = True
+        reply_result = ReplyGenerationResult(
+            success=True,
+            completion=LLMCompletionResult(response_text=direct_text),
+            metrics=GenerationMetrics(
+                llm_ms=0.0,
+                stage_logs=["单 Agent 正文直接发送；Replyer 模型调用 0 次。"],
+                extra={"reply_mode": "single_agent"},
             ),
-            reply_tool_args=reply_tool_args,
-            sub_agent_runner=lambda system_prompt: _run_expression_selector(
-                tool_ctx,
-                system_prompt,
-            ),
-            log_reply=False,
         )
-        if supplement_runner is None:
-            success, reply_result = await generation
-        else:
-            # 明确收回另一分支：失败或取消后不能遗留仍在生成的后台任务。
-            tasks = [asyncio.create_task(generation), asyncio.create_task(supplement_runner())]
-            try:
-                generation_result, supplement = await asyncio.gather(*tasks)
-                success, reply_result = generation_result
-            finally:
-                for task in tasks:
-                    if not task.done():
-                        task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-            reply_result.metrics.extra["reply_supplement"] = supplement.metadata
-    except Exception as exc:
-        logger.exception(
-            f"{tool_ctx.runtime.log_prefix} 回复生成器执行异常: 目标消息编号={target_message_id} 异常={exc}"
+    else:
+        try:
+            replyer = replyer_manager.get_replyer(
+                chat_stream=tool_ctx.runtime.chat_stream,
+                request_type="maisaka.replyer",
+                replyer_type="maisaka",
+            )
+        except Exception:
+            logger.exception(f"{tool_ctx.runtime.log_prefix} 获取回复生成器时发生异常: 目标消息编号={target_message_id}")
+            logger.info(traceback.format_exc())
+            return tool_ctx.build_failure_result(
+                "reply",
+                "获取 Maisaka 回复生成器时发生异常。",
+                metadata={"reply_id": extension_execution.reply_id},
+            )
+
+        if replyer is None:
+            logger.error(f"{tool_ctx.runtime.log_prefix} 获取 Maisaka 回复生成器失败")
+            return tool_ctx.build_failure_result(
+                "reply",
+                "Maisaka 回复生成器当前不可用。",
+                metadata={"reply_id": extension_execution.reply_id},
+            )
+
+        replyer_chat_history = list(tool_ctx.runtime._chat_history)
+        if config_module.global_config.debug.replyer_retro_prompt:
+            replyer_chat_history = await tool_ctx.runtime.build_retro_reply_history()
+        # 并行编排的引用目标尚未确定，不能把请求快照的最后一条消息强制指定为正文回复对象。
+        previous_target_reply = (
+            _find_recent_reply_to_target(replyer_chat_history, target_message_id) if supplement_runner is None else ""
         )
-        return tool_ctx.build_failure_result(
-            "reply",
-            f"生成可见回复或补充内容时发生异常：{type(exc).__name__}: {exc}",
-            metadata={"reply_id": extension_execution.reply_id},
-        )
+        if previous_target_reply:
+            reply_tool_args = _with_duplicate_target_reply_reminder(reply_tool_args, previous_target_reply)
+        try:
+            tool_ctx.runtime._update_stage_status("Replyer", "生成可见回复及富文本编排" if supplement_runner else "生成可见回复")
+            generation = replyer.generate_reply_with_context(
+                reply_reason="",
+                stream_id=tool_ctx.runtime.session_id,
+                reply_message=target_message if supplement_runner is None else None,
+                chat_history=replyer_chat_history,
+                image_recognition_refresher=lambda history: (
+                    tool_ctx.runtime._reasoning_engine._refresh_chat_history_visual_placeholders(
+                        chat_history=history,
+                        wait_for_text_model=True,
+                    )
+                ),
+                reply_tool_args=reply_tool_args,
+                sub_agent_runner=lambda system_prompt: _run_expression_selector(
+                    tool_ctx,
+                    system_prompt,
+                ),
+                log_reply=False,
+            )
+            if supplement_runner is None:
+                success, reply_result = await generation
+            else:
+                # 明确收回另一分支：失败或取消后不能遗留仍在生成的后台任务。
+                tasks = [asyncio.create_task(generation), asyncio.create_task(supplement_runner())]
+                try:
+                    generation_result, supplement = await asyncio.gather(*tasks)
+                    success, reply_result = generation_result
+                finally:
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                reply_result.metrics.extra["reply_supplement"] = supplement.metadata
+        except Exception as exc:
+            logger.exception(
+                f"{tool_ctx.runtime.log_prefix} 回复生成器执行异常: 目标消息编号={target_message_id} 异常={exc}"
+            )
+            return tool_ctx.build_failure_result(
+                "reply",
+                f"生成可见回复或补充内容时发生异常：{type(exc).__name__}: {exc}",
+                metadata={"reply_id": extension_execution.reply_id},
+            )
+
 
     reply_text = reply_result.completion.response_text.strip() if success else ""
 

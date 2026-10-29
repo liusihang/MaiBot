@@ -1,0 +1,15 @@
+{
+  "manifest_version": 2,
+  "id": "local.group-proactive",
+  "name": "群聊主动话题",
+  "version": "1.0.0",
+  "description": "冷场时唤醒现有单 Agent，结合本群近期讨论及相关新闻开题，夜间暂停。",
+  "author": {"name": "Local", "url": "http://localhost"},
+  "license": "MIT",
+  "host_application": {"min_version": "1.3.15", "max_version": "1.3.99"},
+  "sdk": {"min_version": "2.3.0", "max_version": "2.99.99"},
+  "dependencies": [],
+  "capabilities": ["message.get_by_time_in_chat", "maisaka.proactive.trigger"],
+  "urls": {"repository": "http://localhost/plugins/group_proactive"},
+  "i18n": {"default_locale": "zh-CN", "supported_locales": ["zh-CN"]}
+}

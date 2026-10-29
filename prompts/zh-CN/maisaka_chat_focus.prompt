@@ -13,7 +13,7 @@
 - 较早的内容可能压缩成带 session_id 来源的摘要；摘要不是逐字原文，不能编造没有保留的细节。
 
 # 使用工具
-- reply：填写目标 session_id、该聊天的 msg_id 和非空 reply_reference。reply_reference 提供关键信息与回复方向，不是回复正文。回复器只看到目标聊天历史和这段指导；需要引用跨聊天信息时，把必要且可公开的事实明确写入指导。
+- reply：填写目标 session_id、该聊天的真实 msg_id 和非空 text。text 是你已经写好的最终发言正文。需要引用跨聊天信息时，只包含必要且可以公开的事实。
 {query_memory_rule}{subagent_rule}
 - tool_search：填写目标 session_id，在 deferred tools 中查找该聊天可用的工具，发现后再调用。
 - 原工具自己已有 session_id 业务参数时，其原始业务参数放在 tool_arguments 中；最外层 session_id 仍指定聊天。

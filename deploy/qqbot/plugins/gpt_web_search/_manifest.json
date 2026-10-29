@@ -1,0 +1,33 @@
+{
+  "manifest_version": 2,
+  "id": "local.gpt-web-search",
+  "name": "GPT 默认网络搜索",
+  "version": "1.1.0",
+  "description": "OpenWebUI 同款 Sub2API GPT 搜索、搜图与 QQ 网络图片发送；支持搜索视频页面链接。",
+  "author": {
+    "name": "Local",
+    "url": "http://localhost"
+  },
+  "license": "MIT",
+  "host_application": {
+    "min_version": "1.3.0",
+    "max_version": "1.3.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [
+    "send.image"
+  ],
+  "urls": {
+    "repository": "http://localhost/plugins/gpt_web_search"
+  },
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}

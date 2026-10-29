@@ -1,0 +1,12 @@
+# QQ group deployment profile, revision 1.
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[search]
+model = "gpt-6-luna"
+timeout_seconds = 60
+max_output_chars = 16000
+max_output_tokens = 2000
+endpoint = "https://gateway.example.com/v1/alpha/search"
+api_key = ""

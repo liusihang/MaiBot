@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Awaitable, Dict, List, Optional
 
 import asyncio
 import json
-import os
 import time
 
 from json_repair import repair_json
@@ -22,10 +22,9 @@ from src.person_info.person_info import Person, get_person_id, store_person_memo
 from src.services import memory_service as memory_service_module
 from src.services.memory_service import memory_service
 from src.A_memorix.core.image.component_paths import build_chat_external_ref, iter_message_image_components
-from src.A_memorix.host_service import a_memorix_host_service
 
 from .image_writeback_journal import ImageWritebackJournal
-from .person_fact_reverification import reclassify_historical_person_facts
+from .memory_records import message_identity, user_text, direct_self_evidence, fact_key
 
 logger = get_logger("memory_flow_service")
 
@@ -49,7 +48,7 @@ class PersonFactWritebackService:
             return
         self._stopping = False
         self._worker_task = asyncio.create_task(self._worker_loop(), name="A_Memorix.person_fact_writeback")
-        self._reclassify_task = asyncio.create_task(self._historical_reclassify_loop(), name="A_Memorix.person_fact_reclassify")
+        # Historical facts are repaired using their original evidence, never blindly promoted.
 
     async def shutdown(self) -> None:
         self._stopping = True
@@ -72,47 +71,6 @@ class PersonFactWritebackService:
             pass
         except Exception as exc:
             logger.warning(f"关闭人物事实写回 worker 失败: {exc}")
-
-    async def _historical_reclassify_loop(self) -> None:
-        """后台分批恢复旧自动提取事实的分类，持久化游标以支持重启续跑。"""
-
-        state_path = a_memorix_host_service.get_runtime_data_dir() / "person_fact_classification_cursor.json"
-        await asyncio.sleep(5)
-        while not self._stopping:
-            try:
-                if not global_config.a_memorix.integration.person_fact_writeback_enabled:
-                    await asyncio.sleep(30)
-                    continue
-                if not (a_memorix_host_service.get_runtime_data_dir() / "metadata" / "metadata.db").exists():
-                    await asyncio.sleep(30)
-                    continue
-                state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-                if not isinstance(state, dict):
-                    raise ValueError("历史人物事实分类进度文件格式错误")
-                cursor = str(state.get("cursor", "") or "")
-                result = await reclassify_historical_person_facts(cursor=cursor, limit=50)
-                next_cursor = str(result["next_cursor"]) if result["has_more"] else ""
-                state_path.parent.mkdir(parents=True, exist_ok=True)
-                temporary_path = state_path.with_suffix(".json.tmp")
-                progress = {
-                    "cursor": next_cursor,
-                    "processed_total": int(state.get("processed_total", 0)) + int(result["processed"]),
-                    "promoted_total": int(state.get("promoted_total", 0)) + int(result["promoted"]),
-                    "updated_at": time.time(),
-                }
-                temporary_path.write_text(json.dumps(progress, ensure_ascii=False), encoding="utf-8")
-                os.replace(temporary_path, state_path)
-                if int(result["promoted"]):
-                    logger.info(f"历史人物事实分类完成一批：晋升 {result['promoted']} 条")
-                if result["has_more"]:
-                    await asyncio.sleep(1)
-                else:
-                    await asyncio.sleep(24 * 3600)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.error(f"历史人物事实分类失败: {exc}", exc_info=True)
-                await asyncio.sleep(60)
 
     async def enqueue(self, message: Any) -> None:
         if not bool(global_config.a_memorix.integration.person_fact_writeback_enabled):
@@ -169,32 +127,34 @@ class PersonFactWritebackService:
         if not person_name:
             return
 
-        evidence_message_ids = [
-            str(getattr(item, "message_id", "") or "").strip()
-            for item in evidence.target_messages
-            if str(getattr(item, "message_id", "") or "").strip()
-        ]
+        existing = await memory_service.fact_admin(action="list", scope_type="person",
+            scope_id=target_person.person_id, statuses=["active"], limit=200)
+        if not existing.get("success"):
+            logger.warning("人物事实读取失败，暂不追加重复或未核实内容")
+            return
+        keys = {fact_key(x.get("value_text", ""), person_name) for x in existing.get("items", [])}
         for item in facts:
-            fact = str(item.get("fact", "") if isinstance(item, dict) else item).strip()
-            if not fact:
+            source = direct_self_evidence(item, evidence.target_messages, person_name)
+            fact = str(item.get("fact", "") or "").strip() if isinstance(item, dict) else ""
+            key = fact_key(fact, person_name)
+            if source is None or not fact or key in keys:
                 continue
-            # 语义判断由提取模型完成，来源 ID 由本次实际输入的消息确定。
-            # 记录完整的提取上下文，不把模型生成的消息 ID 写成真实证据。
+            keys.add(key)
             await store_person_memory_from_answer(
-                person_name,
-                fact,
-                session_id,
-                person_id=str(getattr(target_person, "person_id", "") or "").strip(),
-                evidence_source="user_supported",
-                evidence_message_ids=evidence_message_ids,
-                fact_claim={"authority": "direct_user", "stability": "stable", "profile_section": "stable_facts"},
+                person_name, fact, session_id, person_id=target_person.person_id,
+                evidence_source="direct_self_statement",
+                evidence_message_ids=[str(source.message_id)],
+                fact_claim={"authority": "direct_user", "stability": "stable",
+                    "profile_section": str(item.get("profile_section", "stable_facts"))
+                        if item.get("profile_section") in {"identity_settings", "stable_facts", "interaction_preferences"}
+                        else "stable_facts"},
             )
 
     def _resolve_target_person(self, message: Any) -> Optional[Person]:
         session = getattr(message, "session", None)
         session_platform = str(getattr(session, "platform", "") or getattr(message, "platform", "") or "").strip()
         session_user_id = str(getattr(session, "user_id", "") or "").strip()
-        group_id = str(getattr(session, "group_id", "") or "").strip()
+        group_id = message_identity(message)[1]
 
         if session_platform and session_user_id and not group_id:
             if is_bot_self(session_platform, session_user_id):
@@ -324,7 +284,7 @@ class PersonFactWritebackService:
                 continue
             if target_person_id and get_person_id(platform, user_id) != target_person_id:
                 continue
-            text = str(getattr(item, "processed_plain_text", "") or "").strip()
+            text = user_text(item)
             if not text:
                 continue
             message_id = str(getattr(item, "message_id", "") or "").strip()
@@ -370,7 +330,7 @@ class PersonFactWritebackService:
 
     @staticmethod
     def _format_evidence_message_line(item: Any, *, include_sender: bool, mark_target: bool = False) -> str:
-        text = str(getattr(item, "processed_plain_text", "") or "").strip()
+        text = user_text(item)
         if not text:
             return ""
         if not include_sender:
@@ -396,26 +356,25 @@ class PersonFactWritebackService:
 用户原始发言证据：
 {user_evidence_text}
 
-机器人回复：
-{reply_text}
-
 请只提取满足以下条件的事实：
 1. 事实值必须能被“目标用户原始发言”直接支持，不能只来自机器人回复或邻近上下文。
-2. 明确是关于目标人物本人的信息。
+2. 明确是目标人物本人的直接自述，不把目标用户问机器人的问题、引用/转述别人的话当作自己的偏好或身份。
 3. 具有相对稳定性，可以作为长期记忆保存。
 4. 用简洁中文陈述句表达。
 5. 如果用户原始发言中出现“我/我的/自己”，默认指目标人物，请先改写成关于目标人物的第三人称事实再输出。
 6. 邻近上下文只能用于补全目标用户短答、省略、被追问的问题或代词指向。例如上下文问“你对什么过敏？”，目标用户答“青霉素”，可以提取“目标人物对青霉素过敏”。
 7. 如果完整事实只能靠机器人回复或邻近上下文中的新增事实值成立，而目标用户原始发言没有确认或给出该事实值，不要提取。
+8. 用户直接表达关于自己的互动边界或偏好可以记录，即使是请求/疑问句式，例如“你能别让ai画我了不”应提取为“目标人物不希望自己被AI绘制”，分类为 interaction_preferences；这与问机器人为什么喜欢某物不同。
 
 不要提取：
 - 机器人的情绪、计划、临时动作、客套话
 - 仅由机器人提出的建议、猜测、玩笑、回忆或承诺
 - 只适用于当前时刻的短期安排
 - 不确定、猜测、反问
+- 群内临时角色、互损称号、转发的故事或截图内容，不当成发言者的现实身份；称呼和群内约定由 remember_memory 保存
 - 与目标人物无关的信息
 
-严格输出 JSON 数组，每项包含 fact、evidence_message_id、evidence_quote。证据片段必须逐字摘自目标用户原始发言。请勿编造消息 ID。例：
+严格输出 JSON 数组，每项包含 fact、evidence_message_id、evidence_quote、profile_section。profile_section 为 identity_settings、stable_facts 或 interaction_preferences。证据片段必须逐字摘自目标用户原始发言。请勿编造消息 ID。例：
 [{{"fact":"他喜欢打游戏","evidence_message_id":"消息ID","evidence_quote":"我喜欢打游戏"}}]
 如果没有可写入的事实，输出 []"""
         try:
@@ -512,15 +471,24 @@ class ChatSummaryWritebackService:
         self._worker_task: Optional[asyncio.Task] = None
         self._stopping = False
         self._states: dict[str, ChatSummaryWritebackState] = {}
+        self._recovery_task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
         if self._worker_task is not None and not self._worker_task.done():
             return
         self._stopping = False
         self._worker_task = asyncio.create_task(self._worker_loop(), name="memory_chat_summary_writeback")
+        self._recovery_task = asyncio.create_task(self._recover_recent(), name="memory_summary_recovery")
 
     async def shutdown(self) -> None:
         self._stopping = True
+        if self._recovery_task is not None:
+            self._recovery_task.cancel()
+            try:
+                await self._recovery_task
+            except asyncio.CancelledError:
+                pass
+            self._recovery_task = None
         worker = self._worker_task
         self._worker_task = None
         if worker is None:
@@ -533,22 +501,22 @@ class ChatSummaryWritebackService:
         except Exception as exc:
             logger.warning(f"关闭聊天摘要写回 worker 失败: {exc}")
 
-    async def enqueue(self, message: Any) -> None:
+    async def enqueue(self, message: Any, *, flush: bool = False) -> None:
         if not bool(global_config.a_memorix.integration.chat_summary_writeback_enabled):
             return
         if self._stopping:
             return
         try:
-            self._queue.put_nowait(message)
+            self._queue.put_nowait((message, flush))
         except asyncio.QueueFull:
             logger.warning("聊天摘要写回队列已满，跳过本次触发")
 
     async def _worker_loop(self) -> None:
         try:
             while not self._stopping:
-                message = await self._queue.get()
+                message, flush = await self._queue.get()
                 try:
-                    await self._handle_message(message)
+                    await self._handle_message(message, flush=flush)
                 except Exception as exc:
                     logger.warning(f"聊天摘要写回处理失败: {exc}", exc_info=True)
                 finally:
@@ -556,71 +524,75 @@ class ChatSummaryWritebackService:
         except asyncio.CancelledError:
             raise
 
-    async def _handle_message(self, message: Any) -> None:
-        session_id = self._resolve_session_id(message)
+    async def _recover_recent(self) -> None:
+        # Resume today's already recorded messages in the live process/kernel.
+        await asyncio.sleep(5)
+        cfg = global_config.a_memorix.filter
+        groups = [str(x).split(":", 1)[1] for x in cfg.chats if str(x).startswith("group:")]
+        for group_id in groups:
+            messages = await asyncio.to_thread(find_messages, group_id=group_id, limit=1, limit_mode="latest")
+            if messages and not self._stopping:
+                await self.enqueue(messages[0], flush=True)
+
+    async def _handle_message(self, message: Any, *, flush: bool = False) -> None:
+        session_id, group_id, user_id = message_identity(message)
         if not session_id:
             return
-
         message_time = self._extract_message_timestamp(message)
-        total_message_count = self._count_messages_until_trigger(session_id=session_id, message_time=message_time)
-        if total_message_count <= 0:
+        total = await asyncio.to_thread(
+            self._count_messages_until_trigger, session_id=session_id, message_time=message_time,
+        )
+        if total <= 0:
             return
-
-        threshold = self._message_threshold()
         state = self._states.get(session_id)
         if state is None:
-            restored_count = await self._load_last_trigger_message_count(
-                session_id=session_id,
-                total_message_count=total_message_count,
-            )
-            state = ChatSummaryWritebackState(
-                last_trigger_message_count=restored_count,
-                last_trigger_time=time.time() if restored_count > 0 else 0.0,
-            )
+            restored = await self._load_last_trigger_message_count(session_id=session_id, total_message_count=total)
+            if restored == 0:
+                midnight = datetime.now(ZoneInfo("Asia/Shanghai")).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+                restored = await asyncio.to_thread(count_messages, session_id=session_id, before_time=midnight)
+            state = ChatSummaryWritebackState(last_trigger_message_count=restored)
             self._states[session_id] = state
-        pending_message_count = max(0, total_message_count - state.last_trigger_message_count)
-        if pending_message_count < threshold:
+        pending = total - state.last_trigger_message_count
+        threshold = self._message_threshold()
+        if pending < threshold and not flush:
             return
-
-        configured_context_length = self._context_length()
-        context_length = self._effective_context_length(
-            configured_context_length=configured_context_length,
-            pending_message_count=pending_message_count,
+        if pending <= 0:
+            return
+        history = await asyncio.to_thread(
+            find_messages, session_id=session_id, end_time=message_time, limit=total, limit_mode="earliest",
         )
-        result = await memory_service.ingest_summary(
-            external_id=f"chat_auto_summary:{session_id}:{total_message_count}",
-            chat_id=session_id,
-            text="",
-            participants=[],
-            time_end=message_time,
-            metadata={
-                "generate_from_chat": True,
-                "context_length": context_length,
-                "configured_context_length": configured_context_length,
-                "writeback_source": "memory_flow_service",
-                "trigger": "message_threshold",
-                "previous_trigger_message_count": state.last_trigger_message_count,
-                "pending_message_count": pending_message_count,
-                "trigger_message_count": total_message_count,
-                "summary_review_count": 2,
-            },
-            respect_filter=True,
-            user_id=self._extract_session_user_id(message),
-            group_id=self._extract_session_group_id(message),
-        )
-        if not getattr(result, "success", False):
-            logger.warning(
-                f"聊天摘要自动写回失败: session_id={session_id} detail={getattr(result, 'detail', '')}",
+        while total > state.last_trigger_message_count:
+            pending = total - state.last_trigger_message_count
+            if pending < threshold and not flush:
+                break
+            size = min(self._context_length(), pending)
+            end = state.last_trigger_message_count + size
+            # Keep a timestamp boundary intact, so equal-time messages cannot be skipped.
+            while end < len(history) and self._extract_message_timestamp(history[end]) == self._extract_message_timestamp(history[end-1]):
+                end += 1
+            batch = history[state.last_trigger_message_count:end]
+            if not batch:
+                break
+            result = await memory_service.ingest_summary(
+                external_id=f"chat_auto_summary:v2:{session_id}:{end}", chat_id=session_id,
+                text="", participants=[], time_end=self._extract_message_timestamp(batch[-1]),
+                metadata={"generate_from_chat": True, "writeback_version": 2, "context_length": len(batch),
+                    "include_personality": False, "writeback_source": "memory_flow_service",
+                    "trigger": "recovery" if flush else "message_threshold",
+                    "previous_trigger_message_count": state.last_trigger_message_count,
+                    "pending_message_count": pending, "trigger_message_count": end, "summary_review_count": 2},
+                respect_filter=True, user_id=user_id, group_id=group_id,
             )
-            return
-
-        state.last_trigger_message_count = total_message_count
-        state.last_trigger_time = time.time()
-        logger.info(
-            f"聊天摘要自动写回成功: session_id={session_id} trigger=message_threshold "
-            f"total_messages={total_message_count} context_length={context_length} "
-            f"detail={getattr(result, 'detail', '')}",
-        )
+            if not result.success or result.detail == "chat_filtered":
+                logger.warning(f"聊天摘要未保存: session_id={session_id} group_id={group_id} detail={result.detail}")
+                return
+            # A persisted no-new-information checkpoint is legitimate; a filter skip is not.
+            if not result.stored_ids and not result.skipped_ids:
+                logger.warning(f"聊天摘要缺少保存回执: session_id={session_id}")
+                return
+            state.last_trigger_message_count = end
+            state.last_trigger_time = time.time()
+            logger.info(f"聊天摘要自动写回成功: session_id={session_id} total_messages={end} context_length={len(batch)} detail={result.detail}")
 
     async def _load_last_trigger_message_count(self, *, session_id: str, total_message_count: int) -> int:
         """从已落库的聊天摘要恢复触发游标，避免服务重启后重复摘要。"""
@@ -635,12 +607,21 @@ class ChatSummaryWritebackService:
             if metadata_store is None:
                 return 0
 
-            checkpoint_count, paragraphs = await asyncio.to_thread(
+            checkpoint_rows, paragraphs = await asyncio.to_thread(
                 lambda: (
-                    metadata_store.get_summary_checkpoint_count(session_id),
+                    metadata_store.query(
+                        "SELECT COALESCE(MAX(trigger_message_count),0) AS count "
+                        "FROM chat_summary_checkpoints WHERE chat_id=? AND external_id LIKE ?",
+                        (session_id, f"chat_auto_summary:v2:{session_id}:%"),
+                    ),
                     metadata_store.get_paragraphs_by_source(f"chat_summary:{session_id}"),
                 )
             )
+            checkpoint_count = int(checkpoint_rows[0]["count"]) if checkpoint_rows else 0
+            paragraphs = [
+                paragraph for paragraph in paragraphs
+                if self._paragraph_metadata(paragraph).get("writeback_version") == 2
+            ]
             if not paragraphs:
                 return min(total_message_count, checkpoint_count)
 
@@ -704,15 +685,11 @@ class ChatSummaryWritebackService:
 
     @staticmethod
     def _extract_session_user_id(message: Any) -> str:
-        return str(
-            getattr(getattr(message, "session", None), "user_id", "") or getattr(message, "user_id", "") or ""
-        ).strip()
+        return message_identity(message)[2]
 
     @staticmethod
     def _extract_session_group_id(message: Any) -> str:
-        return str(
-            getattr(getattr(message, "session", None), "group_id", "") or getattr(message, "group_id", "") or ""
-        ).strip()
+        return message_identity(message)[1]
 
     @staticmethod
     def _extract_message_timestamp(message: Any) -> float | None:

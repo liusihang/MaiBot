@@ -1,0 +1,13 @@
+# QQ group deployment profile, revision 1.
+[response_splitter]
+enable_kaomoji_protection = false
+
+[chinese_typo]
+enable_correction_quote = true
+
+[[expression.learning_list]]
+platform = ""
+item_id = ""
+type = "group"
+use = false
+learn = true

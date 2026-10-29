@@ -46,11 +46,12 @@ def dedupe_profile_bullets(values: Iterable[object], *, limit: int) -> List[str]
 
     bullets: List[str] = []
     seen = set()
+    from src.services.memory_records import fact_key
     for value in values:
         bullet = clean_profile_bullet(value)
         if not bullet or bullet == PROFILE_EMPTY_ITEM:
             continue
-        key = bullet.lower()
+        key = fact_key(bullet)
         if key in seen:
             continue
         seen.add(key)
@@ -183,6 +184,9 @@ def build_profile_injection_text(
 
     sections = parse_profile_sections(text)
     selected: List[str] = []
+    alias_line = next((line.strip() for line in text.splitlines() if line.startswith("别名:")), "")
+    if alias_line and alias_line != "别名:":
+        selected.extend([alias_line, ""])
     meaningful_found = False
     for title in PROFILE_INJECTION_SECTION_TITLES:
         lines = sections.get(title, [])

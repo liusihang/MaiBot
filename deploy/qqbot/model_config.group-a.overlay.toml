@@ -1,0 +1,14 @@
+# QQ group deployment profile, revision 1.
+[model_task_config.replyer]
+model_list = ["gpt-6.1-terra"]
+max_tokens = 8024
+temperature = 1.4
+selection_strategy = "random"
+hard_timeout = 150
+
+[model_task_config.planner]
+model_list = ["group-chat"]
+max_tokens = 25600
+temperature = 1.4
+selection_strategy = "random"
+hard_timeout = 150

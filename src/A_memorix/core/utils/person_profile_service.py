@@ -46,7 +46,7 @@ from .profile_text import build_profile_injection_text, build_structured_profile
 logger = get_logger("A_Memorix.PersonProfileService")
 
 PROFILE_CLASSIFICATION_REQUEST_TYPE = "A_Memorix.PersonProfileEvidenceClassify"
-PROFILE_GENERATION_VERSION = 3
+PROFILE_GENERATION_VERSION = 4
 
 
 class PersonProfileService:
@@ -466,7 +466,7 @@ class PersonProfileService:
             "derived_aliases": derived_aliases,
             "suggested_aliases": suggested_aliases,
             "manual_aliases": manual_aliases,
-            "effective_aliases": manual_aliases if override else derived_aliases,
+            "effective_aliases": list(dict.fromkeys([*derived_aliases, *manual_aliases])),
             "has_override": override is not None,
             "memory_traits": memory_traits,
             "override": override,
@@ -622,9 +622,14 @@ class PersonProfileService:
             text = str(claim.get("value_text", "") or "").strip()
             if text:
                 self._append_profile_bucket(merged, section, text)
+        from src.services.memory_records import fact_key
+        used = {fact_key(text) for values in merged.values() for text in values}
         for section, values in classified_buckets.items():
             for value in values:
-                self._append_profile_bucket(merged, section, value)
+                key = fact_key(value)
+                if key not in used:
+                    self._append_profile_bucket(merged, section, value)
+                    used.add(key)
         return merged
 
     @staticmethod
@@ -734,6 +739,20 @@ class PersonProfileService:
         ]
         if not paragraph_hashes:
             return evidence
+
+        effective = []
+        for item in evidence:
+            metadata = coerce_metadata_dict(item.get("metadata"))
+            claim_ids = metadata.get("fact_claim_ids") or []
+            if claim_ids:
+                claims = [self.metadata_store.get_fact_claim(str(cid)) for cid in claim_ids]
+                if all(c is not None and c.get("status") in {"retracted", "superseded", "conflicted"} for c in claims):
+                    continue
+                active_sections = {c.get("profile_section") for c in claims if c is not None and c.get("status") == "active"}
+                if len(active_sections) == 1:
+                    item = {**item, "metadata": {**metadata, "profile_section": next(iter(active_sections))}}
+            effective.append(item)
+        evidence = effective
 
         marks_by_paragraph = self.metadata_store.get_paragraph_stale_relation_marks_batch(paragraph_hashes)
         relation_hashes: List[str] = []
@@ -901,10 +920,10 @@ class PersonProfileService:
             content = str(item.get("content", "") or "").strip()
             if not content:
                 continue
-            if self._is_chat_summary_evidence(item):
+            if self._is_chat_summary_evidence(item) or coerce_metadata_dict(item.get("metadata")).get("source_type") == "explicit_memory":
                 self._append_profile_bucket(buckets, "recent_interactions", content)
                 continue
-            self._append_profile_bucket(buckets, self._guess_profile_bucket(content), content)
+            self._append_profile_bucket(buckets, coerce_metadata_dict(item.get("metadata")).get("profile_section") or self._guess_profile_bucket(content), content)
         return buckets
 
     async def _classify_profile_evidence(
@@ -958,7 +977,21 @@ class PersonProfileService:
         parsed = self._parse_profile_classification_response(response)
         if not parsed:
             return fallback
-        return self._merge_profile_classification(fallback, parsed)
+        by_id = {item["id"]: item for item in candidates}
+        buckets = {key: [] for key in fallback}
+        seen = set()
+        for section, ids in parsed.items():
+            for candidate_id in ids:
+                item = by_id.get(candidate_id)
+                if item is None or candidate_id in seen:
+                    continue
+                seen.add(candidate_id)
+                target = item.get("profile_section") or section
+                if item["source_type"] in {"chat_summary", "explicit_memory"} and section in {"identity_settings", "stable_facts"}:
+                    target = "recent_interactions"
+                self._append_profile_bucket(buckets, target, item["text"])
+        # Unknown/free-form model output cannot replace the underlying evidence.
+        return buckets if seen or all(not ids for ids in parsed.values()) else fallback
 
     def _resolve_profile_classification_model(self) -> Optional[ResolvedLLMModel]:
         try:
@@ -995,10 +1028,10 @@ class PersonProfileService:
             "- recent_interactions: 最近发生、对当前聊天有帮助但不应上升为长期事实的内容。\n"
             "- uncertain_notes: 证据不足、推测、玩笑、自嘲、临时状态或疑似偏好。\n\n"
             "要求：\n"
-            "1. 每条内容必须是简短中文陈述句。\n"
-            "2. 不要输出证据编号、hash 或置信度。\n"
-            "3. chat_summary 来源通常只能归入 recent_interactions 或 uncertain_notes。\n"
-            "4. 临时状态、计划、可能、似乎、玩笑类内容不能归入 stable_facts。\n"
+            "1. 每个数组只返回证据列表的 id 字符串（例如 evidence-1），禁止改写或新增事实。\n"
+            "2. 同一证据只放一个最合适的分类；重复或无关的证据省略，不用凑满。\n"
+            "3. chat_summary/explicit_memory 的第三方评价、群内玩笑和约定归 recent_interactions、relationship_settings 或 uncertain_notes；不能变成人的客观身份、偏好。\n"
+            "4. 问机器人为什么喜欢某物不是用户喜欢某物；引用别人的回答不是本人自述。临时状态和玩笑不能归 stable_facts。\n"
             "5. 只输出 JSON 对象，键为上述六类，值为字符串数组。\n\n"
             f"证据列表：\n{json.dumps(candidates, ensure_ascii=False, indent=2)}"
         )
@@ -1067,7 +1100,8 @@ class PersonProfileService:
             source_type = str(metadata.get("source_type", "") or "").strip()
             if not source_type:
                 source_type = "chat_summary" if self._is_chat_summary_evidence(item) else "person_fact"
-            candidates.append({"id": f"evidence-{index}", "source_type": source_type, "text": content[:260]})
+            candidates.append({"id": f"evidence-{index}", "source_type": source_type, "text": content[:260],
+                "profile_section": str(metadata.get("profile_section", "") or "")})
         return candidates
 
     @staticmethod

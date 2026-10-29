@@ -145,6 +145,8 @@ _RUNTIME_ACTIONS = {
     "recover_embedding",
     "rebuild_all_vectors",
     "paragraph_backfill_once",
+    "list_vector_spaces",
+    "delete_vector_space",
 }
 _IMPORT_ACTIONS = {
     "settings",

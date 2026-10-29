@@ -54,6 +54,7 @@ from src.maisaka.builtin_tool import (
 )
 from .chat_loop_service import ChatResponse
 from .mode_policy import build_consecutive_wait_reminders
+from .participation import ParticipationJudge
 from .reply_supplement import ReplySupplement, generate_reply_supplement
 from .tool_result_condenser import condense_tool_result, should_condense_tool_result
 from src.maisaka.visual.chat_history_refresher import (
@@ -156,6 +157,7 @@ class MaisakaReasoningEngine:
 
     def __init__(self, runtime: "MaisakaHeartFlowChatting") -> None:
         self._runtime = runtime
+        self._participation_judge = ParticipationJudge(runtime)
         self._last_reasoning_content: str = ""
         self._active_logical_turn_id: str | None = None
         self._turn_passive_replyer: Optional[bool] = None
@@ -910,6 +912,8 @@ class MaisakaReasoningEngine:
         try:
             while self._runtime._running:
                 queued_trigger = await self._runtime._internal_turn_queue.get()
+                if queued_trigger == "message" and self._participation_judge.defer_pending_turn():
+                    continue
                 turn_start_context = await self._prepare_turn_start_context(queued_trigger)
                 if turn_start_context.trigger_message is None:
                     continue
@@ -923,6 +927,29 @@ class MaisakaReasoningEngine:
                         timeout_triggered=turn_start_context.timeout_triggered,
                         proactive_triggered=turn_start_context.proactive_triggered,
                     )
+                    continue
+
+                should_enter = await self._participation_judge.should_enter(turn_start_context)
+                # A new batch may arrive while Luna is judging. Preserve and ingest it;
+                # let the main Agent decide instead of applying a stale negative result.
+                if self._runtime._has_pending_messages():
+                    extra_messages = await self._ingest_pending_messages()
+                    if extra_messages:
+                        cached_messages = [*cached_messages, *extra_messages]
+                        trigger_message = extra_messages[-1]
+                        should_enter = True
+                if not should_enter:
+                    # Keep native history bounds and background learning even when
+                    # the main Agent is not needed; do not spend a main-model call on compaction.
+                    await self._post_process_chat_history_after_cycle(
+                        CycleDetail(cycle_id=self._runtime._cycle_counter),
+                        enable_compaction=False,
+                        consume_references=False,
+                    )
+                    self._runtime._enter_stop_state()
+                    self._runtime._update_stage_status("空闲", "Luna 判断本批无需参与；消息已保留在历史中")
+                    if self._runtime._running:
+                        self._runtime._schedule_message_turn()
                     continue
 
                 try:

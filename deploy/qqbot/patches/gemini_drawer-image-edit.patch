@@ -1,0 +1,209 @@
+--- a/commands/actions.py
++++ b/commands/actions.py
+@@ -21,7 +21,7 @@
+ from ..core.host_bridge import get_plugin_logger
+ 
+ from ..core.endpoints import build_drawing_endpoints
+-from ..core.image_source import extract_source_image
++from ..core.image_source import extract_source_image, resolve_reference_message_images
+ from ..core.guards import evaluate_access
+ from ..core.pipeline import run_drawing
+ from ..providers import DrawRequest
+@@ -111,7 +111,12 @@
+             logger.error(f"图片发送失败: {exc}")
+             return False
+ 
+-        return self._interpret_send_result(result)
++        sent = self._interpret_send_result(result)
++        if sent and isinstance(result, dict) and result.get("message_id"):
++            if not hasattr(self, "_sent_image_message_ids"):
++                self._sent_image_message_ids = []
++            self._sent_image_message_ids.append(str(result["message_id"]))
++        return sent
+ 
+     @staticmethod
+     def _interpret_send_result(result: Any) -> bool:
+@@ -245,7 +250,20 @@
+         try:
+             # 有图则走图生图
+             images = []
+-            if self.action_message:
++            reference_ids = self.action_data.get("reference_message_ids") or []
++            mode = self.action_data.get("mode", "generate")
++            if mode not in ("generate", "edit"):
++                raise ValueError("绘图 mode 必须是 generate 或 edit")
++            if reference_ids:
++                timeout = budget.stage_timeout(REFERENCE_IMAGE_TIMEOUT_SECONDS) if budget else REFERENCE_IMAGE_TIMEOUT_SECONDS
++                images = await asyncio.wait_for(
++                    resolve_reference_message_images(
++                        reference_ids, self._target_stream_id(), getattr(self, "ctx", None),
++                        self._proxy(), logger,
++                    ), timeout=timeout,
++                )
++                logger.info(f"Action 已读取 {len(images)} 张指定参考图，将执行图生图模式。")
++            elif self.action_message:
+                 try:
+                     # 参考图获取同样受整体预算约束（F1）；预算耗尽时取消本次生成。
+                     timeout = REFERENCE_IMAGE_TIMEOUT_SECONDS
+@@ -267,6 +285,9 @@
+                 except Exception as e:
+                     logger.warning(f"尝试提取图片输入失败: {e}")
+ 
++            if mode == "edit" and not images:
++                await self._send_text("未取得参考图，编辑未提交。请引用原图或将图片与修改要求一起发送。")
++                return False, "图生图缺少参考图，未改用文生图"
+             img_data, error = await self._draw(prompt, images, budget=budget)
+ 
+             if not img_data:
+--- a/core/image_source.py
++++ b/core/image_source.py
+@@ -501,3 +501,35 @@
+         if img:
+             self._log("info", f"从{source_label}中提取到图片")
+         return img
++
++
++async def resolve_reference_message_images(
++    message_ids: List[str], stream_id: str, ctx: Any,
++    proxy: Optional[str] = None, logger=None,
++) -> List[bytes]:
++    """Read explicit reference messages from the current session; never guess a source."""
++    if not isinstance(message_ids, list) or not 1 <= len(message_ids) <= 4:
++        raise ValueError("参考图消息 ID 需要提供1至4条")
++    if not stream_id or not ctx or not getattr(ctx, "message", None):
++        raise ValueError("缺少当前会话或消息读取能力，未提交图片编辑")
++    images: List[bytes] = []
++    seen = set()
++    for raw_id in message_ids:
++        if not isinstance(raw_id, str) or not raw_id.strip():
++            raise ValueError("参考图消息 ID 必须是非空字符串")
++        message_id = raw_id.strip()
++        if message_id in seen:
++            continue
++        seen.add(message_id)
++        message = await ctx.message.get_by_id(
++            message_id, stream_id=stream_id, include_binary_data=True,
++        )
++        if not isinstance(message, dict):
++            raise ValueError(f"当前会话中未找到参考图消息 {message_id}，编辑未提交")
++        found = await extract_images_from_segments(_message_dict_segments(message), proxy, logger)
++        if not found:
++            raise ValueError(f"未读到消息 {message_id} 的原图文件，编辑未提交")
++        if len(images) + len(found) > MAX_MESSAGE_IMAGES:
++            raise ValueError("参考图数量超过插件上限，编辑未提交")
++        images.extend(found)
++    return images
+--- a/plugin.py
++++ b/plugin.py
+@@ -1,4 +1,4 @@
+-from typing import Any, Tuple, Optional, Type
++from typing import Any, Tuple, Optional, Type, List
+ from pathlib import Path
+ import asyncio
+ import json
+@@ -860,7 +860,7 @@
+             instance.chat_stream = kwargs.get("chat_stream", None)
+             instance.plugin_config = self.get_plugin_config_data()
+ 
+-            raw_action_msg = kwargs.get("action_message", None)
++            raw_action_msg = kwargs.get("action_message") or kwargs.get("message")
+             instance.action_message = to_compat_message(raw_action_msg)
+ 
+             instance._stream_id = stream_id
+@@ -883,7 +883,11 @@
+                     setattr(instance, attr, val)
+             
+             instance.ctx = self.ctx
+-            return await instance.execute()
++            result = await instance.execute()
++            image_ids = getattr(instance, "_sent_image_message_ids", [])
++            if isinstance(result, tuple) and result[0] and image_ids:
++                return result[0], str(result[1]) + "；已发送图片消息ID：" + ", ".join(image_ids)
++            return result
+         finally:
+             _context_holder.deactivate_plugin(token)
+ 
+@@ -1143,7 +1147,7 @@
+     @Tool(
+         "gemini_generate_image",
+         description=(
+-            "根据用户的明确要求生成并自行发送图片。适用于'画一张''生成图片''帮我画'等视觉请求，"
++            "根据用户的明确要求生成或编辑并自行发送图片。图生图、改图、人物参考、换脸或合成时必须设置 mode=edit，并在 reference_message_ids 中填写可见上下文里的原图消息 ID；合成可按底图、人物参考图的顺序填写多个 ID，不能只把消息 ID 写进 prompt。纯文字生图使用 mode=generate、参考图列表为空。适用于'画一张''生成图片''帮我画'等视觉请求，"
+             "不适用于文字人设、故事或仅讨论图片。用户说'生成人设''写个人设'通常指文字角色设定而非图片，"
+             "除非明确提到'画'或'图'；用户让别人或其他 AI 去做某事属于讨论，不是对你的绘图指令。"
+             f"遇到 {_COMMAND_HINT} 等命令时不要调用。"
+@@ -1155,21 +1159,30 @@
+         parameters={
+             "prompt": {
+                 "type": "string",
+-                "description": "详细的图片描述，包括主体、风格、内容、构图和氛围",
++                "description": "详细的图片描述，包括主体、风格、内容、构图和氛围；编辑时按上传图片的顺序说明每张图的用途",
+                 "required": True,
+-            }
++            },
++            "mode": {
++                "type": "string", "enum": ["generate", "edit"],
++                "description": "generate 为纯文字生图；使用原图、保留原人物或修改图片时选 edit",
++            },
++            "reference_message_ids": {
++                "type": "array", "items": {"type": "string"}, "maxItems": 4,
++                "description": "参考图所在的真实消息 ID，按底图、其他参考图的顺序排列，最多4条；同条消息内的图片也可读取。edit 时不能为空，消息必须属于当前会话。",
++            },
+         },
+         timeout_ms=DRAW_COMMAND_TIMEOUT_MS
+     )
+     async def handle_generate_image(
+-        self, prompt: str = "", stream_id: str = "", **kwargs: Any
++        self, prompt: str = "", stream_id: str = "", mode: str = "generate",
++        reference_message_ids: Optional[List[str]] = None, **kwargs: Any
+     ) -> dict[str, Any]:
+         return await self._run_media_tool(
+             "gemini_generate_image",
+             ImageGenerateAction,
+             stream_id,
+             "image",
+-            {"prompt": prompt},
++            {"prompt": prompt, "mode": mode, "reference_message_ids": reference_message_ids or []},
+             **kwargs,
+         )
+ 
+--- a/providers/base.py
++++ b/providers/base.py
+@@ -18,7 +18,7 @@
+ import math
+ from abc import ABC, abstractmethod
+ from dataclasses import dataclass, field
+-from typing import Any, Dict, List, Optional
++from typing import Any, Dict, List, Optional, Tuple, Union
+ 
+ import httpx
+ 
+@@ -129,7 +129,7 @@
+     url: str
+     headers: Dict[str, str] = field(default_factory=dict)
+     json: Optional[Dict[str, Any]] = None
+-    files: Optional[Dict[str, Any]] = None   # multipart（gpt-image edits）
++    files: Optional[Union[Dict[str, Any], List[Tuple[str, Any]]]] = None   # multipart（gpt-image edits）
+     data: Optional[Dict[str, Any]] = None    # multipart 的表单字段
+     stream: bool = False
+     timeout: float = 120.0
+--- a/providers/gpt_image.py
++++ b/providers/gpt_image.py
+@@ -113,10 +113,16 @@
+         # 图生图：multipart 上传，不设 Content-Type，交给 httpx 生成 boundary
+         mime = request.first_mime or "image/png"
+         ext = _EXT_BY_MIME.get(mime, "png")
++        files = {"image": (f"input.{ext}", io.BytesIO(request.first_image), mime)}
++        if len(request.images) > 1:
++            files = [
++                ("image[]", (f"input_{index}.{_EXT_BY_MIME.get(image_mime, 'png')}", io.BytesIO(image), image_mime))
++                for index, (image, image_mime) in enumerate(zip(request.images, request.mime_types))
++            ]
+         return HttpCall(
+             url=f"{base}/v1/images/edits",
+             headers={"Authorization": f"Bearer {endpoint.key}"},
+-            files={"image": (f"input.{ext}", io.BytesIO(request.first_image), mime)},
++            files=files,
+             data={"model": model, "prompt": request.prompt, "size": "auto"},
+             timeout=self.timeout,
+         )

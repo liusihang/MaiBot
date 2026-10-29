@@ -161,7 +161,7 @@ class FakeRetriever:
         ]
 
 
-def test_person_profile_manual_aliases_replace_derived_aliases() -> None:
+def test_person_profile_manual_aliases_preserve_derived_aliases() -> None:
     metadata_store = FakeMetadataStore()
     metadata_store.alias_override = {
         "person_id": "person-1",
@@ -174,9 +174,9 @@ def test_person_profile_manual_aliases_replace_derived_aliases() -> None:
 
     assert details["derived_aliases"] == ["旧昵称"]
     assert details["manual_aliases"] == ["新别名", "正式称呼"]
-    assert details["effective_aliases"] == ["新别名", "正式称呼"]
+    assert details["effective_aliases"] == ["旧昵称", "新别名", "正式称呼"]
     assert details["has_override"] is True
-    assert service.get_person_aliases("person-1") == (["新别名", "正式称呼"], "正式称呼", ["记忆特征"])
+    assert service.get_person_aliases("person-1") == (["旧昵称", "新别名", "正式称呼"], "正式称呼", ["记忆特征"])
 
 
 def test_person_profile_cooccurring_entities_are_suggestions_not_effective_aliases() -> None:
@@ -397,7 +397,36 @@ async def test_profile_refresh_creates_version_when_same_evidence_id_content_cha
 
 
 @pytest.mark.asyncio
-async def test_profile_classification_uses_llm_buckets_and_guards_uncertain_stable_facts(
+@pytest.mark.parametrize("source_type,target_section", [
+    ("person_fact", "identity_settings"), ("chat_summary", "recent_interactions"),
+])
+async def test_profile_classification_selects_source_ids_without_rewriting(
+    monkeypatch: pytest.MonkeyPatch, source_type: str, target_section: str,
+) -> None:
+    service = PersonProfileService(metadata_store=FakeMetadataStore(), retriever=FakeRetriever())
+    service._resolve_profile_classification_model = lambda: SimpleNamespace(task_name="memory")
+    evidence = [{"content": "测试用户是画师。", "metadata": {"source_type": source_type}}]
+    candidates = service._build_profile_classification_candidates(
+        relation_edges=[], vector_evidence=evidence, memory_traits=[],
+    )
+
+    async def fake_generate(*args, **kwargs):
+        assert candidates[0]["id"] in args[2]
+        return SimpleNamespace(success=True, completion=SimpleNamespace(response=json.dumps({
+            "identity_settings": [candidates[0]["id"]], "stable_facts": ["unknown-id"],
+        })))
+
+    monkeypatch.setattr(profile_service_module, "generate_with_resolved_model", fake_generate)
+    buckets = await service._classify_profile_evidence(
+        person_id="person-1", primary_name="测试用户", aliases=["测试用户"],
+        relation_edges=[], vector_evidence=evidence, memory_traits=[],
+    )
+    assert buckets[target_section] == ["测试用户是画师。"]
+    assert sum(len(items) for items in buckets.values()) == 1
+
+
+@pytest.mark.asyncio
+async def test_profile_classification_rejects_generated_facts_and_preserves_source_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = PersonProfileService(metadata_store=FakeMetadataStore(), retriever=FakeRetriever())
@@ -446,10 +475,11 @@ async def test_profile_classification_uses_llm_buckets_and_guards_uncertain_stab
         memory_traits=[],
     )
 
-    assert buckets["identity_settings"] == ["测试用户是画师。"]
-    assert buckets["relationship_settings"] == ["测试用户把麦麦当搭档。"]
-    assert "测试用户可能长期熬夜。" in buckets["stable_facts"]
-    assert "测试用户似乎偏好蓝色。" in buckets["uncertain_notes"]
+    assert buckets["identity_settings"] == []
+    assert buckets["relationship_settings"] == []
+    assert buckets["stable_facts"] == []
+    assert buckets["uncertain_notes"] == []
+    assert buckets["interaction_preferences"] == ["测试用户喜欢直接沟通。"]
 
 
 @pytest.mark.asyncio

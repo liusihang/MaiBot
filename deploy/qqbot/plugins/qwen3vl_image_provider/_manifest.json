@@ -1,0 +1,39 @@
+{
+  "manifest_version": 2,
+  "id": "local.qwen3vl-image-provider",
+  "name": "Qwen3-VL 图片嵌入",
+  "version": "1.0.0",
+  "description": "通过现有 Qwen retrieval-v1 服务处理图片向量。",
+  "author": {
+    "name": "Local",
+    "url": "http://localhost"
+  },
+  "license": "MIT",
+  "urls": {
+    "repository": "http://localhost/plugins/qwen3vl_image_provider"
+  },
+  "host_application": {
+    "min_version": "1.3.0",
+    "max_version": "1.3.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [],
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  },
+  "llm_providers": [
+    {
+      "client_type": "qwen3vl_image",
+      "name": "Qwen3-VL 图片嵌入",
+      "description": "既有 retrieval-v1 Qwen 服务的图片 messages 协议",
+      "version": "1.0.0"
+    }
+  ]
+}

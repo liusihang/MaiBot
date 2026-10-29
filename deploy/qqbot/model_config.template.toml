@@ -1,0 +1,194 @@
+# QQ group deployment profile, revision 1.
+[inner]
+version = "1.17.25"
+
+[[models]]
+model_type = "llm"
+model_identifier = "gpt-6.1-terra"
+name = "group-chat"
+api_provider = "codex-provider"
+send_temperature = false
+force_stream_mode = true
+visual = true
+
+[models.extra_params.reasoning]
+effort = "high"
+context = "all_turns"
+
+[models.extra_params.headers]
+X-OpenAI-Internal-Codex-Responses-Lite = "true"
+
+[[models]]
+model_type = "llm"
+model_identifier = "gpt-6-luna"
+name = "group-helper"
+api_provider = "codex-provider"
+send_temperature = false
+force_stream_mode = true
+visual = true
+
+[models.extra_params.reasoning]
+effort = "max"
+
+[[models]]
+name = "em-qwen3vl-embedding"
+model_type = "embedding"
+model_identifier = "Qwen3-VL-Embedding-2B"
+api_provider = "em-embedding"
+
+[[models]]
+model_type = "llm"
+name = "gemini-3.8-flash"
+model_identifier = "gemini-3.8-flash"
+api_provider = "codex-provider"
+send_temperature = false
+max_tokens = 8024
+force_stream_mode = true
+visual = true
+
+[models.extra_params.reasoning]
+effort = "medium"
+
+[[models]]
+name = "em-qwen3vl-image-embedding"
+model_type = "image_embedding"
+model_identifier = "Qwen3-VL-Embedding-2B"
+api_provider = "em-qwen3vl-images"
+
+[models.extra_params]
+
+[[models]]
+model_type = "llm"
+model_identifier = "gpt-6.1-terra"
+name = "gpt-6.1-terra"
+api_provider = "codex-provider"
+send_temperature = false
+force_stream_mode = true
+visual = true
+max_tokens = 8024
+
+[models.extra_params.reasoning]
+effort = "medium"
+context = "all_turns"
+
+[models.extra_params.headers]
+X-OpenAI-Internal-Codex-Responses-Lite = "true"
+
+[model_task_config.web_search]
+model_list = ["exa"]
+
+[model_task_config.replyer]
+model_list = ["gpt-6.1-terra"]
+max_tokens = 8024
+temperature = 0.3
+selection_strategy = "random"
+hard_timeout = 150
+
+[model_task_config.planner]
+model_list = ["group-chat"]
+max_tokens = 25600
+temperature = 0.7
+selection_strategy = "random"
+hard_timeout = 150
+
+[model_task_config.memory]
+model_list = ["group-helper"]
+max_tokens = 8024
+temperature = 0.3
+selection_strategy = "random"
+hard_timeout = 150
+
+[model_task_config.utils]
+model_list = ["group-helper"]
+max_tokens = 8024
+temperature = 0.5
+selection_strategy = "random"
+hard_timeout = 150
+
+[model_task_config.learner]
+model_list = ["group-chat"]
+max_tokens = 8024
+temperature = 0.7
+selection_strategy = "balance"
+hard_timeout = 150
+
+[model_task_config.fast_model]
+model_list = ["group-helper"]
+max_tokens = 8024
+temperature = 0.3
+selection_strategy = "balance"
+hard_timeout = 150
+
+[model_task_config.emoji]
+model_list = ["group-helper"]
+max_tokens = 8024
+temperature = 0.7
+selection_strategy = "balance"
+hard_timeout = 150
+
+[model_task_config.vlm]
+model_list = ["group-helper"]
+max_tokens = 8024
+temperature = 0.7
+selection_strategy = "balance"
+hard_timeout = 150
+
+[model_task_config.voice]
+model_list = []
+max_tokens = 8192
+temperature = 0.7
+selection_strategy = "balance"
+hard_timeout = 120
+
+[model_task_config.embedding]
+model_list = ["em-qwen3vl-embedding"]
+max_tokens = 4096
+temperature = 0.7
+selection_strategy = "balance"
+hard_timeout = 240
+
+[model_task_config.image_embedding]
+model_list = ["em-qwen3vl-image-embedding"]
+max_tokens = 4096
+temperature = 0.7
+selection_strategy = "balance"
+hard_timeout = 60
+
+[web]
+preview_chars = 4000
+
+[web.services.exa]
+adapter = "exa"
+timeout = 45.0
+base_url = ""
+api_key = ""
+
+[[api_providers]]
+name = "codex-provider"
+client_type = "openai_responses"
+auth_type = "bearer"
+max_retry = 1
+timeout = 120
+retry_interval = 3
+base_url = "https://gateway.example.com/v1"
+api_key = ""
+
+[[api_providers]]
+name = "em-embedding"
+auth_type = "none"
+client_type = "openai"
+max_retry = 1
+timeout = 240
+retry_interval = 3
+base_url = "https://gateway.example.com/v1"
+api_key = ""
+
+[[api_providers]]
+name = "em-qwen3vl-images"
+auth_type = "none"
+client_type = "qwen3vl_image"
+max_retry = 1
+timeout = 240
+retry_interval = 3
+base_url = "https://gateway.example.com/v1"
+api_key = ""

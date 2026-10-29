@@ -1,0 +1,31 @@
+{
+  "manifest_version": 2,
+  "id": "local.replyer-autonomy",
+  "name": "单 Agent 工作流与时间",
+  "version": "1.2.1",
+  "description": "保留单 Agent 发言工具约定，每次请求动态注入北京时间。",
+  "author": {
+    "name": "Local",
+    "url": "http://localhost"
+  },
+  "license": "MIT",
+  "host_application": {
+    "min_version": "1.3.0",
+    "max_version": "1.3.99"
+  },
+  "sdk": {
+    "min_version": "2.0.0",
+    "max_version": "2.99.99"
+  },
+  "dependencies": [],
+  "capabilities": [],
+  "urls": {
+    "repository": "http://localhost/plugins/replyer_autonomy"
+  },
+  "i18n": {
+    "default_locale": "zh-CN",
+    "supported_locales": [
+      "zh-CN"
+    ]
+  }
+}

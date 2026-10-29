@@ -1,0 +1,4 @@
+# QQ group deployment profile, revision 1.
+[plugin]
+enabled = true
+config_version = "1.0.0"

@@ -1,0 +1,24 @@
+# QQ group deployment profile, revision 1.
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[target]
+group_id = ""
+session_id = ""
+bot_user_id = ""
+
+[timing]
+check_seconds = 300
+jitter_seconds = 30
+idle_minutes = 45
+idle_jitter_minutes = 15
+min_interval_minutes = 90
+active_start_hour = 9
+active_end_hour = 24
+round_seconds = 300
+
+[topics]
+recent_hours = 48
+message_limit = 60
+recent_openings = 8
