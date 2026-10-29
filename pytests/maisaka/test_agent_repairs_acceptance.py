@@ -133,14 +133,16 @@ async def test_high_watermark_measures_final_post_hook_input(monkeypatch, extens
             if extension == "message":
                 kwargs["items"][0]["parts"][0]["text"] += large_text
             else:
-                kwargs["tool_definitions"] = [{
-                    "type": "function",
-                    "function": {
-                        "name": "offline_tool",
-                        "description": large_text,
-                        "parameters": {"type": "object", "properties": {}},
-                    },
-                }]
+                kwargs["tool_definitions"] = [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "offline_tool",
+                            "description": large_text,
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ]
         return kwargs
 
     service, requests = _offline_service(monkeypatch, hook=hook)
@@ -177,8 +179,11 @@ async def test_archive_and_system_hook_preserve_active_native_items(monkeypatch)
     first, next_question = _user("old question"), _user("new question")
     history = [first, *old, next_question, *active]
     planned = process_chat_history_after_cycle(
-        history, max_context_size=40, force_compaction=True,
-        active_logical_turn_id="active", consume_references=False,
+        history,
+        max_context_size=40,
+        force_compaction=True,
+        active_logical_turn_id="active",
+        consume_references=False,
     )
     assert planned.removed_messages == old
     assert planned.history == [first, next_question, *active]
@@ -212,8 +217,11 @@ def test_archive_summary_preserves_snapshot_and_encodes_uncovered_tools_as_data(
     old, active = _native_turn("completed"), _native_turn("active")
     history = [first, *old, next_question, *active]
     planned = process_chat_history_after_cycle(
-        history, max_context_size=40, force_compaction=True,
-        active_logical_turn_id="active", consume_references=False,
+        history,
+        max_context_size=40,
+        force_compaction=True,
+        active_logical_turn_id="active",
+        consume_references=False,
     )
     covered = history if snapshot_covers_tools else [first]
     prefix = [ContextItemBuilder().set_role(RoleType.System).add_text_content("summary test").build()]
@@ -266,12 +274,19 @@ async def test_luna_nonparticipation_cannot_commit_unsummarized_history_loss(mon
             source.message_info = MessageInfo(UserInfo("user-a", "A"))
             source.processed_plain_text = f"message {index}"
             source.raw_message = MessageSequence([TextComponent(source.processed_plain_text)])
-            history.append(SessionBackedMessage.from_session_message(
-                source, raw_message=source.raw_message, visible_text=source.processed_plain_text,
-            ))
+            history.append(
+                SessionBackedMessage.from_session_message(
+                    source,
+                    raw_message=source.raw_message,
+                    visible_text=source.processed_plain_text,
+                )
+            )
         max_context_size, exceeded = 5, False
     planned = process_chat_history_after_cycle(
-        history, max_context_size=max_context_size, force_compaction=exceeded, consume_references=False,
+        history,
+        max_context_size=max_context_size,
+        force_compaction=exceeded,
+        consume_references=False,
     )
     assert planned.removed_messages  # Both branches must actually propose substantive loss.
     original_messages = list(history)

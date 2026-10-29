@@ -110,7 +110,11 @@ class TaskWorkspace:
             self.omitted_arrivals += overflow
 
     def record_tool_result(
-        self, call_id: str, result: ToolExecutionResult, *, signature: Optional[str] = None,
+        self,
+        call_id: str,
+        result: ToolExecutionResult,
+        *,
+        signature: Optional[str] = None,
     ) -> None:
         """成功仅表示工具返回成功，不声称工具资料已被验证或任务已经完成。"""
 
@@ -129,22 +133,29 @@ class TaskWorkspace:
                 if ref is not None and ref not in references:
                     references.append(ref)
             status = payload.get("status")
-            if isinstance(status, str) and status in {"matched", "no_match", "filtered", "error"} and status not in statuses:
+            if (
+                isinstance(status, str)
+                and status in {"matched", "no_match", "filtered", "error"}
+                and status not in statuses
+            ):
                 statuses.append(status)
             reader = _identifier(payload.get("reader_tool"))
             if reader is not None and reader not in reader_tools:
                 reader_tools.append(reader)
-        self.tools.append({
-            "call_id": _identifier(call_id),
-            "tool": _excerpt(result.tool_name, 80),
-            "execution_success": result.success,
-            "reported_status": statuses,
-            "result_references": references[:4],
-            "reader_tools": reader_tools[:2],
-            "identical_tool_args_result_count": repeat_count,
-            "pending_wait": result.tool_name == "wait" and result.success
-            and result.metadata.get("pause_execution") is True,
-        })
+        self.tools.append(
+            {
+                "call_id": _identifier(call_id),
+                "tool": _excerpt(result.tool_name, 80),
+                "execution_success": result.success,
+                "reported_status": statuses,
+                "result_references": references[:4],
+                "reader_tools": reader_tools[:2],
+                "identical_tool_args_result_count": repeat_count,
+                "pending_wait": result.tool_name == "wait"
+                and result.success
+                and result.metadata.get("pause_execution") is True,
+            }
+        )
         overflow = max(0, len(self.tools) - MAX_TOOL_RECEIPTS)
         if overflow:
             del self.tools[:overflow]
@@ -167,9 +178,12 @@ class TaskWorkspace:
             "default_reply_target_id": _identifier(self.reply_target.message_id) if self.reply_target else None,
             "arrivals_relationship_not_inferred": [dict(receipt) for receipt in self.arrivals],
             "tool_receipts_not_verified_facts": [
-                {**receipt, "reported_status": list(receipt["reported_status"]),
-                 "result_references": list(receipt["result_references"]),
-                 "reader_tools": list(receipt["reader_tools"])}
+                {
+                    **receipt,
+                    "reported_status": list(receipt["reported_status"]),
+                    "result_references": list(receipt["result_references"]),
+                    "reader_tools": list(receipt["reader_tools"]),
+                }
                 for receipt in self.tools
             ],
             "omitted_arrival_receipts": self.omitted_arrivals,
@@ -188,7 +202,11 @@ class TaskWorkspace:
             "重复计数只表示相同工具参数取得了相同结果，可据此检查下一步是否仍需相同操作。\n"
         )
         while True:
-            data = json.dumps(state, ensure_ascii=False, separators=(",", ":")).replace("<", "\\u003c").replace(">", "\\u003e")
+            data = (
+                json.dumps(state, ensure_ascii=False, separators=(",", ":"))
+                .replace("<", "\\u003c")
+                .replace(">", "\\u003e")
+            )
             if len(heading) + len(data) <= MAX_REFERENCE_CHARS:
                 return heading + data
             if state["arrivals_relationship_not_inferred"]:
@@ -199,7 +217,10 @@ class TaskWorkspace:
                 state["omitted_tool_receipts"] += 1
             else:
                 # 异常长的已转义标识可能耗尽预算；明确省略，不截断 JSON 或制造假 ID。
-                return heading + json.dumps({
-                    "status": "reference_overflow",
-                    "detail": "原始锚点字段超长，参考已省略；请查看完整历史。",
-                }, ensure_ascii=False)
+                return heading + json.dumps(
+                    {
+                        "status": "reference_overflow",
+                        "detail": "原始锚点字段超长，参考已省略；请查看完整历史。",
+                    },
+                    ensure_ascii=False,
+                )

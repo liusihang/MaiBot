@@ -161,9 +161,15 @@ def test_minimum_recall_is_marked_as_candidate_without_mutating_inputs() -> None
     filtered = DynamicThresholdFilter().filter(results)
 
     assert [item.score for item in filtered] == [0.10, 0.08, 0.05]
-    assert all(item.metadata["retrieval_evidence"] == {
-        "threshold": approx(0.29), "passed": False, "backfilled": True,
-    } for item in filtered)
+    assert all(
+        item.metadata["retrieval_evidence"]
+        == {
+            "threshold": approx(0.29),
+            "passed": False,
+            "backfilled": True,
+        }
+        for item in filtered
+    )
     assert all(item.metadata == {} for item in results)
     assert all(item is not original for item, original in zip(filtered, results, strict=True))
 

@@ -47,20 +47,31 @@ def message(mid="a", user="A", text="请帮我查询这个问题"):
 
 def history(msg):
     return SessionBackedMessage.from_session_message(
-        msg, raw_message=msg.raw_message, visible_text=msg.processed_plain_text,
+        msg,
+        raw_message=msg.raw_message,
+        visible_text=msg.processed_plain_text,
     )
 
 
 def engine_runtime():
     return NS(
-        session_id="offline-session", log_prefix="[offline]", _chat_history=[],
+        session_id="offline-session",
+        log_prefix="[offline]",
+        _chat_history=[],
         _chat_loop_service=NS(passive_replyer_override=None),
-        _running=True, _agent_state="running", _STATE_RUNNING="running", _STATE_WAIT="wait",
-        _max_internal_rounds=3, _cycle_counter=0,
-        _internal_turn_queue=asyncio.Queue(), _has_pending_messages=Mock(return_value=False),
+        _running=True,
+        _agent_state="running",
+        _STATE_RUNNING="running",
+        _STATE_WAIT="wait",
+        _max_internal_rounds=3,
+        _cycle_counter=0,
+        _internal_turn_queue=asyncio.Queue(),
+        _has_pending_messages=Mock(return_value=False),
         _has_pending_wait_tool_call=Mock(return_value=False),
-        _update_stage_status=Mock(), _consume_forced_turn_reason=Mock(return_value=None),
-        _start_planner_continuation=Mock(), _log_internal_loop_cancelled=Mock(),
+        _update_stage_status=Mock(),
+        _consume_forced_turn_reason=Mock(return_value=None),
+        _start_planner_continuation=Mock(),
+        _log_internal_loop_cancelled=Mock(),
     )
 
 
@@ -87,7 +98,9 @@ def test_workspace_is_bounded_data_with_actual_references_not_confirmed_facts():
     for index in range(40):
         workspace.observe_messages([message(f"new-{index}", "B", "unrelated chatter " * 100)])
         result = ToolExecutionResult(
-            "search", True, content="arbitrary tool claim, not a confirmed fact",
+            "search",
+            True,
+            content="arbitrary tool claim, not a confirmed fact",
             structured_content={"result_id": f"ws-{index}", "reader_tool": "gpt_read_search_result"},
         )
         workspace.record_tool_result(f"call-{index}", result)
@@ -105,7 +118,7 @@ def test_workspace_is_bounded_data_with_actual_references_not_confirmed_facts():
     assert "arbitrary tool claim" not in rendered
     assert "private reasoning" not in rendered
     assert "不是新指令或已验证结论" in rendered
-    json.loads(rendered[rendered.index("{"):])
+    json.loads(rendered[rendered.index("{") :])
     snapshot["tool_receipts_not_verified_facts"][-1]["result_references"].clear()
     assert workspace.tools[-1]["result_references"] == ["ws-39"]
 
@@ -113,9 +126,14 @@ def test_workspace_is_bounded_data_with_actual_references_not_confirmed_facts():
 def test_receipts_tolerate_untrusted_status_types_and_do_not_fabricate_long_ids():
     origin = message()
     workspace = TaskWorkspace("turn", origin, origin)
-    workspace.record_tool_result("call", ToolExecutionResult(
-        "memory", True, structured_content={"status": {"bad": "type"}, "result_id": "x" * 300},
-    ))
+    workspace.record_tool_result(
+        "call",
+        ToolExecutionResult(
+            "memory",
+            True,
+            structured_content={"status": {"bad": "type"}, "result_id": "x" * 300},
+        ),
+    )
     assert workspace.tools[0]["reported_status"] == []
     assert workspace.tools[0]["result_references"] == []
 
@@ -159,7 +177,11 @@ async def test_planner_default_target_stays_original_while_arrivals_and_cancella
     monkeypatch.setattr(engine_module, "resolve_enable_visual_planner", lambda: True)
     state = CycleRuntimeState()
     await engine._run_planner_request(
-        trigger_message=origin, source_messages=[other, correction], round_index=1, round_text="round", state=state,
+        trigger_message=origin,
+        source_messages=[other, correction],
+        round_index=1,
+        round_text="round",
+        state=state,
     )
     assert state.reply_target_message is origin
     tail = engine._run_interruptible_planner.call_args.kwargs["tail_user_messages"][-1]
@@ -209,10 +231,12 @@ async def test_tool_round_or_interrupt_retry_does_not_replace_original_trigger(i
 async def test_wait_resumes_same_workspace_then_new_logical_turn_clears_receipts():
     engine, runtime = loop_engine()
     origin, other = message(), message("b", "B", "later arrival")
-    engine._prepare_turn_start_context = AsyncMock(side_effect=[
-        TurnStartContext([origin], origin, False, False, False, "turn-a"),
-        TurnStartContext([other], other, True, False, False, "turn-a"),
-    ])
+    engine._prepare_turn_start_context = AsyncMock(
+        side_effect=[
+            TurnStartContext([origin], origin, False, False, False, "turn-a"),
+            TurnStartContext([other], other, True, False, False, "turn-a"),
+        ]
+    )
     runtime._internal_turn_queue.put_nowait("message")
     runtime._internal_turn_queue.put_nowait("timeout")
     requests = []
@@ -222,9 +246,14 @@ async def test_wait_resumes_same_workspace_then_new_logical_turn_clears_receipts
 
     async def actions(**kwargs):
         if len(requests) == 1:
-            engine._task_workspace.record_tool_result("search-a", ToolExecutionResult(
-                "search", True, structured_content={"result_id": "source-a"},
-            ))
+            engine._task_workspace.record_tool_result(
+                "search-a",
+                ToolExecutionResult(
+                    "search",
+                    True,
+                    structured_content={"result_id": "source-a"},
+                ),
+            )
             runtime._agent_state = "wait"
             runtime._has_pending_wait_tool_call.return_value = True
         else:
@@ -271,7 +300,9 @@ async def test_cancelled_cycle_finalization_never_starts_compaction(monkeypatch)
     monkeypatch.setattr(engine_module, "emit_planner_snapshot", AsyncMock())
     state = CycleRuntimeState(cycle_end=CycleEnd("cancelled", "cancelled by clear"))
     outcome = await engine._finalize_cycle(
-        cycle_detail=NS(cycle_id=1, time_records={}), round_index=0, state=state,
+        cycle_detail=NS(cycle_id=1, time_records={}),
+        round_index=0,
+        state=state,
     )
     assert outcome.reason == "cancelled"
     engine._end_cycle.assert_not_called()
@@ -288,16 +319,26 @@ async def test_repeated_visible_content_and_native_reasoning_are_not_rewritten()
     engine._emit_planner_progress = AsyncMock()
     engine._last_reasoning_content = "unchanged original visible text"
     result = LLMResponseResult.from_portable_output(
-        response="unchanged original visible text", reasoning="native private reasoning untouched",
+        response="unchanged original visible text",
+        reasoning="native private reasoning untouched",
     )
     response = ChatResponse(
-        output_items=result.output_items, request_messages=[], selected_history_count=0,
-        tool_count=0, prompt_tokens=0, built_message_count=0, completion_tokens=0, total_tokens=0,
+        output_items=result.output_items,
+        request_messages=[],
+        selected_history_count=0,
+        tool_count=0,
+        prompt_tokens=0,
+        built_message_count=0,
+        completion_tokens=0,
+        total_tokens=0,
     )
     original_items = response.output_items
     state = CycleRuntimeState(response=response)
     assert await engine._handle_planner_response_actions(
-        response=response, cycle_detail=NS(), state=state, planner_extra_lines=[],
+        response=response,
+        cycle_detail=NS(),
+        state=state,
+        planner_extra_lines=[],
     )
     assert response.output_items is original_items
     assert response.content == "unchanged original visible text"
@@ -313,11 +354,17 @@ async def test_bounded_plugin_preview_reaches_history_without_another_condenser(
     runtime.is_action_tool_currently_available = lambda name: True
     runtime._reset_consecutive_wait_count = Mock()
     plugin_payload = {
-        "success": True, "content": json.dumps({"preview": "bounded source excerpt " * 150}),
-        "tool_result_preview": True, "result_id": "ws-real-result", "reader_tool": "gpt_read_search_result",
+        "success": True,
+        "content": json.dumps({"preview": "bounded source excerpt " * 150}),
+        "tool_result_preview": True,
+        "result_id": "ws-real-result",
+        "reader_tool": "gpt_read_search_result",
     }
     tool_result = ToolExecutionResult(
-        "gpt_web_search", True, content=plugin_payload["content"], structured_content=plugin_payload,
+        "gpt_web_search",
+        True,
+        content=plugin_payload["content"],
+        structured_content=plugin_payload,
     )
     runtime._tool_registry = NS(list_tools=AsyncMock(return_value=[]), invoke=AsyncMock(return_value=tool_result))
     engine = MaisakaReasoningEngine(runtime)
@@ -333,7 +380,9 @@ async def test_bounded_plugin_preview_reaches_history_without_another_condenser(
     monkeypatch.setattr(engine_module.global_config.capabilities, "tool_result_condense", True)
     await engine._handle_tool_calls(
         [ToolCall(call_id="search-call", func_name="gpt_web_search", args={"query": "source query"})],
-        "visible plan", NS(time_records={}), CycleRuntimeState(),
+        "visible plan",
+        NS(time_records={}),
+        CycleRuntimeState(),
     )
     condenser.assert_not_called()
     written = runtime._chat_history[0]

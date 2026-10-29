@@ -14,7 +14,12 @@ from src.common.data_models.message_component_data_model import MessageSequence,
 from src.llm_models.payload_content.context_item import ContextItemMeta, ContextToolCall, FunctionCallItem
 from src.maisaka import reasoning_engine as engine_module
 from src.maisaka.context.compaction import ContextSummaryMessage
-from src.maisaka.context.messages import ModelOutputContextMessage, ReferenceMessage, SessionBackedMessage, ToolResultMessage
+from src.maisaka.context.messages import (
+    ModelOutputContextMessage,
+    ReferenceMessage,
+    SessionBackedMessage,
+    ToolResultMessage,
+)
 from src.maisaka.reasoning_engine import MaisakaReasoningEngine
 
 
@@ -25,7 +30,9 @@ def chat_message(index):
     source.processed_plain_text = f"original text {index}"
     source.raw_message = MessageSequence([TextComponent(source.processed_plain_text)])
     return SessionBackedMessage.from_session_message(
-        source, raw_message=source.raw_message, visible_text=source.processed_plain_text,
+        source,
+        raw_message=source.raw_message,
+        visible_text=source.processed_plain_text,
     )
 
 
@@ -34,10 +41,14 @@ def setup_engine(monkeypatch, *, count=8):
     history = [chat_message(index) for index in range(count)] + [ref]
     snapshot = object()
     runtime = NS(
-        session_id="offline-session", log_prefix="[offline]", _chat_history=history,
-        _max_context_size=5, _get_pending_wait_tool_call_ids=lambda: set(),
+        session_id="offline-session",
+        log_prefix="[offline]",
+        _chat_history=history,
+        _max_context_size=5,
+        _get_pending_wait_tool_call_ids=lambda: set(),
         _chat_loop_service=NS(planner_request_snapshot=snapshot, context_budget_exceeded=True),
-        _monitor_run_id="offline-run", _log_history_trimmed=Mock(),
+        _monitor_run_id="offline-run",
+        _log_history_trimmed=Mock(),
         _trigger_trimmed_history_learning=AsyncMock(),
     )
     monkeypatch.setattr(engine_module, "emit_flow_step", AsyncMock())
@@ -158,11 +169,15 @@ async def test_disabled_compaction_cannot_commit_count_trim_or_budget_archive(mo
     engine, runtime, original, ref, snapshot = setup_engine(monkeypatch, count=2 if force_archive else 8)
     runtime._chat_loop_service.context_budget_exceeded = force_archive
     if force_archive:
-        old_call = ModelOutputContextMessage(FunctionCallItem(
-            meta=ContextItemMeta.create(logical_turn_id="completed-old-turn"),
-            tool_call=ContextToolCall.create(call_id="old-call", func_name="query_memory", args={"query": "old"}),
-        ))
-        old_result = ToolResultMessage("old source evidence", datetime.now(), "old-call", "completed-old-turn", "query_memory")
+        old_call = ModelOutputContextMessage(
+            FunctionCallItem(
+                meta=ContextItemMeta.create(logical_turn_id="completed-old-turn"),
+                tool_call=ContextToolCall.create(call_id="old-call", func_name="query_memory", args={"query": "old"}),
+            )
+        )
+        old_result = ToolResultMessage(
+            "old source evidence", datetime.now(), "old-call", "completed-old-turn", "query_memory"
+        )
         original[1:1] = [old_call, old_result]
         engine._active_logical_turn_id = "current-turn"
     summary = AsyncMock(side_effect=AssertionError("silent/ignored turn must not spend a model call"))
