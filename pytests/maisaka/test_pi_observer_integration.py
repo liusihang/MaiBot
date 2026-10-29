@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from src.core.tooling import ToolSpec
+from src.core.tooling import ToolExecutionResult, ToolSpec
 from src.maisaka.pi_runtime import observer
 from src.maisaka.pi_runtime.runner import PiGroupRunner
 from pytests.maisaka.test_pi_harness_host import engine, history, wire_server
@@ -76,5 +76,34 @@ async def test_real_sdk_main_events_reach_existing_monitor_and_usage(monkeypatch
             assert finalized[0]["tools"][0]["tool_args"] == {"text": "exact answer"}
             assert finalized[0]["tools"][0]["success"] is True
             assert finalized[1]["planner_total_tokens"] == 12
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_known_reply_validation_failure_does_not_pause_the_thread(monkeypatch, tmp_path):
+    monkeypatch.setattr(observer.PiObserver, "handle", AsyncMock())
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([("reply", {"text": "answer", "msg_id": "invalid"})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        for spec in await host._runtime._tool_registry.list_tools():
+            spec.provider_type = "builtin"
+
+        async def reject(invocation, context, **kwargs):
+            return ToolExecutionResult(
+                "reply", False, error_message="target not found", metadata={"execution_outcome": "not_executed"}
+            )
+
+        host._runtime._tool_registry.invoke = reject
+        host._runtime._chat_history.append(history("question", "m1"))
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            assert len(requests) == 2
+            await runner._db("assert_no_unresolved_executions", runner.session_id)
+            state = await runner.bridge.request("state", sessionId=runner.session_id)
+            assert state["paused"] is False
+            assert state["unresolvedToolCalls"] == []
         finally:
             await runner.close()

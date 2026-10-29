@@ -565,9 +565,13 @@ class PiGroupRunner:
                     and binding.get("provider_type") == "plugin"
                     and binding.get("routing", {}).get("plugin_id") == "local.gpt-web-search"
                 )
-                rejected_before_dispatch = (
+                rejected_before_dispatch = result.metadata.get("execution_outcome") == "not_executed" and (
                     result.metadata.get("host_contract_rejected") is True
-                    and result.metadata.get("execution_outcome") == "not_executed"
+                    or (
+                        name == "reply"
+                        and binding.get("provider_name") == "maisaka_builtin"
+                        and binding.get("provider_type") == "builtin"
+                    )
                 )
                 if not result.success and not readonly and not rejected_before_dispatch:
                     await self._db(

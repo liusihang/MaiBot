@@ -16,6 +16,7 @@ from src.common.data_models.reply_generation_data_models import (
     GenerationMetrics, LLMCompletionResult, ReplyGenerationResult, build_reply_monitor_detail,
 )
 from src.common.logger import get_logger
+from src.common.message_repository import find_messages
 from src.config import config as config_module
 from src.core.tooling import ToolAvailabilityContext, ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
 from src.maisaka.quote import decide_quote
@@ -331,6 +332,19 @@ def _with_duplicate_target_reply_reminder(
     return updated_args
 
 
+def _preflight_failure(
+    tool_ctx: BuiltinToolRuntimeContext,
+    tool_name: str,
+    error_message: str,
+) -> ToolExecutionResult:
+    """These validations finish before reply extensions or transport dispatch."""
+    return tool_ctx.build_failure_result(
+        tool_name,
+        error_message,
+        metadata={"execution_outcome": "not_executed"},
+    )
+
+
 async def handle_tool(
     tool_ctx: BuiltinToolRuntimeContext,
     invocation: ToolInvocation,
@@ -341,15 +355,14 @@ async def handle_tool(
     raw_invocation_arguments = dict(invocation.arguments or {})
     invocation_arguments, argument_structure_error = _normalize_reply_arguments(raw_invocation_arguments)
     if argument_structure_error:
-        return tool_ctx.build_failure_result(invocation.tool_name, argument_structure_error)
+        return _preflight_failure(tool_ctx, invocation.tool_name, argument_structure_error)
     if invocation_arguments != raw_invocation_arguments:
         logger.warning(
-            f"{tool_ctx.runtime.log_prefix} 检测到 reply 工具参数被重复包裹，已自动解包: "
-            f"调用编号={invocation.call_id}"
+            f"{tool_ctx.runtime.log_prefix} 检测到 reply 工具参数被重复包裹，已自动解包: 调用编号={invocation.call_id}"
         )
     if not isinstance(invocation_arguments.get("text"), str) or not invocation_arguments["text"].strip():
-        return tool_ctx.build_failure_result(
-            "reply", "reply 需要非空的 text 正文，例如 {\"msg_id\":\"123\",\"text\":\"要发送的话\"}。"
+        return _preflight_failure(
+            tool_ctx, "reply", 'reply 需要非空的 text 正文，例如 {"msg_id":"123","text":"要发送的话"}。'
         )
     return await execute_reply(tool_ctx, invocation_arguments, call_id=invocation.call_id)
 
@@ -375,42 +388,53 @@ async def execute_reply(
     direct_text = invocation_arguments.get("text")
     if "text" in invocation_arguments:
         if not isinstance(direct_text, str) or not direct_text.strip():
-            return tool_ctx.build_failure_result("reply", "text 必须是非空的最终消息正文。")
+            return _preflight_failure(tool_ctx, "reply", "text 必须是非空的最终消息正文。")
         direct_text = direct_text.strip()
     else:
         # Existing plugin APIs call this service with reply_reference to request generation.
         # The Agent-facing reply schema and handle_tool require text and never enter this branch.
         reply_reference = invocation_arguments.get("reply_reference")
         if not isinstance(reply_reference, str) or not reply_reference.strip():
-            return tool_ctx.build_failure_result("reply", "缺少非空 text 正文。")
+            return _preflight_failure(tool_ctx, "reply", "缺少非空 text 正文。")
         invocation_arguments["reply_reference"] = reply_reference.strip()
     target_message_id = str(invocation_arguments.get("msg_id") or "").strip()
     if invocation_arguments.get("attach_at") and not config_module.global_config.chat.enable_reply_at:
-        return tool_ctx.build_failure_result("reply", "回复时 @ 用户已关闭，不能使用 attach_at。")
-    if invocation_arguments.get("attach_emoji") is not None and not config_module.global_config.emoji.use_new_send_logic:
-        return tool_ctx.build_failure_result(
-            "reply", "新表情包发送逻辑未开启，请使用 send_emoji 工具。"
-        )
+        return _preflight_failure(tool_ctx, "reply", "回复时 @ 用户已关闭，不能使用 attach_at。")
+    if (
+        invocation_arguments.get("attach_emoji") is not None
+        and not config_module.global_config.emoji.use_new_send_logic
+    ):
+        return _preflight_failure(tool_ctx, "reply", "新表情包发送逻辑未开启，请使用 send_emoji 工具。")
     reply_tool_args = {
-        key: value
-        for key, value in invocation_arguments.items()
-        if key not in _REPLY_TOOL_INTERNAL_ARGUMENTS
+        key: value for key, value in invocation_arguments.items() if key not in _REPLY_TOOL_INTERNAL_ARGUMENTS
     }
     if not _use_expression_intent():
         reply_tool_args.pop("expression_intent", None)
 
     if not target_message_id:
-        return tool_ctx.build_failure_result(
+        return _preflight_failure(
+            tool_ctx,
             "reply",
             "reply 工具需要提供有效的 `msg_id` 参数。",
         )
 
     if target_message is None:
         target_message = tool_ctx.runtime.find_source_message_by_id(target_message_id)
+        if target_message is None:
+            # Pi can retain messages beyond the business mirror and across restarts.
+            # Resolve only within this real chat; never search another chat by ID.
+            matches = await asyncio.to_thread(
+                find_messages,
+                session_id=tool_ctx.runtime.session_id,
+                message_id=target_message_id,
+                limit=1,
+            )
+            target_message = matches[0] if matches else None
     elif target_message.message_id != target_message_id:
         raise ValueError("回复快照的消息 ID 与回复参数不一致")
     if target_message is None:
-        return tool_ctx.build_failure_result(
+        return _preflight_failure(
+            tool_ctx,
             "reply",
             f"未找到要回复的目标消息，msg_id={to_display_message_id(target_message_id)}",
         )

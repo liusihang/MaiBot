@@ -30,6 +30,13 @@ Delegated research defaults to the approved read-only tool set when `tools` is
 omitted. The default `gpt_web_search` and `gpt_read_search_result` tools require
 the exact host plugin ownership `local.gpt-web-search`; the child cannot obtain
 `reply` or image-sending permissions through a matching tool name.
+
+Reply targets absent from the process-local business mirror are resolved from
+the message repository using the current real chat ID. A retained Pi message
+therefore remains a valid reply target across host cache eviction/restart.
+Known built-in reply validation failures before dispatch are failed tool results,
+not uncertain send outcomes. Partial/unknown delivery remains paused for receipt
+reconciliation; it is never automatically resent.
 One-shot text/VLM and known single-turn context callers use `retain_replay=False`;
 context APIs retain scoped handles by default for real multi-turn work. Release
 retained results explicitly with `release_response` / `release_responses`. Reusing

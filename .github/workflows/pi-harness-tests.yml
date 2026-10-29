@@ -4,8 +4,10 @@ on:
     paths:
       - "runtime/pi_agent/**"
       - "src/maisaka/pi_runtime/**"
+      - "src/maisaka/builtin_tool/reply.py"
       - "src/services/pi_harness/**"
       - "pytests/maisaka/test_pi_*.py"
+      - "pytests/maisaka/test_single_agent_reply.py"
       - "pytests/services/test_pi_harness_bridge.py"
       - ".github/workflows/pi-harness-tests.yml"
   workflow_dispatch:
@@ -37,4 +39,7 @@ jobs:
           pytests/maisaka/test_pi_harness_host.py
           pytests/maisaka/test_pi_subagents.py
           pytests/maisaka/test_pi_evidence.py
+          pytests/maisaka/test_pi_observer.py
+          pytests/maisaka/test_pi_observer_integration.py
+          pytests/maisaka/test_single_agent_reply.py
           pytests/services/test_pi_harness_bridge.py
