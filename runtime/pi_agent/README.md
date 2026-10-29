@@ -90,6 +90,21 @@ Only the completed prefix reaches its summary task. With no completed turn it
 does not compact; a failed or canceled run never advances that boundary. These
 markers live only in the SDK archive and are not extra model messages.
 
+Maintenance pressure uses the pinned SDK's `estimateTokens` for new messages,
+anchored to valid provider usage (including cached input and the generated
+response) when available. Image Base64 and opaque signatures are never counted
+as ordinary text. Usage predating the latest compaction is invalidated even if
+its assistant message remains in the retained tail. `state.contextTokens` and
+`contextTokenSource` expose this advisory count; the host uses its token watermark,
+not the legacy serialized-character watermark. This is not a hard capacity proof.
+
+For an explicitly authorized system-prompt change, stop the sole group writer
+and back up its data/config first. Under the same session-file lock, use the SDK
+SessionManager to append a new `maibot.contract`, changing only `system`, and
+update the group's prompt to match. Do not rewrite or delete old entries. Init
+checks the latest contract; unrecorded system/tools/bindings/route drift still
+fails. A rollback to the old prompt also requires an explicit contract update.
+
 Pi normally leaves setup/custom-only entries in memory. The durability adapter
 forces the SDK's own first-flush path, then `fsync`s the file and directory before
 ACK. It does not build a second transcript. Any append/sync failure permanently

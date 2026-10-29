@@ -320,6 +320,24 @@ test('frozen system/tools/route reject restart drift; torn JSONL fails instead o
   await assert.rejects(h.initialize(), { code: 'CORRUPT_SESSION' });
 });
 
+test('explicit offline system migration appends a contract and preserves the original thread prefix', async (t) => {
+  const h = harness(t); await h.initialize(); await h.prompt('original conversation');
+  const owned = h.runtime.sessions.get('group-a');
+  const file = owned.manager.getSessionFile(), cwd = owned.manager.getCwd(), dir = owned.manager.getSessionDir();
+  const original = readFileSync(file, 'utf8');
+  const contract = structuredClone(owned.manager.getEntries().findLast((entry) => entry.customType === 'maibot.contract').data);
+  await h.handle('close', { sessionId: 'group-a' });
+  const offline = SessionManager.open(file, dir, cwd);
+  offline.appendCustomEntry('maibot.contract', { ...contract, system: 'Explicitly updated verification policy' });
+  assert.ok(readFileSync(file, 'utf8').startsWith(original));
+  await h.initialize('group-a', [], { system: 'Explicitly updated verification policy' });
+  await h.prompt('continue the same conversation');
+  assert.ok(JSON.stringify(h.wires.at(-1)).includes('original conversation'));
+  assert.ok(JSON.stringify(h.wires.at(-1)).includes('Explicitly updated verification policy'));
+  await h.handle('close', { sessionId: 'group-a' });
+  await assert.rejects(h.initialize(), { code: 'SESSION_CONTRACT_CHANGED' });
+});
+
 test('single-writer lock excludes another runtime and orderly concurrent close releases it exactly once', async (t) => {
   const a = harness(t); await a.initialize();
   const b = harness(t, { root: a.dir });
@@ -442,13 +460,49 @@ test('pressure metrics are Node-owned advisory values and provider failure diagn
     ? new Response(JSON.stringify({ error: { message: 'private provider detail secret-123', code: 'bad_request' } }), { status: 400, headers: { 'content-type': 'application/json' } }) : undefined });
   await h.initialize();
   const success = await h.runtime.handle('prompt', { sessionId: 'group-a', additions: [user('hello')] });
-  assert.ok(success.visibleChars > 0);
+  assert.ok(success.contextTokens > 0);
   assert.equal(success.latestReportedInputTokens, 80);
   assert.equal(success.pressureIsHardBound, false);
   const failure = await h.runtime.handle('prompt', { sessionId: 'group-a', additions: [user('second')] });
   assert.equal(failure.error, 'Pi provider request did not complete successfully');
   assert.equal(JSON.stringify(failure).includes('secret-123'), false);
   assert.equal(JSON.stringify(h.events).includes('secret-123'), false);
+});
+
+test('context pressure uses SDK image estimates and upstream usage, not encoded image length', async (t) => {
+  const config = fixtureConfig(); config.models[0].visual = true;
+  const h = harness(t);
+  await h.initialize('group-a', [], { config });
+  const image = { type: 'image', mimeType: 'image/png', data: 'A'.repeat(2_000_000) };
+  const pending = await h.handle('append', { sessionId: 'group-a', additions: [
+    { ...user('image', 'large-image'), content: [image] },
+  ] });
+  assert.ok(pending.contextTokens >= 1200 && pending.contextTokens < 2000);
+  assert.equal(pending.contextTokenSource, 'sdk_estimate');
+  const answered = await h.prompt('inspect');
+  assert.equal(answered.latestReportedInputTokens, 80);
+  assert.equal(answered.contextTokens, 100);
+  assert.equal(answered.contextTokenSource, 'provider_usage_plus_sdk_tail');
+  const appended = await h.handle('append', { sessionId: 'group-a', additions: [
+    { ...user('another image', 'another-image'), content: [image] },
+  ] });
+  assert.equal(appended.contextTokens, 1300);
+});
+
+test('context pressure invalidates pre-compaction usage even when that assistant remains in the tail', async (t) => {
+  const h = harness(t, { response: async () => {
+    const response = fixtureResponse([answer('short answer')]);
+    return new Response((await response.text()).replace('"input_tokens":80', '"input_tokens":50000')
+      .replace('"total_tokens":100', '"total_tokens":50020'), { headers: response.headers });
+  } });
+  await h.initialize();
+  const first = await h.prompt('short question');
+  assert.equal(first.contextTokens, 50020);
+  const keep = h.runtime.sessions.get('group-a').manager.getEntries().find((entry) => entry.message?.role === 'user').id;
+  const compacted = await h.handle('compact', { sessionId: 'group-a', summary: 'Short checkpoint', firstKeptEntryId: keep });
+  assert.equal(compacted.latestReportedInputTokens, null);
+  assert.equal(compacted.contextTokenSource, 'sdk_estimate');
+  assert.ok(compacted.contextTokens < 1000);
 });
 
 

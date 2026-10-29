@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { SessionManager } from '@earendil-works/pi-coding-agent';
+import { calculateContextTokens, estimateTokens, SessionManager } from '@earendil-works/pi-coding-agent';
 import { createIsolatedSession } from './harness.mjs';
 import { createHostModelRuntime, resolveTaskModel } from './provider.mjs';
 
@@ -204,7 +204,9 @@ class BusinessSession {
       }
       this.manager = SessionManager.open(file, dir, cwd);
       this.installDurabilityGuard();
-      const saved = this.manager.getEntries().find((entry) => entry.type === 'custom' && entry.customType === 'maibot.contract');
+      // An explicitly migrated system appends a new contract while preserving
+      // every earlier entry. Ordinary restart drift still fails closed below.
+      const saved = this.manager.getEntries().findLast((entry) => entry.type === 'custom' && entry.customType === 'maibot.contract');
       this.resolved = this.dependencies.resolveModel(this.modelRuntime, this.params.taskName ?? 'planner',
         saved ? { modelOverride: saved.data.hostModelName } : {});
       const contract = { version: 1, sessionId: this.id, system: this.params.system, tools: this.tools,
@@ -451,15 +453,28 @@ class BusinessSession {
     const projection = this.manager?.buildSessionProjection();
     const lastAssistant = projection?.messages.findLast((m) => m.role === 'assistant');
     const entries = this.manager?.getEntries() ?? [];
-    const reported = projection?.messages.findLast((message) => message.role === 'assistant'
-      && !['error', 'aborted'].includes(message.stopReason) && message.usage?.totalTokens > 0)?.usage;
+    // Use the SDK's modality-aware estimator for new content and anchor it to
+    // actual provider usage. A retained assistant predating compaction describes
+    // the old prefix, so it cannot be an anchor for the rebuilt context.
+    const checkpoint = entries.findLastIndex((entry) => entry.type === 'compaction');
+    const positions = new Map(entries.map((entry, index) => [entry.id, index]));
+    let contextTokens = 0, reported = null;
+    for (const entry of projection?.entries ?? []) for (const message of entry.messages) {
+      if (positions.get(entry.sourceEntry.id) > checkpoint && message.role === 'assistant'
+          && !['error', 'aborted'].includes(message.stopReason) && message.usage
+          && calculateContextTokens(message.usage) > 0) {
+        reported = message.usage;
+        contextTokens = calculateContextTokens(reported);
+      } else contextTokens += estimateTokens(message);
+    }
     return clone({ sessionId: this.id, revision: entries.length,
       conclusion: lastAssistant ? textContent(lastAssistant.content) : '',
       stopReason: lastAssistant?.stopReason ?? null, usage: lastAssistant?.usage ?? null,
       queuedMessageCount: this.pending.filter((entry) => entry.kind === 'input').length,
       visibleReferenceCount: this.manager ? this.visibleReferences().length : 0,
       // Host-requested maintenance signals only, never a tokenizer/capacity guarantee.
-      visibleChars: JSON.stringify(projection?.messages ?? []).length,
+      contextTokens,
+      contextTokenSource: reported ? 'provider_usage_plus_sdk_tail' : 'sdk_estimate',
       latestReportedInputTokens: reported ? reported.input + reported.cacheRead + reported.cacheWrite : null,
       pressureIsHardBound: false,
       isRunning: this.running, isCompacting: this.transition, paused: !this.running && unresolved.length > 0,

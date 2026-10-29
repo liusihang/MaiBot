@@ -70,7 +70,7 @@ def engine():
 
 
 @contextmanager
-def wire_server(calls=()):
+def wire_server(calls=(), *, prompt_tokens=10):
     requests = []
     scripted = iter(calls)
 
@@ -113,7 +113,11 @@ def wire_server(calls=()):
                     "created": 1,
                     "model": "mock-model",
                     "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": 2,
+                        "total_tokens": prompt_tokens + 2,
+                    },
                 },
             ]
             body = ("".join("data: " + json.dumps(item) + "\n\n" for item in data) + "data: [DONE]\n\n").encode()
@@ -688,8 +692,10 @@ async def test_high_watermark_uses_real_sdk_summary_and_failed_batch_is_not_retr
     from src.config.config import global_config
 
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
-    monkeypatch.setattr(global_config.chat, "context_visible_char_high_watermark", 10000)
-    with wire_server([{"text": "old main answer"}, {"text": "real summary"}, {"text": "main answer"}]) as (
+    monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 2500)
+    with wire_server(
+        [{"text": "old main answer"}, {"text": "real summary"}, {"text": "main answer"}], prompt_tokens=3000
+    ) as (
         config,
         requests,
     ):
@@ -730,6 +736,23 @@ async def test_high_watermark_uses_real_sdk_summary_and_failed_batch_is_not_retr
             assert len(requests) == 3
         finally:
             await runner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tokens,should_compact", [(47999, False), (48000, True)])
+async def test_maintenance_uses_sdk_token_pressure_not_serialized_bytes(monkeypatch, tmp_path, tokens, should_compact):
+    from src.config.config import global_config
+
+    monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 48000)
+    host, _ = engine()
+    runner = PiGroupRunner(host, data_dir=tmp_path)
+    runner.bridge.request = AsyncMock(
+        return_value={"contextTokens": tokens, "visibleChars": 2_000_000, "archive": {"head": "head"}, "revision": 3}
+    )
+    await runner._maintain_context()
+    assert runner.bridge.request.await_count == (2 if should_compact else 1)
+    if should_compact:
+        assert runner.bridge.request.await_args.kwargs["preserveUnprocessed"] is True
 
 
 @pytest.mark.asyncio

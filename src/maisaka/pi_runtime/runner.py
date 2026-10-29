@@ -340,11 +340,8 @@ class PiGroupRunner:
 
     async def _maintain_context(self) -> None:
         state = await self.bridge.request("state", sessionId=self.session_id)
-        chars = state.get("visibleChars", 0)
-        tokens = state.get("latestReportedInputTokens")
-        if chars < global_config.chat.context_visible_char_high_watermark and (
-            tokens is None or tokens < global_config.chat.context_prompt_token_high_watermark
-        ):
+        tokens = state["contextTokens"]
+        if tokens < global_config.chat.context_prompt_token_high_watermark:
             return
         # These are pressure signals, not a tokenizer or hard capacity proof.
         # No retry of the same unchanged failed batch and no fallback trimming.
