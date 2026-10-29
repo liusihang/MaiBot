@@ -52,9 +52,34 @@ async def test_restart_restores_inbox_by_exact_source_id_not_recent_window(monke
     engine._runtime = runtime
     engine._pi_runner = SimpleNamespace(
         ensure_initialized=AsyncMock(),
+        restore_pending_turn=AsyncMock(),
         _db=AsyncMock(return_value=[SimpleNamespace(payload={"sourceMessageId": source.message_id})]),
     )
     await engine.restore_pi_pending()
     found.assert_called_once_with(session_id="actual-group", message_id=source.message_id, limit=1)
     assert runtime.message_cache == [source]
     assert runtime._last_processed_index == 0
+
+
+@pytest.mark.asyncio
+async def test_startup_restores_only_durable_work_through_existing_route_policy(monkeypatch, tmp_path):
+    from src.chat.heart_flow import heartflow_manager as module
+    from src.common import paths
+    from src.maisaka.pi_runtime.business_store import BusinessStore
+
+    store = BusinessStore(tmp_path / "data/pi_harness/business.sqlite3")
+    store.begin_turn("allowed", ["question"])
+    store.begin_turn("blocked", ["private-question"])
+    store.enqueue_input("ignored", "old", {"sourceMessageId": "old"})
+    store.acknowledge_input("ignored", "old")
+    monkeypatch.setattr(paths, "get_instance_root", lambda: tmp_path)
+    monkeypatch.setattr(module.chat_manager, "get_session_by_session_id", lambda sid: SimpleNamespace(session_id=sid))
+    runtime = SimpleNamespace(start=AsyncMock())
+    factory = Mock(return_value=runtime)
+    monkeypatch.setattr(module, "MaisakaHeartFlowChatting", factory)
+    manager = module.HeartflowManager()
+    manager._is_session_allowed = AsyncMock(side_effect=lambda session: session.session_id == "allowed")
+    await manager.restore_pi_work()
+    factory.assert_called_once_with(session_id="allowed")
+    runtime.start.assert_awaited_once()
+    assert store.pending_turn("blocked")

@@ -968,6 +968,7 @@ class MaisakaReasoningEngine:
 
         runner = self._get_pi_runner()
         await runner.ensure_initialized()
+        await runner.restore_pending_turn()
         pending = await runner._db("pending_inputs", self._runtime.session_id)
         queued_ids = {
             message.message_id

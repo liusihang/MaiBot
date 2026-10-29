@@ -12,6 +12,11 @@ import asyncio
 import json
 import re
 
+from src.common.logger import get_logger
+
+logger = get_logger("pi_references")
+IMAGE_RECALL_TIMEOUT_SECONDS = 5.0
+
 
 @dataclass(frozen=True)
 class ReferenceRecord:
@@ -285,17 +290,28 @@ async def _image_records(session_id: str, source_messages: Sequence[Any]) -> Lis
                     )
                 )
     for content_hash, external_ref in queries[:3]:
-        result = await memory_service.image_memory(
-            action="search",
-            content_hash=content_hash,
-            current_external_ref=external_ref,
-            chat_id=session_id,
-            session_id=session_id,
-            candidate_limit=config.candidate_limit,
-            similarity_threshold=config.similarity_threshold,
-        )
+        try:
+            async with asyncio.timeout(IMAGE_RECALL_TIMEOUT_SECONDS):
+                result = await memory_service.image_memory(
+                    action="search",
+                    content_hash=content_hash,
+                    current_external_ref=external_ref,
+                    chat_id=session_id,
+                    session_id=session_id,
+                    candidate_limit=config.candidate_limit,
+                    similarity_threshold=config.similarity_threshold,
+                    timeout_ms=int(IMAGE_RECALL_TIMEOUT_SECONDS * 1000),
+                )
+        except TimeoutError:
+            result = {"success": False, "error": "image reference retrieval timed out"}
         if result.get("success") is False:
-            raise RuntimeError("Pi image reference retrieval failed")
+            logger.warning(f"[{session_id}] 本轮历史图片参考不可用，继续处理当前消息: {result.get('error', 'unknown')}")
+            records.append(make_reference(
+                "image:retrieval-status", content_hash,
+                "本次历史相似图片检索不可用，未取得历史图片证据；当前收到的图片和文字仍可正常理解。",
+                {"chat_id": session_id, "status": "unavailable"}, nature="retrieval_status_not_evidence",
+            ))
+            continue
         for hit in result.get("hits", []):
             occurrences = {
                 str(item["occurrence_id"]): {

@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterator, List, Optional, Union
 
 import json
 import sqlite3
+import uuid
 
 
 class LedgerConflict(RuntimeError):
@@ -58,6 +59,10 @@ class BusinessStore:
                     stream_id TEXT NOT NULL, event_id TEXT NOT NULL,
                     payload_json TEXT NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(stream_id,event_id)
+                );
+                CREATE TABLE IF NOT EXISTS business_turns (
+                    stream_id TEXT PRIMARY KEY, turn_id TEXT NOT NULL,
+                    source_ids_json TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS business_sources (
                     stream_id TEXT NOT NULL, event_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -165,6 +170,48 @@ class BusinessStore:
                     (stream_id,),
                 )
             ]
+
+    def pending_turn(self, stream_id: str) -> Optional[Dict[str, Any]]:
+        """Selected business work is independent of delivery into model history."""
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT turn_id,source_ids_json FROM business_turns WHERE stream_id=? AND completed=0",
+                (stream_id,),
+            ).fetchone()
+            return None if row is None else {"turn_id": row[0], "source_ids": json.loads(row[1])}
+
+    def begin_turn(self, stream_id: str, source_ids: List[str]) -> Dict[str, Any]:
+        _require_id(stream_id, "stream_id")
+        with self._transaction(write=True) as connection:
+            row = connection.execute(
+                "SELECT turn_id,source_ids_json FROM business_turns WHERE stream_id=? AND completed=0",
+                (stream_id,),
+            ).fetchone()
+            turn_id = row[0] if row else uuid.uuid4().hex
+            sources = list(dict.fromkeys([*(json.loads(row[1]) if row else []), *source_ids]))
+            connection.execute(
+                "INSERT INTO business_turns VALUES(?,?,?,0) ON CONFLICT(stream_id) DO UPDATE SET "
+                "turn_id=excluded.turn_id,source_ids_json=excluded.source_ids_json,completed=0",
+                (stream_id, turn_id, _json_text(sources)),
+            )
+            return {"turn_id": turn_id, "source_ids": sources}
+
+    def complete_turn(self, stream_id: str, turn_id: str) -> None:
+        with self._transaction(write=True) as connection:
+            changed = connection.execute(
+                "UPDATE business_turns SET completed=1 WHERE stream_id=? AND turn_id=?",
+                (stream_id, turn_id),
+            ).rowcount
+            if changed != 1:
+                raise LedgerConflict("Completed turn does not match selected work")
+
+    def recovery_streams(self) -> List[str]:
+        """Only selected unfinished work or undelivered inbox rows need startup."""
+        with self._transaction() as connection:
+            return [row[0] for row in connection.execute(
+                "SELECT stream_id FROM business_turns WHERE completed=0 UNION "
+                "SELECT stream_id FROM business_inbox WHERE acknowledged=0 ORDER BY stream_id"
+            )]
 
     def acknowledge_input(self, stream_id: str, event_id: str) -> None:
         """Call only after Pi has durably recorded this exact source ID.

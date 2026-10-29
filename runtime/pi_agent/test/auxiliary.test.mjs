@@ -138,3 +138,16 @@ test('explicit strict non-chat operations refuse unknown operation bounds before
     }
   }
 });
+
+test('PNG probe and JPEG/WebP group images share the existing image embedding space', async () => {
+  const bodies = [];
+  const runtime = await createHostModelRuntime(config({ modelType: 'image_embedding', extra: { dimensions: 2, pi: { imageEmbeddingProtocol: 'qwen3vl-retrieval-v1' } } }), {
+    fetch: async (_, init) => { bodies.push(JSON.parse(init.body)); return json({ data: [{ embedding: [1, 2] }] }); },
+  });
+  const png = await run(runtime, 'embed_image', image);
+  for (const mimeType of ['image/jpeg', 'image/webp']) {
+    const result = await run(runtime, 'embed_image', { ...image, mimeType });
+    assert.equal(result.requestProtocolHash, png.requestProtocolHash);
+    assert.ok(bodies.at(-1).messages[0].content[0].image_url.url.startsWith(`data:${mimeType};`));
+  }
+});
