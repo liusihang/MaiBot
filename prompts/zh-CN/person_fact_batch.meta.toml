@@ -1,0 +1,3 @@
+display_name = "人物事实批量抽取"
+description = "从一批新的用户原始发言中，按真实人物和消息证据提取稳定事实。"
+advanced = true
