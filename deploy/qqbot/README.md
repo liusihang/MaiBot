@@ -39,18 +39,18 @@ QQ 收发继续使用 [SnowLuma Adapter](https://github.com/Mai-with-u/MaiBot-Sn
 
 `custom_prompts/zh-CN/` 保存中文部署提示词，包括主 Agent、参与判断和记忆摘要。
 马斯克的身份、关系与参与动机已按角色设计调整，主提示词和参与判断提供英、日文对应版本。
-本次仅应用到第一个群；更新部署资料不会自动修改其他实例。`maisaka_replyer.prompt` 供显式生成入口使用，普通群聊正文不经过它。
+两个群已使用同一份当前提示词与人格配置。`maisaka_replyer.prompt` 供显式生成入口使用，普通群聊正文不经过它。
 称呼优先级、按场合决定篇幅、政治话题限制及现有工具能力继续保留。
 身份设计、来源与隔离回放的限制见 [ROLEPLAY.md](ROLEPLAY.md)。
 内置普通/Focus 提示词的中文、英文和日文工具约定已同步为 `reply(msg_id, text)`。
 
-- `bot_config.overlay.toml`：共同设置及第二个群的差异值。
-- `bot_config.group-a.overlay.toml`：第一个群相对于共同设置的差异。
+- `bot_config.overlay.toml`：基础设置；其中旧人格、表达注入与拆句设置由当前 overlay 覆盖。
+- `bot_config.group-a.overlay.toml`：当前两个群共用的差异设置，文件保留原名。启用 Pi 与发言，关闭自动拆句，使用当前人格。
 - `model_config.template.toml`：主模型 Terra/high/25600，辅助模型 Luna/max，
   Qwen 文本/图片嵌入及各任务分配。
-- `model_config.group-a.overlay.toml`：第一个群的主 Agent 使用同济分组的
+- `model_config.group-a.overlay.toml`：当前两个群的主 Agent 使用同济分组的
   `DeepSeek-V4.1-Flash`，推理 max、输出预算 25600；保留原 Terra 模型项供学习等任务使用，Luna 路由不变。
-  `tongji-campus` 使用单独绑定同济分组的 key，不改变原 key 的分组。
+  每个实例的 `tongji-campus` 使用各自绑定同济分组的专属 key，不改变原 key 的分组。
 
 这些配置文件是部署模板。已有实例应保留原配置中的端点、密钥、账号、群绑定和路径，
 按表合并相关设置；不要用 overlay 整文件替换现有配置。
@@ -61,6 +61,11 @@ DeepSeek 兼容模式把网关返回的 `reasoning` 在请求发送时映射到
 模型模板中的 `gateway.example.com` 和空 API key 必须替换为自己的服务配置。
 `a_memorix.filter.chats` 的 `group:REPLACE_GROUP_ID` 必须替换为该实例的群号。
 主动插件的 `group_id`、`session_id`、`bot_user_id` 使用同一实例的实际值。
+大果训练营（376080499）已从旧 Python 主循环升级到与没变群相同的 Pi 镜像，并恢复发言。
+升级前对该实例的 config、plugins、data 和 depends-data 做停机备份，移除 13 个旧源文件挂载；
+聊天数据库、记忆、向量、图片、群绑定和插件配置使用大果群自己的目录。
+该实例此前没有 SDK 原生线程，新 Pi 线程在收到首批实际消息时建立，不复制另一群的会话或伪造旧 SDK 历史。
+共享 NapCat 和没变群未在这次同步中重启。
 模型模板已适配 1.3.18 配置格式；原 EXA 联网服务保留无凭证定义。
 如保留 EXA 功能分配，需要填写其服务密钥；仅使用 GPT 搜索插件时可清空该原生功能分配。
 旧的私聊频率字段已移除，注意力漂移设置按新版拆为群聊和私聊，关闭状态保持。

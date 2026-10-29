@@ -1,4 +1,4 @@
-# QQ group deployment profile, revision 2.
+# QQ group deployment profile, revision 3. Each instance uses its own Tongji key.
 [model_task_config.replyer]
 model_list = ["gpt-6.1-terra"]
 max_tokens = 8024
