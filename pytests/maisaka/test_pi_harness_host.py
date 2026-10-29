@@ -5,7 +5,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import asyncio
 import json
@@ -57,6 +57,9 @@ def engine():
         _running=False,
         _schedule_message_turn=lambda: None,
         _has_pending_messages=lambda: False,
+        _arm_forced_turn_state=Mock(),
+        _queue_proactive_turn=Mock(),
+        _build_proactive_trigger_message=Mock(),
         _trigger_pi_source_learning=AsyncMock(),
         expand_message_id_aliases=lambda args: args,
     )
@@ -432,7 +435,8 @@ async def test_generic_emoji_media_receipt_survives_lost_ack_and_restart(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads(monkeypatch, tmp_path):
+@pytest.mark.parametrize("child_tool", ["web_fetch", "reply"])
+async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads(monkeypatch, tmp_path, child_tool):
     from src.maisaka.pi_runtime.evidence import DurableEvidenceStore
     from src.maisaka.tool_result_store import ToolResultStore
 
@@ -445,8 +449,8 @@ async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads
 
     with wire_server(
         [
-            ("subagent", {"task": "child-only research task", "tools": ["web_fetch", "reply"]}),
-            ("web_fetch", {}),
+            ("subagent", {"task": "child-only research task"}),
+            (child_tool, {}),
             {"text": "child-only source-grounded conclusion"},
             read_delegation,
             None,
@@ -458,8 +462,8 @@ async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads
 
         async def invoke(invocation, context, **kwargs):
             effects.append(invocation)
-            handle = source_store.save(invocation.session_id, "web_fetch", "child original evidence only")
-            return ToolExecutionResult("web_fetch", True, content="child preview only", metadata={"result_id": handle})
+            handle = source_store.save(invocation.session_id, child_tool, "child original evidence only")
+            return ToolExecutionResult(child_tool, True, content="child preview only", metadata={"result_id": handle})
 
         host._runtime._tool_registry.invoke = invoke
         runner = PiGroupRunner(host, data_dir=tmp_path)
@@ -467,13 +471,13 @@ async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads
             await runner.ensure_initialized()
             runner.evidence = DurableEvidenceStore(tmp_path / "evidence.sqlite3", source_store)
             await runner.run([])
-            assert [item.tool_name for item in effects] == ["web_fetch"]
+            assert [item.tool_name for item in effects] == [child_tool]
             assert len(requests) == 5
             # Existing business sub-agent requests use the planner task mapping;
             # ModelTaskConfig has no independent "sub_agent" task to invent.
             assert set(config["model_task_config"]) == {"planner"}
             assert requests[1]["model"] == requests[0]["model"] == "mock-model"
-            assert {item["function"]["name"] for item in requests[1]["tools"]} == {"web_fetch"}
+            assert requests[1]["tools"] == requests[0]["tools"]
             assert "child-only research task" in json.dumps(requests[1]["messages"])
             assert "child preview only" not in json.dumps(requests[3]["messages"])
             assert "child preview only" in json.dumps(requests[4]["messages"])
@@ -625,9 +629,9 @@ async def test_actual_registry_revalidates_contract_after_runner_await(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_real_web_provider_child_grants_and_main_reply_schema():
+async def test_real_web_provider_and_main_reply_schema():
     from src.maisaka.builtin_tool.reply import get_tool_spec
-    from src.maisaka.pi_runtime.runner import child_tool_allowed, pi_tool
+    from src.maisaka.pi_runtime.runner import pi_tool
     from src.web_search.provider import WebSearchToolProvider
 
     config = SimpleNamespace(
@@ -636,14 +640,8 @@ async def test_real_web_provider_child_grants_and_main_reply_schema():
     provider = WebSearchToolProvider(None, lambda: config)
     specs = await provider.list_tools()
     assert {spec.name for spec in specs} == {"web_search", "web_fetch"}
-    assert all(child_tool_allowed(spec) for spec in specs)
     assert pi_tool(specs[0].to_llm_definition())["parameters"]["required"] == ["query"]
-    specs[0].annotation.read_only = False
-    assert not child_tool_allowed(specs[0])
-    specs[1].provider_name = "untrusted-provider"
-    assert not child_tool_allowed(specs[1])
     reply = get_tool_spec()
-    assert not child_tool_allowed(reply)
     converted = pi_tool(reply.to_llm_definition())
     assert converted["parameters"]["required"] == ["msg_id", "text"]
     assert converted["parameters"]["additionalProperties"] is False
@@ -785,3 +783,102 @@ async def test_source_learning_is_independent_of_participation_and_sdk_compactio
             assert await runner.pending_source_ids() == []
         finally:
             await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_background_child_allows_new_parent_turn_and_delivers_completion_once(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    release = asyncio.Event()
+
+    def route(request, requests):
+        is_child = "# 独立任务" in json.dumps(request["messages"], ensure_ascii=False)
+        outputs = [m for m in request["messages"] if m["role"] == "tool"]
+        if is_child:
+            return {"text": "CHILD_FINISHED"} if outputs else ("web_fetch", {})
+        return {"text": "PARENT_CONTINUES"} if outputs else ("subagent", {"task": "BACKGROUND_TASK", "wait": False})
+
+    with wire_server([route] * 12) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, effects = engine()
+
+        async def invoke(invocation, context, **kwargs):
+            effects.append(invocation)
+            await release.wait()
+            return ToolExecutionResult("web_fetch", True, content="CHILD_PRIVATE_SOURCE")
+
+        host._runtime._tool_registry.invoke = invoke
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            assert not release.is_set()
+            before = next(
+                r["messages"]
+                for r in reversed(requests)
+                if "PARENT_CONTINUES" not in json.dumps(r) and "# 独立任务" not in json.dumps(r, ensure_ascii=False)
+            )
+            host._runtime._chat_history.append(history("PARENT_NEW_CHAT", "new-chat"))
+            await runner.run([])
+            assert any("PARENT_NEW_CHAT" in json.dumps(r["messages"]) for r in requests)
+            receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            handle = json.loads(receipt.result["content"][0]["text"])["handle"]
+            release.set()
+            result = await runner.subagents.read(runner.session_id, handle, wait=True)
+            assert result["conclusion"] == "CHILD_FINISHED"
+            pending = await runner._db("pending_inputs", runner.session_id)
+            assert len([p for p in pending if p.payload.get("piChildCompletion")]) == 1
+            host._runtime._queue_proactive_turn.assert_called_once()
+            await runner.run([])
+            assert not await runner._db("pending_inputs", runner.session_id)
+            main_requests = [r for r in requests if "# 独立任务" not in json.dumps(r["messages"], ensure_ascii=False)]
+            assert "CHILD_FINISHED" in json.dumps(main_requests[-1]["messages"])
+            assert "CHILD_PRIVATE_SOURCE" not in json.dumps(main_requests[-1]["messages"])
+            child_requests = [r for r in requests if "# 独立任务" in json.dumps(r["messages"], ensure_ascii=False)]
+            assert child_requests[0]["tools"] == main_requests[0]["tools"]
+            assert "PARENT_NEW_CHAT" not in json.dumps(child_requests[0]["messages"])
+            assert main_requests[-1]["messages"][: len(before)] == before
+        finally:
+            release.set()
+            await runner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("control, arguments", [("stop", {}), ("wait", {"seconds": 0})])
+async def test_child_controls_do_not_change_parent_scheduler(monkeypatch, tmp_path, control, arguments):
+    with wire_server() as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, effects = engine()
+        original_specs = await host._runtime._tool_registry.list_tools(None)
+        spec = ToolSpec(name=control, description=control, provider_name="maisaka_builtin", provider_type="builtin")
+        host._runtime._tool_registry.list_tools.return_value = [*original_specs, spec]
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.ensure_initialized()
+            child = runner.session_id + "/child/controls"
+            runner._children[child] = {"tools": list(runner._tools)}
+            result = await runner._tool(
+                {"sessionId": child, "name": control, "toolCallId": "child-control", "arguments": arguments}
+            )
+            assert result["terminate"] is (control == "stop")
+            assert effects == [] and host._runtime._agent_state == "idle"
+            assert runner.session_id not in runner._terminated_sessions
+            assert not requests
+        finally:
+            runner._children.clear()
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_completion_inbox_deduplicates_without_extra_wake_during_parent_response(tmp_path):
+    host, _ = engine()
+    runner = PiGroupRunner(host, data_dir=tmp_path)
+    try:
+        await runner._ensure_storage()
+        runner._model_running = True
+        result = {"handle": "pi-child-once", "status": "completed", "conclusion": "done", "sources": []}
+        await runner._deliver_child_completion(result)
+        await runner._deliver_child_completion(result)
+        pending = await runner._db("pending_inputs", runner.session_id)
+        assert len(pending) == 1 and pending[0].payload["piChildCompletion"] is True
+        host._runtime._queue_proactive_turn.assert_not_called()
+    finally:
+        await runner.close()

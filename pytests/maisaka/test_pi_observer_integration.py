@@ -41,7 +41,7 @@ async def test_default_child_can_search_and_read_using_the_real_sdk(monkeypatch,
             assert [item.tool_name for item in invoked] == ["gpt_web_search", "gpt_read_search_result"]
             child_tools = {item["function"]["name"] for item in requests[1]["tools"]}
             assert {"gpt_web_search", "gpt_read_search_result"} <= child_tools
-            assert "reply" not in child_tools
+            assert child_tools == {item["function"]["name"] for item in requests[0]["tools"]}
             assert "send_web_image" not in child_tools
             assert "supported conclusion" in str(requests[-1])
         finally:

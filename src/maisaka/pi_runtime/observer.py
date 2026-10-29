@@ -18,8 +18,10 @@ logger = get_logger("pi_observer")
 
 
 class PiObserver:
-    def __init__(self, runtime: Any) -> None:
+    def __init__(self, runtime: Any, *, request_type: str = "maisaka.planner", publish: bool = True) -> None:
         self.runtime = runtime
+        self.request_type = request_type
+        self.publish = publish
         self.started = 0.0
         self.ended = 0.0
         self.event: Dict[str, Any] = {}
@@ -69,12 +71,12 @@ class PiObserver:
                         max(0, self.ended - self.started),
                         self.runtime.session_id,
                         task_name="planner",
-                        request_type="maisaka.planner",
+                        request_type=self.request_type,
                         succeeded=message.get("stopReason") not in {"error", "aborted", "length"},
                     )
                     record_llm_cache_usage(
                         task_name="planner",
-                        request_type="maisaka.planner",
+                        request_type=self.request_type,
                         model_name=route["modelName"],
                         session_id=self.runtime.session_id,
                         prompt_tokens=int(usage.get("input", 0))
@@ -107,6 +109,8 @@ class PiObserver:
             await self._emit("planner.finalized")
 
     async def _emit(self, kind: str, *, active: str = "") -> None:
+        if not self.publish:
+            return
         message = self.event.get("message", {})
         usage = message.get("usage", {})
         calls = [p for p in message.get("content", []) if p["type"] == "toolCall"]

@@ -3,32 +3,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from src.core.tooling import ToolSpec
 from src.maisaka.pi_runtime import observer
-from src.maisaka.pi_runtime.runner import child_tool_allowed
-
-
-def test_default_search_child_grants_require_the_audited_plugin():
-    for name in ("gpt_web_search", "gpt_read_search_result"):
-        tool = ToolSpec(
-            name=name,
-            description="search",
-            provider_name="plugin_runtime",
-            provider_type="plugin",
-            metadata={"plugin_id": "local.gpt-web-search"},
-        )
-        assert child_tool_allowed(tool)
-        tool.metadata["plugin_id"] = "unrelated.plugin"
-        assert not child_tool_allowed(tool)
-    assert not child_tool_allowed(
-        ToolSpec(
-            name="send_web_image",
-            description="send",
-            provider_name="plugin_runtime",
-            provider_type="plugin",
-            metadata={"plugin_id": "local.gpt-web-search"},
-        )
-    )
 
 
 @pytest.mark.asyncio
@@ -115,3 +90,27 @@ async def test_failed_model_and_observation_failure_do_not_execute_or_retry(monk
     emit.side_effect = OSError("observer store unavailable")
     await monitor.handle({"type": "turn_end"})
     account.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_child_usage_is_accounted_without_overwriting_parent_monitor(monkeypatch):
+    emit, account, cache = AsyncMock(), AsyncMock(), Mock()
+    monkeypatch.setattr(observer, "emit_planner_snapshot", emit)
+    monkeypatch.setattr(observer, "record_pi_usage", account)
+    monkeypatch.setattr(observer, "record_llm_cache_usage", cache)
+    monkeypatch.setattr(observer, "export_harness_config", lambda: {})
+    monitor = observer.PiObserver(
+        SimpleNamespace(session_id="real-group", _cycle_counter=0), request_type="maisaka.sub_agent", publish=False
+    )
+    await monitor.handle({"type": "message_start", "message": {"role": "assistant"}})
+    await monitor.handle(
+        {
+            "type": "message_end",
+            "messageEntryId": "child-response",
+            "route": {"modelName": "group-chat"},
+            "message": {"role": "assistant", "content": [], "usage": {"input": 5, "output": 2}, "stopReason": "stop"},
+        }
+    )
+    account.assert_awaited_once()
+    assert account.call_args.kwargs["request_type"] == cache.call_args.kwargs["request_type"] == "maisaka.sub_agent"
+    emit.assert_not_awaited()

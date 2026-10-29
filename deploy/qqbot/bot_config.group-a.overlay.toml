@@ -1,10 +1,14 @@
-# QQ group deployment profile, revision 5. Applied to both group instances.
+# QQ group deployment profile, revision 6. Applied to both group instances.
 [chat]
 pi_agent_enabled = true
 
 [chat.reply_timing]
 talk_value = 1.0
 enable_talk_value_rules = false
+
+[capabilities]
+planner_subagent = true
+advanced_sub_agent = true
 
 [response_splitter]
 enable = false

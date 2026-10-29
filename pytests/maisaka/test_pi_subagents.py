@@ -27,7 +27,7 @@ def test_isolation_permissions_and_original_evidence(tmp_path):
         result = await service.delegate(
             "real-group-1", "research", [tool("web_search"), tool("reply"), tool("unknown")]
         )
-        assert [item["function"]["name"] for item in seen[0][3]] == ["web_search"]
+        assert [item["function"]["name"] for item in seen[0][3]] == ["web_search", "reply", "unknown"]
         assert seen[0][0] != seen[0][1] == "real-group-1"
         assert result["sources"] == ["https://example.org/evidence"]
         transcript = await service.read("real-group-1", result["handle"])
@@ -35,8 +35,7 @@ def test_isolation_permissions_and_original_evidence(tmp_path):
         with pytest.raises(PermissionError):
             await service.read("other-group", result["handle"])
         for name in ("reply", "subagent", "remember_memory", "unknown"):
-            with pytest.raises(PermissionError):
-                service.assert_tool_allowed(name, [name])
+            service.assert_tool_allowed(name, [name])
         with pytest.raises(PermissionError):
             service.assert_tool_allowed("web_fetch", ["web_search"])
         service.assert_tool_allowed("web_search", ["web_search"])
@@ -126,8 +125,8 @@ def test_failed_and_cancelled_child_evidence_survives(tmp_path):
             create(handle, *args)
 
         service._create = capture
-        with pytest.raises(RuntimeError):
-            await service.delegate("parent", "fail", [])
+        failure = await service.delegate("parent", "fail", [])
+        assert failure["status"] == "failed" and failure["error"] == "RuntimeError"
         with pytest.raises(asyncio.CancelledError):
             await service.delegate("parent", "cancel", [])
         for handle, expected in zip(captured, ["failed", "cancelled"], strict=True):
@@ -136,3 +135,57 @@ def test_failed_and_cancelled_child_evidence_survives(tmp_path):
             assert record["events"] == []
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_background_returns_while_work_runs_and_wait_joins_without_polling(tmp_path):
+    release = asyncio.Event()
+    notifications = []
+
+    async def runner(child, parent, task, tools, event):
+        await release.wait()
+        await event({"type": "message_end", "message": {"role": "toolResult", "content": "sent image receipt"}})
+        return {"conclusion": "image sent", "sources": ["https://example.org/source"]}
+
+    async def notify(result):
+        notifications.append(result)
+
+    service = PiSubagentService(tmp_path / "children.sqlite", runner, notify)
+    result = await service.delegate("group", "edit and send", [tool("gemini_generate_image")], wait=False)
+    assert result["status"] == "running"
+    with pytest.raises(PermissionError):
+        await service.read("other-group", result["handle"], wait=True)
+    join = asyncio.create_task(service.read("group", result["handle"], wait=True))
+    await asyncio.sleep(0)
+    assert not join.done()
+    release.set()
+    completed = await join
+    assert completed["status"] == "completed" and completed["conclusion"] == "image sent"
+    assert notifications[0]["handle"] == result["handle"]
+    await service.recover("group")
+    assert len(notifications) == 1
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_restart_recovers_unnotified_completion_and_marks_interrupted_actions(tmp_path):
+    path = tmp_path / "children.sqlite"
+
+    async def runner(*args):
+        return {"conclusion": "done"}
+
+    first = PiSubagentService(path, runner)
+    first._create("finished", "group", "child-1", "draw", ["reply"], True)
+    first._finish("finished", "completed", {"conclusion": "sent once"})
+    first._create("lost", "group", "child-2", "edit", ["gemini_generate_image"], True)
+    notifications = []
+
+    async def notify(result):
+        notifications.append(result)
+
+    restarted = PiSubagentService(path, runner, notify)
+    await restarted.recover("group")
+    assert {r["handle"]: r["status"] for r in notifications} == {"finished": "completed", "lost": "interrupted"}
+    assert restarted._tasks == {}
+    await restarted.recover("group")
+    assert len(notifications) == 2

@@ -26,10 +26,16 @@ round with its actual route, usage and tool receipts. These observation records
 do not reconstruct or modify authoritative SDK history or expose native thinking
 and signatures. Auxiliary inference uses the same accounting implementation.
 
-Delegated research defaults to the approved read-only tool set when `tools` is
-omitted. The default `gpt_web_search` and `gpt_read_search_result` tools require
-the exact host plugin ownership `local.gpt-web-search`; the child cannot obtain
-`reply` or image-sending permissions through a matching tool name.
+Delegated tasks run in independent persistent Pi threads with the same frozen
+host tools as their parent, including search, media, memory writes and reply.
+`subagent(task, wait=true)` waits for its conclusion; `wait=false` returns a handle
+immediately. Completion is durably queued to the parent inbox and wakes its normal
+internal turn without waiting for Luna. `read_subagent(handle, wait=true)` joins an
+already running task. Intermediate evidence stays in the child; the parent gets a
+bounded conclusion, sources and a durable evidence handle. Tool execution retains
+the group's real business scope and per-child delivery receipts. Child stop/wait
+controls do not change the parent's scheduling state. Interrupted actions are not
+automatically replayed after restart.
 
 Reply targets absent from the process-local business mirror are resolved from
 the message repository using the current real chat ID. A retained Pi message
