@@ -13,6 +13,41 @@ const response = () => new Response([
   'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","model":"exact-terra-route","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":0,"total_tokens":4}}}\n\n',
 ].join(''), { headers: { 'content-type': 'text/event-stream' } });
 
+for (const deepseek of [true, false]) test(`DeepSeek gateway reasoning alias round-trips through native SDK (deepseek=${deepseek})`, async () => {
+  const cfg = config(); cfg.api_providers[0].client_type = 'openai';
+  cfg.models[0].extra_params = { reasoning_effort: 'max', pi: { compat: {
+    supportsReasoningEffort: true,
+    ...(deepseek ? { thinkingFormat: 'deepseek', requiresReasoningContentOnAssistantMessages: true } : {}),
+  } } };
+  const wires = [];
+  const runtime = await createHostModelRuntime(cfg, { fetch: async (_, init) => {
+    wires.push(JSON.parse(init.body));
+    const chunks = wires.length === 1 ? [
+      { reasoning: 'private mock reasoning' },
+      { tool_calls: [{ index: 0, id: 'call_lookup', type: 'function', function: { name: 'lookup', arguments: '{}' } }] },
+    ] : [{ content: 'ok' }];
+    return new Response(chunks.map((delta, i) => `data: ${JSON.stringify({ id: 'chat-mock', model: 'exact-terra-route', choices: [
+      { index: 0, delta, finish_reason: i === chunks.length - 1 ? (wires.length === 1 ? 'tool_calls' : 'stop') : null },
+    ] })}\n\n`).join('') + 'data: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+  } });
+  const route = resolveTaskModel(runtime, 'main');
+  const tools = [{ name: 'lookup', description: 'Read-only mock', parameters: { type: 'object', properties: {} } }];
+  const user = { role: 'user', content: 'look up', timestamp: 1 };
+  const first = await runtime.completeSimple(route.model, { messages: [user], tools }, { reasoning: route.thinkingLevel });
+  assert.equal(first.stopReason, 'toolUse', first.errorMessage);
+  const original = structuredClone(first);
+  const second = await runtime.completeSimple(route.model, { messages: [user, first,
+    { role: 'toolResult', toolCallId: 'call_lookup', toolName: 'lookup', content: [{ type: 'text', text: 'found' }], timestamp: 2, isError: false },
+  ], tools }, { reasoning: route.thinkingLevel });
+  assert.equal(second.stopReason, 'stop', second.errorMessage);
+  assert.deepEqual(first, original, 'Wire adaptation must not rewrite native messages');
+  const assistant = wires[1].messages.find(message => message.role === 'assistant');
+  assert.equal(assistant[deepseek ? 'reasoning_content' : 'reasoning'], 'private mock reasoning');
+  if (deepseek) assert.equal(assistant.reasoning, undefined);
+  assert.equal(wires[1].reasoning_effort, 'max');
+  assert.equal(wires[1].max_tokens ?? wires[1].max_completion_tokens, 25600);
+});
+
 test('official Responses provider serializes exact effort/output/extra body/headers with unknown capacity explicit', async () => {
   const requests = [];
   const runtime = await createHostModelRuntime(config(), { fetch: async (url, init) => { requests.push({ url: String(url), init }); return response(); } });

@@ -278,6 +278,16 @@ export async function createHostModelRuntime(config, { fetch: fetchImpl } = {}) 
         effective.onPayload = async (payload, activeModel) => {
           let merged = mergeProviderPayload(payload, model.hostExtraBody ?? extra.body, api);
           if (hostHook) merged = (await hostHook(merged, activeModel)) ?? merged;
+          // Some gateways return DeepSeek thinking as `reasoning`. Pi preserves
+          // that native signature, but DeepSeek continuation reads reasoning_content.
+          // Adapt only the outgoing protocol; keep the SDK transcript untouched.
+          if (api === 'openai-completions' && extra.pi.compat?.thinkingFormat === 'deepseek') {
+            merged.messages = merged.messages.map((message) => {
+              if (message.role !== 'assistant' || typeof message.reasoning !== 'string' || message.reasoning_content) return message;
+              const { reasoning, ...rest } = message;
+              return { ...rest, reasoning_content: reasoning };
+            });
+          }
           if (merged.model !== model.id) throw error('RESERVED_MODEL_PARAMETER', 'Payload hook cannot replace the selected model');
           // Restore after both SDK estimation and user hooks. Alternate budget keys
           // cannot bypass admission or silently reduce the configured allowance.

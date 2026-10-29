@@ -48,10 +48,16 @@ QQ 收发继续使用 [SnowLuma Adapter](https://github.com/Mai-with-u/MaiBot-Sn
 - `bot_config.group-a.overlay.toml`：第一个群相对于共同设置的差异。
 - `model_config.template.toml`：主模型 Terra/high/25600，辅助模型 Luna/max，
   Qwen 文本/图片嵌入及各任务分配。
-- `model_config.group-a.overlay.toml`：第一个群的模型任务差异。
+- `model_config.group-a.overlay.toml`：第一个群的主 Agent 使用同济分组的
+  `DeepSeek-V4.1-Flash`，推理 max、输出预算 25600；保留原 Terra 模型项供学习等任务使用，Luna 路由不变。
+  `tongji-campus` 使用单独绑定同济分组的 key，不改变原 key 的分组。
 
 这些配置文件是部署模板。已有实例应保留原配置中的端点、密钥、账号、群绑定和路径，
 按表合并相关设置；不要用 overlay 整文件替换现有配置。
+持续 Pi 会话切换模型时，先停止该群写入并保存恢复点，再按新配置解析模型路由，
+追加新的契约及路由变更记录。保留原 JSONL 前缀，不能只改配置后删除或重建聊天历史。
+DeepSeek 兼容模式把网关返回的 `reasoning` 在请求发送时映射到
+`reasoning_content`，保留思考原文和工具配对，不修改 SDK 原生消息。
 模型模板中的 `gateway.example.com` 和空 API key 必须替换为自己的服务配置。
 `a_memorix.filter.chats` 的 `group:REPLACE_GROUP_ID` 必须替换为该实例的群号。
 主动插件的 `group_id`、`session_id`、`bot_user_id` 使用同一实例的实际值。
