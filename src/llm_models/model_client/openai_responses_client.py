@@ -609,9 +609,9 @@ def _parse_completed_response(
     api_response = APIResponse(
         output_items=tuple(output_items),
         # Only an explicit completed response proves that tool arguments are complete.
-        stop_reason=(
-            "toolUse" if any(isinstance(item, FunctionCallItem) for item in output_items) else "stop"
-        ) if status == "completed" else "unknown",
+        stop_reason=("toolUse" if any(isinstance(item, FunctionCallItem) for item in output_items) else "stop")
+        if status == "completed"
+        else "unknown",
         generation_trace=GenerationTrace(
             provider=provider_name,
             endpoint=base_url,

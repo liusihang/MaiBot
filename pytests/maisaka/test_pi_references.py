@@ -8,8 +8,8 @@ def ref(key, text, **metadata):
 
 
 def test_source_versions_ignore_retrieval_noise_and_preserve_authority():
-    a = ref("m1", "Alice asked for kneeling yesterday", score=.4, query="one", evidence_message_ids=["42"])
-    b = ref("m1", "Alice asked for kneeling yesterday", score=.9, query="two", evidence_message_ids=["42"])
+    a = ref("m1", "Alice asked for kneeling yesterday", score=0.4, query="one", evidence_message_ids=["42"])
+    b = ref("m1", "Alice asked for kneeling yesterday", score=0.9, query="two", evidence_message_ids=["42"])
     assert a == b
     changed = ref("m1", "Alice withdrew her request", evidence_message_ids=["43"])
     assert a.source_id == changed.source_id and a.version != changed.version
@@ -57,10 +57,16 @@ def test_build_references_real_endpoint_shapes_and_strict_raw_scope(monkeypatch)
 
     calls = []
     integration = SimpleNamespace(heuristic_memory_recall_enabled=True, enable_person_profile_injection=True)
-    image_config = SimpleNamespace(enabled=True, candidate_limit=8, similarity_threshold=.8)
-    monkeypatch.setitem(sys.modules, "src.config.config", SimpleNamespace(global_config=SimpleNamespace(
-        a_memorix=SimpleNamespace(integration=integration, image_memory=image_config),
-    )))
+    image_config = SimpleNamespace(enabled=True, candidate_limit=8, similarity_threshold=0.8)
+    monkeypatch.setitem(
+        sys.modules,
+        "src.config.config",
+        SimpleNamespace(
+            global_config=SimpleNamespace(
+                a_memorix=SimpleNamespace(integration=integration, image_memory=image_config),
+            )
+        ),
+    )
 
     async def resolve(hits):
         return {}
@@ -71,75 +77,155 @@ def test_build_references_real_endpoint_shapes_and_strict_raw_scope(monkeypatch)
         # Regression: the old person-only scope check is deliberately permissive.
         _is_hit_allowed=lambda *args, **kwargs: True,
     )
-    monkeypatch.setitem(sys.modules, "src.maisaka.memory.heuristic_injector", SimpleNamespace(
-        HeuristicMemoryContext=SimpleNamespace, heuristic_memory_injector=injector,
-    ))
-    monkeypatch.setitem(sys.modules, "src.maisaka.memory.person_profile", SimpleNamespace(
-        collect_person_profile_candidates=lambda *args, **kwargs: [SimpleNamespace(person_id="person-1")],
-    ))
+    monkeypatch.setitem(
+        sys.modules,
+        "src.maisaka.memory.heuristic_injector",
+        SimpleNamespace(
+            HeuristicMemoryContext=SimpleNamespace,
+            heuristic_memory_injector=injector,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "src.maisaka.memory.person_profile",
+        SimpleNamespace(
+            collect_person_profile_candidates=lambda *args, **kwargs: [SimpleNamespace(person_id="person-1")],
+        ),
+    )
     monkeypatch.setattr(references, "_jargon_records", lambda *args: [])
 
     def hit(identity, chat, text):
-        return SimpleNamespace(hash_value=identity, episode_id="", hit_type="paragraph", content=text,
-                               metadata={"chat_id": chat, "evidence_message_ids": [identity + "-msg"]},
-                               source="person_fact:person-1")
+        return SimpleNamespace(
+            hash_value=identity,
+            episode_id="",
+            hit_type="paragraph",
+            content=text,
+            metadata={"chat_id": chat, "evidence_message_ids": [identity + "-msg"]},
+            source="person_fact:person-1",
+        )
 
     async def search(query, **kwargs):
         calls.append((query, kwargs))
-        return SimpleNamespace(success=True, filtered=False, error="", hits=[
-            hit("m1", "group-1", "Hiking safety needs water"),
-            hit("m2", "other-group", "Hiking SECRET other group"),
-            hit("m3", "", "Hiking SECRET unknown scope"),
-            SimpleNamespace(hash_value="m4", episode_id="", hit_type="paragraph",
-                content="Hiking SECRET conflicting session", source="person_fact:person-1",
-                metadata={"chat_id": "group-1", "session_id": "other-group"}),
-            SimpleNamespace(hash_value="m5", episode_id="", hit_type="paragraph",
-                content="Hiking SECRET conflicting summary", source="chat_summary:other-group",
-                metadata={"chat_id": "group-1"}),
-        ])
+        return SimpleNamespace(
+            success=True,
+            filtered=False,
+            error="",
+            hits=[
+                hit("m1", "group-1", "Hiking safety needs water"),
+                hit("m2", "other-group", "Hiking SECRET other group"),
+                hit("m3", "", "Hiking SECRET unknown scope"),
+                SimpleNamespace(
+                    hash_value="m4",
+                    episode_id="",
+                    hit_type="paragraph",
+                    content="Hiking SECRET conflicting session",
+                    source="person_fact:person-1",
+                    metadata={"chat_id": "group-1", "session_id": "other-group"},
+                ),
+                SimpleNamespace(
+                    hash_value="m5",
+                    episode_id="",
+                    hit_type="paragraph",
+                    content="Hiking SECRET conflicting summary",
+                    source="chat_summary:other-group",
+                    metadata={"chat_id": "group-1"},
+                ),
+            ],
+        )
 
     async def profile_admin(**kwargs):
         assert kwargs["action"] == "evidence"
-        return {"success": True, "evidence": [
-            {"hash": "p1", "content": "trimmed", "source_type": "person_fact",
-             "raw": {"content": "Hiking mountain routes researched last winter", "source": "person_fact:person-1",
-                     "metadata": {"chat_id": "group-1", "evidence_message_ids": ["raw-original"]}}},
-            # Raw provenance wins over an outer summary with another scope.
-            {"hash": "p2", "content": "Hiking SECRET cross profile", "metadata": {"chat_id": "group-1"},
-             "raw": {"content": "Hiking SECRET cross profile", "metadata": {"chat_id": "other-group"}}},
-        ]}
+        return {
+            "success": True,
+            "evidence": [
+                {
+                    "hash": "p1",
+                    "content": "trimmed",
+                    "source_type": "person_fact",
+                    "raw": {
+                        "content": "Hiking mountain routes researched last winter",
+                        "source": "person_fact:person-1",
+                        "metadata": {"chat_id": "group-1", "evidence_message_ids": ["raw-original"]},
+                    },
+                },
+                # Raw provenance wins over an outer summary with another scope.
+                {
+                    "hash": "p2",
+                    "content": "Hiking SECRET cross profile",
+                    "metadata": {"chat_id": "group-1"},
+                    "raw": {"content": "Hiking SECRET cross profile", "metadata": {"chat_id": "other-group"}},
+                },
+            ],
+        }
 
     async def image_memory(**kwargs):
         assert kwargs["session_id"] == kwargs["chat_id"] == "group-1"
-        return {"success": True, "hits": [{
-            "occurrences": [
-                {"occurrence_id": "o1", "chat_id": "group-1", "message_id": "image-original", "updated_at": "dynamic"},
-                {"occurrence_id": "o2", "chat_id": "other-group", "message_id": "secret"},
+        return {
+            "success": True,
+            "hits": [
+                {
+                    "occurrences": [
+                        {
+                            "occurrence_id": "o1",
+                            "chat_id": "group-1",
+                            "message_id": "image-original",
+                            "updated_at": "dynamic",
+                        },
+                        {"occurrence_id": "o2", "chat_id": "other-group", "message_id": "secret"},
+                    ],
+                    "observations": [
+                        {
+                            "observation_id": "i1",
+                            "occurrence_id": "o1",
+                            "text": "Hiking image shows red boots",
+                            "source_kind": "user",
+                            "confirm_status": "confirmed",
+                            "evidence_json": "{}",
+                        },
+                        {"observation_id": "i2", "occurrence_id": "o2", "text": "SECRET other image"},
+                    ],
+                    "related_memories": [
+                        {"target_type": "paragraph", "target_id": "mixed", "content": "SECRET mixed link"}
+                    ],
+                },
+                {
+                    # Current-group occurrence does not authorize a linked foreign target.
+                    "occurrences": [{"occurrence_id": "local", "chat_id": "group-1", "message_id": "local-image"}],
+                    "observations": [],
+                    "related_memories": [
+                        {
+                            "target_type": "paragraph",
+                            "target_id": "foreign-target",
+                            "content": "Hiking SECRET foreign memory linked to local image",
+                        }
+                    ],
+                },
             ],
-            "observations": [
-                {"observation_id": "i1", "occurrence_id": "o1", "text": "Hiking image shows red boots",
-                 "source_kind": "user", "confirm_status": "confirmed", "evidence_json": "{}"},
-                {"observation_id": "i2", "occurrence_id": "o2", "text": "SECRET other image"},
-            ],
-            "related_memories": [{"target_type": "paragraph", "target_id": "mixed", "content": "SECRET mixed link"}],
-        }, {
-            # Current-group occurrence does not authorize a linked foreign target.
-            "occurrences": [{"occurrence_id": "local", "chat_id": "group-1", "message_id": "local-image"}],
-            "observations": [],
-            "related_memories": [{"target_type": "paragraph", "target_id": "foreign-target",
-                                  "content": "Hiking SECRET foreign memory linked to local image"}],
-        }]}
+        }
 
-    monkeypatch.setitem(sys.modules, "src.services.memory_service", SimpleNamespace(memory_service=SimpleNamespace(
-        search=search, profile_admin=profile_admin, image_memory=image_memory,
-    )))
-    monkeypatch.setitem(sys.modules, "src.A_memorix.core.image.component_paths", SimpleNamespace(
-        iter_message_image_components=lambda components: [("0", SimpleNamespace(binary_hash="image-hash"))],
-        build_chat_external_ref=lambda **kwargs: "chat:group-1:new:0",
-    ))
+    monkeypatch.setitem(
+        sys.modules,
+        "src.services.memory_service",
+        SimpleNamespace(
+            memory_service=SimpleNamespace(
+                search=search,
+                profile_admin=profile_admin,
+                image_memory=image_memory,
+            )
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "src.A_memorix.core.image.component_paths",
+        SimpleNamespace(
+            iter_message_image_components=lambda components: [("0", SimpleNamespace(binary_hash="image-hash"))],
+            build_chat_external_ref=lambda **kwargs: "chat:group-1:new:0",
+        ),
+    )
     runtime = SimpleNamespace(session_id="group-1", chat_stream=SimpleNamespace(user_id="", group_id="1"))
-    message = SimpleNamespace(processed_plain_text="Hiking weekend plan", message_id="new",
-                              raw_message=SimpleNamespace(components=[]))
+    message = SimpleNamespace(
+        processed_plain_text="Hiking weekend plan", message_id="new", raw_message=SimpleNamespace(components=[])
+    )
     result = asyncio.run(references.build_references(runtime, [message]))
     assert {item.source_id for item in result} == {"m1", "p1", "i1"}
     assert calls[0][0] == "Hiking weekend plan"

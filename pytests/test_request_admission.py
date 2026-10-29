@@ -731,8 +731,10 @@ async def test_pi_strict_scope_inherits_children_but_not_unrelated_groups():
         with require_verified_capacity():
             ready.set()
             await release.wait()
+
             async def child():
                 guard_unverified_route(mode="audit", operation="offline_child")
+
             with pytest.raises(AdmissionDenied):
                 await asyncio.create_task(child())
         guard_unverified_route(mode="audit", operation="offline_restored")
@@ -746,35 +748,52 @@ async def test_pi_strict_scope_inherits_children_but_not_unrelated_groups():
 
 def test_transport_fingerprint_binds_route_and_routing_but_excludes_configured_credentials():
     route = final_request({"model": "opaque-alias"}).route
+
     def fingerprint(header_value="route-A", secret="secret-A", query_value="revision-A", target=route):
         return calculate_transport_fingerprint(
-            target, headers=[("X-Route", header_value), ("Authorization", secret), ("Content-Length", "999")],
-            query=[("api-key", secret), ("api-version", query_value)], auth_query_name="api-key",
+            target,
+            headers=[("X-Route", header_value), ("Authorization", secret), ("Content-Length", "999")],
+            query=[("api-key", secret), ("api-version", query_value)],
+            auth_query_name="api-key",
         )
+
     baseline = fingerprint()
     assert fingerprint(secret="secret-B") == baseline
     assert fingerprint(header_value="route-B") != baseline
     assert fingerprint(query_value="revision-B") != baseline
     assert fingerprint(target=RequestRoute("other-provider", route.endpoint, route.model, route.protocol)) != baseline
-    assert calculate_transport_fingerprint(route, headers=[], query=[("", "routing-value")]) != calculate_transport_fingerprint(
-        route, headers=[], query=[],
+    assert calculate_transport_fingerprint(
+        route, headers=[], query=[("", "routing-value")]
+    ) != calculate_transport_fingerprint(
+        route,
+        headers=[],
+        query=[],
     )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,actual_header,allowed", [("exact", "route-A", True), ("exact", "route-B", False), ("upper_bound", "route-A", False)])
-async def test_custom_transport_requires_exact_counter_and_matching_declared_contract(sdk_client, kind, actual_header, allowed):
+@pytest.mark.parametrize(
+    "kind,actual_header,allowed",
+    [("exact", "route-A", True), ("exact", "route-B", False), ("upper_bound", "route-A", False)],
+)
+async def test_custom_transport_requires_exact_counter_and_matching_declared_contract(
+    sdk_client, kind, actual_header, allowed
+):
     client, sent = sdk_client()
     route = final_request({"model": "opaque-alias"}).route
     fingerprint = calculate_transport_fingerprint(route, headers=[("X-Route", "route-A")], query=[])
     counted = []
+
     async def counter(prepared):
         counted.append(prepared)
         assert prepared.transport_fingerprint == fingerprint
         return InputMeasurement(kind, 1, "offline verified transport-aware counter")
+
     register_input_counter("transport_contract_test", counter)
-    req = request(model(input_counter="transport_contract_test", transport_contract_fingerprint=fingerprint),
-                  extra={"headers": {"X-Route": actual_header}})
+    req = request(
+        model(input_counter="transport_contract_test", transport_contract_fingerprint=fingerprint),
+        extra={"headers": {"X-Route": actual_header}},
+    )
     try:
         if allowed:
             await client.get_response(req)
@@ -796,8 +815,9 @@ async def test_declared_transport_contract_does_not_make_byte_count_authoritativ
     fingerprint = calculate_transport_fingerprint(route, headers=[("X-Route", "route-A")], query=[])
     try:
         with pytest.raises(AdmissionDenied):
-            await client.get_response(request(model(transport_contract_fingerprint=fingerprint),
-                                              extra={"headers": {"X-Route": "route-A"}}))
+            await client.get_response(
+                request(model(transport_contract_fingerprint=fingerprint), extra={"headers": {"X-Route": "route-A"}})
+            )
         assert sent == []
     finally:
         await client.client.close()
@@ -809,17 +829,24 @@ async def test_transport_change_during_counter_does_not_reach_network(sdk_client
     route = final_request({"model": "opaque-alias"}).route
     fingerprint = calculate_transport_fingerprint(route, headers=[("X-Route", "route-A")], query=[])
     captured = []
+
     async def capture(req):
         captured.append(req)
+
     async def counter(prepared):
         captured[-1].headers["X-Route"] = "route-B"
         return InputMeasurement("exact", 1, "offline verified counter")
+
     client.client._client.event_hooks["request"].insert(0, capture)
     register_input_counter("transport_mutation_test", counter)
     try:
         with pytest.raises(AdmissionDenied, match="changed"):
-            await client.get_response(request(model(input_counter="transport_mutation_test", transport_contract_fingerprint=fingerprint),
-                                              extra={"headers": {"X-Route": "route-A"}}))
+            await client.get_response(
+                request(
+                    model(input_counter="transport_mutation_test", transport_contract_fingerprint=fingerprint),
+                    extra={"headers": {"X-Route": "route-A"}},
+                )
+            )
         assert sent == []
     finally:
         unregister_input_counter("transport_mutation_test")
@@ -830,14 +857,22 @@ async def test_transport_change_during_counter_does_not_reach_network(sdk_client
 async def test_transport_fingerprint_cannot_authorize_different_request_authentication(sdk_client):
     client, sent = sdk_client()
     route = final_request({"model": "opaque-alias"}).route
-    fingerprint = calculate_transport_fingerprint(route, headers=[("Authorization", "not-the-provider-identity")], query=[])
+    fingerprint = calculate_transport_fingerprint(
+        route, headers=[("Authorization", "not-the-provider-identity")], query=[]
+    )
+
     async def counter(_):
         raise AssertionError("An undeclared authentication identity must not reach the counter")
+
     register_input_counter("auth_override_contract_test", counter)
     try:
         with pytest.raises(AdmissionDenied, match="authentication override"):
-            await client.get_response(request(model(input_counter="auth_override_contract_test", transport_contract_fingerprint=fingerprint),
-                                              extra={"headers": {"Authorization": "not-the-provider-identity"}}))
+            await client.get_response(
+                request(
+                    model(input_counter="auth_override_contract_test", transport_contract_fingerprint=fingerprint),
+                    extra={"headers": {"Authorization": "not-the-provider-identity"}},
+                )
+            )
         assert sent == []
     finally:
         unregister_input_counter("auth_override_contract_test")

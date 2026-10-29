@@ -14,29 +14,53 @@ import sqlite3
 import uuid
 
 
-READ_ONLY_TOOL_NAMES = frozenset({
-    "query_memory", "query_person_profile", "query_image_memory",
-    "read_tool_result", "view_forward_message", "web_search", "web_fetch",
-})
+READ_ONLY_TOOL_NAMES = frozenset(
+    {
+        "query_memory",
+        "query_person_profile",
+        "query_image_memory",
+        "read_tool_result",
+        "view_forward_message",
+        "web_search",
+        "web_fetch",
+    }
+)
 MAX_CONCLUSION_CHARS = 4000
 MAX_READ_CHARS = 12000
 SUBAGENT_TOOL_DEFINITIONS = [
-    {"type": "function", "function": {
-        "name": "subagent",
-        "description": "Delegate substantial research to an isolated Pi child. Returns a conclusion and a durable evidence handle; ordinary chat need not delegate.",
-        "parameters": {"type": "object", "properties": {
-            "task": {"type": "string", "minLength": 1},
-            "tools": {"type": "array", "items": {"type": "string"}},
-        }, "required": ["task"], "additionalProperties": False},
-    }},
-    {"type": "function", "function": {
-        "name": "read_subagent",
-        "description": "Read the original child transcript and evidence from this chat's delegation, including after completion or restart.",
-        "parameters": {"type": "object", "properties": {
-            "handle": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
-            "limit": {"type": "integer", "minimum": 1, "maximum": MAX_READ_CHARS},
-        }, "required": ["handle"], "additionalProperties": False},
-    }},
+    {
+        "type": "function",
+        "function": {
+            "name": "subagent",
+            "description": "Delegate substantial research to an isolated Pi child. Returns a conclusion and a durable evidence handle; ordinary chat need not delegate.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "minLength": 1},
+                    "tools": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["task"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_subagent",
+            "description": "Read the original child transcript and evidence from this chat's delegation, including after completion or restart.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "handle": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 0},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": MAX_READ_CHARS},
+                },
+                "required": ["handle"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 EventSink = Callable[[Mapping[str, Any]], Awaitable[None]]
 ChildRunner = Callable[[str, str, str, Sequence[Dict[str, Any]], EventSink], Awaitable[Dict[str, Any]]]
@@ -110,7 +134,10 @@ class PiSubagentService:
             )
 
     async def delegate(
-        self, parent_session_id: str, task: str, tools: Sequence[Dict[str, Any]],
+        self,
+        parent_session_id: str,
+        task: str,
+        tools: Sequence[Dict[str, Any]],
     ) -> Dict[str, Any]:
         if not parent_session_id.strip() or not task.strip():
             raise ValueError("A real parent session ID and a non-empty task are required")
@@ -138,14 +165,17 @@ class PiSubagentService:
         sources = result.get("sources")
         uncertainty = result.get("uncertainty")
         return {
-            "handle": handle, "status": "completed",
+            "handle": handle,
+            "status": "completed",
             "conclusion": conclusion[:MAX_CONCLUSION_CHARS],
             "conclusion_truncated": len(conclusion) > MAX_CONCLUSION_CHARS,
             # Never manufacture source URLs from arbitrary assistant prose.
             "sources": [source for source in sources[:20] if len(_json(source)) <= 1000]
-                if isinstance(sources, list) else [],
-            "uncertainty": uncertainty[:1000] if isinstance(uncertainty, str) else
-                "No separately structured uncertainty statement was returned; inspect the conclusion and original evidence.",
+            if isinstance(sources, list)
+            else [],
+            "uncertainty": uncertainty[:1000]
+            if isinstance(uncertainty, str)
+            else "No separately structured uncertainty statement was returned; inspect the conclusion and original evidence.",
             "evidence_handle": handle,
         }
 
@@ -186,41 +216,63 @@ class PiSubagentService:
             return None
         return {
             "type": "tool_evidence" if role == "toolResult" else "public_conclusion",
-            "tool_name": message.get("toolName", ""), "call_id": message.get("toolCallId", ""),
+            "tool_name": message.get("toolName", ""),
+            "call_id": message.get("toolCallId", ""),
             "text": text,
         }
 
     def _read(self, parent: str, handle: str, offset: int, limit: int) -> Dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM pi_children WHERE handle=? AND parent=?", (handle, parent),
+                "SELECT * FROM pi_children WHERE handle=? AND parent=?",
+                (handle, parent),
             ).fetchone()
             if row is None:
                 # Same error for an unknown or a different parent's handle.
                 raise PermissionError("Child evidence handle is not available in this parent session")
-            events = [json.loads(event[0]) for event in connection.execute(
-                "SELECT payload FROM pi_child_events WHERE handle=? ORDER BY seq", (handle,),
-            )]
+            events = [
+                json.loads(event[0])
+                for event in connection.execute(
+                    "SELECT payload FROM pi_child_events WHERE handle=? ORDER BY seq",
+                    (handle,),
+                )
+            ]
         result = json.loads(row["result"]) if row["result"] else None
-        public_result = None if not isinstance(result, dict) else {
-            "conclusion": self._conclusion(result),
-            "sources": result.get("sources", []), "uncertainty": result.get("uncertainty", ""),
-        }
-        transcript = _json({
-            "content_type": "child_public_conclusion_and_tool_evidence",
-            "task": row["task"], "status": row["status"],
-            "events": [projected for event in events if (projected := self._public_event(event)) is not None],
-            "result": public_result, "error": row["error"],
-        })
+        public_result = (
+            None
+            if not isinstance(result, dict)
+            else {
+                "conclusion": self._conclusion(result),
+                "sources": result.get("sources", []),
+                "uncertainty": result.get("uncertainty", ""),
+            }
+        )
+        transcript = _json(
+            {
+                "content_type": "child_public_conclusion_and_tool_evidence",
+                "task": row["task"],
+                "status": row["status"],
+                "events": [projected for event in events if (projected := self._public_event(event)) is not None],
+                "result": public_result,
+                "error": row["error"],
+            }
+        )
         end = min(offset + limit, len(transcript))
         return {
-            "handle": handle, "status": row["status"], "offset": offset,
-            "text": transcript[offset:end], "next_offset": end if end < len(transcript) else None,
+            "handle": handle,
+            "status": row["status"],
+            "offset": offset,
+            "text": transcript[offset:end],
+            "next_offset": end if end < len(transcript) else None,
             "total_chars": len(transcript),
         }
 
     async def read(
-        self, parent_session_id: str, handle: str, offset: int = 0, limit: int = MAX_READ_CHARS,
+        self,
+        parent_session_id: str,
+        handle: str,
+        offset: int = 0,
+        limit: int = MAX_READ_CHARS,
     ) -> Dict[str, Any]:
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= MAX_READ_CHARS:
             raise ValueError("Invalid child transcript pagination")

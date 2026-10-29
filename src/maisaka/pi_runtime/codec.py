@@ -3,6 +3,7 @@
 The allowlist is deliberately closed: persisted data cannot import or instantiate
 arbitrary Python classes. No provider credentials are part of ContextItems.
 """
+
 from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import Enum
@@ -12,26 +13,47 @@ import base64
 
 from src.llm_models.payload_content import context_item as ci
 
-_TYPES = {cls.__name__: cls for cls in (
-    ci.ContextItemMeta, ci.ContextTextPart, ci.ContextImagePart, ci.ContextRefusalPart,
-    ci.ProviderScope, ci.ProviderReplayFragment, ci.ContextToolCall,
-    ci.SystemMessageItem, ci.UserMessageItem, ci.ReasoningItem,
-    ci.AssistantMessageItem, ci.FunctionCallItem, ci.FunctionCallOutputItem,
-    ci.ProviderActivityItem, ci.ProviderOpaqueItem,
-)}
+_TYPES = {
+    cls.__name__: cls
+    for cls in (
+        ci.ContextItemMeta,
+        ci.ContextTextPart,
+        ci.ContextImagePart,
+        ci.ContextRefusalPart,
+        ci.ProviderScope,
+        ci.ProviderReplayFragment,
+        ci.ContextToolCall,
+        ci.SystemMessageItem,
+        ci.UserMessageItem,
+        ci.ReasoningItem,
+        ci.AssistantMessageItem,
+        ci.FunctionCallItem,
+        ci.FunctionCallOutputItem,
+        ci.ProviderActivityItem,
+        ci.ProviderOpaqueItem,
+    )
+}
 _ENUMS = {cls.__name__: cls for cls in (ci.RoleType, ci.ReasoningRepresentation)}
-_ITEMS = (ci.SystemMessageItem, ci.UserMessageItem, ci.ReasoningItem,
-          ci.AssistantMessageItem, ci.FunctionCallItem, ci.FunctionCallOutputItem,
-          ci.ProviderActivityItem, ci.ProviderOpaqueItem)
+_ITEMS = (
+    ci.SystemMessageItem,
+    ci.UserMessageItem,
+    ci.ReasoningItem,
+    ci.AssistantMessageItem,
+    ci.FunctionCallItem,
+    ci.FunctionCallOutputItem,
+    ci.ProviderActivityItem,
+    ci.ProviderOpaqueItem,
+)
 
 
 def _encode(value: Any) -> Any:
     if isinstance(value, Enum):
         return {"$enum": type(value).__name__, "value": value.value}
     if is_dataclass(value) and type(value).__name__ in _TYPES:
-        return {"$type": type(value).__name__, "fields": {
-            field.name: _encode(getattr(value, field.name)) for field in fields(value)
-        }}
+        return {
+            "$type": type(value).__name__,
+            "fields": {field.name: _encode(getattr(value, field.name)) for field in fields(value)},
+        }
     if isinstance(value, bytes):
         return {"$bytes": base64.b64encode(value).decode("ascii")}
     if isinstance(value, datetime):

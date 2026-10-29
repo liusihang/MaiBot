@@ -24,7 +24,9 @@ def test_isolation_permissions_and_original_evidence(tmp_path):
 
     async def run():
         service = PiSubagentService(str(tmp_path / "children.sqlite"), runner)
-        result = await service.delegate("real-group-1", "research", [tool("web_search"), tool("reply"), tool("unknown")])
+        result = await service.delegate(
+            "real-group-1", "research", [tool("web_search"), tool("reply"), tool("unknown")]
+        )
         assert [item["function"]["name"] for item in seen[0][3]] == ["web_search"]
         assert seen[0][0] != seen[0][1] == "real-group-1"
         assert result["sources"] == ["https://example.org/evidence"]
@@ -44,13 +46,27 @@ def test_isolation_permissions_and_original_evidence(tmp_path):
 
 def test_no_eviction_restart_pagination_and_bounded_parent_output(tmp_path):
     async def runner(child, parent, task, tools, event):
-        await event({"type": "message_end", "message": {
-            "role": "toolResult", "content": [{"type": "text", "text": "original-evidence-" + "x" * 15000}],
-            "native": {"replay": "opaque-private"},
-        }})
-        await event({"type": "message_end", "message": {"role": "assistant", "content": [
-            {"type": "thinking", "thinking": "PRIVATE_THINKING"},
-        ]}})
+        await event(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "toolResult",
+                    "content": [{"type": "text", "text": "original-evidence-" + "x" * 15000}],
+                    "native": {"replay": "opaque-private"},
+                },
+            }
+        )
+        await event(
+            {
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "PRIVATE_THINKING"},
+                    ],
+                },
+            }
+        )
         return {"messages": [{"role": "assistant", "content": [{"type": "text", "text": "a" * 9000}]}]}
 
     async def run():
@@ -79,7 +95,9 @@ def test_no_eviction_restart_pagination_and_bounded_parent_output(tmp_path):
         assert "PRIVATE_THINKING" not in "".join(pages)
         # Full provider packets remain internal for replay, not parent evidence.
         with restarted._connect() as connection:
-            stored = connection.execute("SELECT payload FROM pi_child_events WHERE handle=?", (first["handle"],)).fetchall()
+            stored = connection.execute(
+                "SELECT payload FROM pi_child_events WHERE handle=?", (first["handle"],)
+            ).fetchall()
             assert "opaque-private" in stored[0][0]
         with pytest.raises(ValueError):
             await restarted.read("parent", first["handle"], -1)

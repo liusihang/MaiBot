@@ -203,12 +203,15 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
     async def test_pi_ignore_persists_before_judgment_without_legacy_selection(self):
         engine, r, m = self.engine_fixture()
         order = []
+
         async def ingest():
             order.append("persist")
+
         async def no(_):
             order.append("judge")
             r._running = False
             return False
+
         runner = NS(ingest=AsyncMock(side_effect=ingest), run=AsyncMock(), close=AsyncMock())
         engine._pi_runner = runner
         engine._participation_judge.should_enter = AsyncMock(side_effect=no)
@@ -222,8 +225,10 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pi_engage_uses_same_runner_and_does_not_start_legacy_loop(self):
         engine, r, m = self.engine_fixture()
+
         async def run(_):
             r._running = False
+
         runner = NS(ingest=AsyncMock(), run=AsyncMock(side_effect=run), close=AsyncMock())
         engine._pi_runner = runner
         engine._participation_judge.should_enter = AsyncMock(return_value=True)

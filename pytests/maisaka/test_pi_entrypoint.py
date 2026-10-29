@@ -15,16 +15,24 @@ async def test_intake_is_durable_before_scheduling_or_cooldown(monkeypatch):
     order = []
     message = SimpleNamespace(message_id="incoming", received_at=datetime.now(timezone.utc))
     runtime = SimpleNamespace(
-        _focus_group=None, _running=True, _ensure_background_tasks_running=Mock(),
-        _quote_counter=SimpleNamespace(record=Mock()), _last_message_received_at=0,
-        _update_message_trigger_state=Mock(), _observe_message_debounce=Mock(),
-        message_cache=[], _emit_monitor_message_ingested=Mock(), _prune_processed_message_cache=Mock(),
+        _focus_group=None,
+        _running=True,
+        _ensure_background_tasks_running=Mock(),
+        _quote_counter=SimpleNamespace(record=Mock()),
+        _last_message_received_at=0,
+        _update_message_trigger_state=Mock(),
+        _observe_message_debounce=Mock(),
+        message_cache=[],
+        _emit_monitor_message_ingested=Mock(),
+        _prune_processed_message_cache=Mock(),
         _request_planner_interrupt_for_message=Mock(),
     )
+
     async def persist(msg):
         assert runtime.message_cache == []
         assert msg is message
         order.append("durable_inbox")
+
     runtime._reasoning_engine = SimpleNamespace(record_pi_pending=AsyncMock(side_effect=persist))
     runtime._schedule_message_turn = Mock(side_effect=lambda: order.append("schedule"))
     await MaisakaHeartFlowChatting._register_message(runtime, message)
@@ -35,6 +43,7 @@ async def test_intake_is_durable_before_scheduling_or_cooldown(monkeypatch):
 @pytest.mark.asyncio
 async def test_restart_restores_inbox_by_exact_source_id_not_recent_window(monkeypatch):
     from src.common import message_repository
+
     source = SimpleNamespace(message_id="old-outside-recent-window")
     found = Mock(return_value=[source])
     monkeypatch.setattr(message_repository, "find_messages", found)

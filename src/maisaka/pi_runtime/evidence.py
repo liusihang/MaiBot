@@ -11,15 +11,23 @@ import sqlite3
 from src.maisaka.tool_result_store import ToolResultStore, tool_result_store
 
 
-READ_THREAD_ARCHIVE_TOOL_DEFINITION = {"type": "function", "function": {
-    "name": "read_thread_archive",
-    "description": "Read public original chat, reference and tool evidence from archived events in this chat. Provider replay and private reasoning are not exposed.",
-    "parameters": {"type": "object", "properties": {
-        "event_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 20},
-        "offset": {"type": "integer", "minimum": 0},
-        "limit": {"type": "integer", "minimum": 1, "maximum": 2800},
-    }, "required": ["event_ids"], "additionalProperties": False},
-}}
+READ_THREAD_ARCHIVE_TOOL_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "read_thread_archive",
+        "description": "Read public original chat, reference and tool evidence from archived events in this chat. Provider replay and private reasoning are not exposed.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "event_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 20},
+                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 2800},
+            },
+            "required": ["event_ids"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 def _page(text: str, offset: int, limit: int, keyword: str = "") -> Dict[str, Any]:
@@ -34,8 +42,13 @@ def _page(text: str, offset: int, limit: int, keyword: str = "") -> Dict[str, An
             return {"text": "", "offset": start, "next_offset": None, "total_chars": len(text), "matched": False}
         start = max(start, position - min(250, limit // 4))
     end = min(start + limit, len(text))
-    return {"text": text[start:end], "offset": start, "next_offset": end if end < len(text) else None,
-            "total_chars": len(text), "matched": True}
+    return {
+        "text": text[start:end],
+        "offset": start,
+        "next_offset": end if end < len(text) else None,
+        "total_chars": len(text),
+        "matched": True,
+    }
 
 
 def public_archive_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
@@ -45,12 +58,19 @@ def public_archive_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
         return {"type": "internal_system_record", "text": "[System and tool configuration omitted]"}
     if role in {"user", "assistant", "toolResult"}:
         content = payload.get("content", [])
-        text = content if isinstance(content, str) else "\n".join(
-            item["text"] for item in content if item.get("type") == "text"
+        text = (
+            content
+            if isinstance(content, str)
+            else "\n".join(item["text"] for item in content if item.get("type") == "text")
         )
-        return {"type": str(role), "text": text, "tool_name": payload.get("toolName", ""),
-                "call_id": payload.get("toolCallId", ""), "source_message_id": payload.get("sourceMessageId", ""),
-                "source_archive": payload.get("sourceArchive", {}) if payload.get("kind") == "summary" else {}}
+        return {
+            "type": str(role),
+            "text": text,
+            "tool_name": payload.get("toolName", ""),
+            "call_id": payload.get("toolCallId", ""),
+            "source_message_id": payload.get("sourceMessageId", ""),
+            "source_archive": payload.get("sourceArchive", {}) if payload.get("kind") == "summary" else {},
+        }
     if payload.get("type") == "reference":
         return {"type": "reference", "source": payload.get("source", {}), "content": payload.get("content", "")}
     return {"type": "internal_record", "text": "[No public text in this event]"}
@@ -80,17 +100,31 @@ class DurableEvidenceStore:
 
     def _save(self, parent: str, handle: str, child: str, tool: str, raw: str, metadata: Dict[str, Any]) -> None:
         with self._connection() as connection:
-            old = connection.execute("SELECT * FROM pi_durable_evidence WHERE parent=? AND handle=?", (parent, handle)).fetchone()
+            old = connection.execute(
+                "SELECT * FROM pi_durable_evidence WHERE parent=? AND handle=?", (parent, handle)
+            ).fetchone()
             if old is not None:
                 if old["raw"] != raw or old["child"] != child or old["tool_name"] != tool:
                     raise ValueError("Evidence handle cannot be rebound to different content or ownership")
                 return
-            connection.execute("INSERT INTO pi_durable_evidence VALUES(?,?,?,?,?,?)", (
-                parent, handle, child, tool, raw, json.dumps(metadata, ensure_ascii=False, sort_keys=True),
-            ))
+            connection.execute(
+                "INSERT INTO pi_durable_evidence VALUES(?,?,?,?,?,?)",
+                (
+                    parent,
+                    handle,
+                    child,
+                    tool,
+                    raw,
+                    json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                ),
+            )
 
     async def capture(
-        self, parent_session_id: str, result: Any, *, child_namespace: str = "",
+        self,
+        parent_session_id: str,
+        result: Any,
+        *,
+        child_namespace: str = "",
         source_session_id: Optional[str] = None,
     ) -> Optional[str]:
         if not parent_session_id.strip():
@@ -107,36 +141,57 @@ class DurableEvidenceStore:
         stored = self.source_store.get(source_session, handle)
         if stored is None:
             raise RuntimeError("Tool preview references raw evidence that is already unavailable")
-        metadata = {"created_at": stored.created_at.isoformat(), "source_session": source_session,
-                    "content_type": "original_tool_result", "tool_name": stored.tool_name}
-        await asyncio.to_thread(self._save, parent_session_id, handle, child_namespace, stored.tool_name, stored.content, metadata)
+        metadata = {
+            "created_at": stored.created_at.isoformat(),
+            "source_session": source_session,
+            "content_type": "original_tool_result",
+            "tool_name": stored.tool_name,
+        }
+        await asyncio.to_thread(
+            self._save, parent_session_id, handle, child_namespace, stored.tool_name, stored.content, metadata
+        )
         return handle
 
     def _read(self, parent: str, handle: str, child: Optional[str]) -> Dict[str, Any]:
         with self._connection() as connection:
-            row = connection.execute("SELECT * FROM pi_durable_evidence WHERE parent=? AND handle=?", (parent, handle)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM pi_durable_evidence WHERE parent=? AND handle=?", (parent, handle)
+            ).fetchone()
             if row is None or (child is not None and row["child"] != child):
                 raise PermissionError("Evidence handle is not available in this session")
             return dict(row)
 
     async def read(
-        self, parent_session_id: str, handle: str, offset: int = 0, limit: int = 2800,
-        keyword: str = "", *, child_namespace: Optional[str] = None,
+        self,
+        parent_session_id: str,
+        handle: str,
+        offset: int = 0,
+        limit: int = 2800,
+        keyword: str = "",
+        *,
+        child_namespace: Optional[str] = None,
     ) -> Dict[str, Any]:
         row = await asyncio.to_thread(self._read, parent_session_id, handle, child_namespace)
         page = await asyncio.to_thread(_page, row["raw"], offset, limit, keyword)
         return {"result_id": handle, "tool_name": row["tool_name"], "metadata": json.loads(row["metadata"]), **page}
 
     async def read_archive(
-        self, ledger: Any, parent_session_id: str, event_ids: Sequence[str], offset: int = 0, limit: int = 2800,
+        self,
+        ledger: Any,
+        parent_session_id: str,
+        event_ids: Sequence[str],
+        offset: int = 0,
+        limit: int = 2800,
     ) -> Dict[str, Any]:
         if not event_ids or len(event_ids) > 20 or any(not isinstance(item, str) or not item for item in event_ids):
             raise ValueError("Provide between 1 and 20 archived event IDs")
         events = await asyncio.to_thread(ledger.archive_events, parent_session_id, event_ids)
+
         def render() -> Dict[str, Any]:
             text = json.dumps(
                 [{"event_id": event.event_id, **public_archive_payload(event.payload)} for event in events],
-                ensure_ascii=False, sort_keys=True,
+                ensure_ascii=False,
+                sort_keys=True,
             )
             return {"content_type": "archived_public_text_and_tool_evidence", **_page(text, offset, limit)}
 

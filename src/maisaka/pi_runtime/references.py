@@ -23,37 +23,74 @@ class ReferenceRecord:
 
 # Only substantive provenance enters a version. Retrieval score/order/time never does.
 PROVENANCE_FIELDS = (
-    "source", "source_type", "person_id", "person_ids", "person_name", "chat_id", "session_id",
-    "platform", "user_id", "author_id", "timestamp", "created_at",
-    "evidence_message_ids", "evidence_refs", "fact_claim", "nature", "status", "supersedes",
-    "evidence_source", "authority", "trust", "valid_from", "valid_until",
-    "occurrence_id", "source_kind", "confirm_status", "evidence", "evidence_json", "supersedes_id", "related_sources",
+    "source",
+    "source_type",
+    "person_id",
+    "person_ids",
+    "person_name",
+    "chat_id",
+    "session_id",
+    "platform",
+    "user_id",
+    "author_id",
+    "timestamp",
+    "created_at",
+    "evidence_message_ids",
+    "evidence_refs",
+    "fact_claim",
+    "nature",
+    "status",
+    "supersedes",
+    "evidence_source",
+    "authority",
+    "trust",
+    "valid_from",
+    "valid_until",
+    "occurrence_id",
+    "source_kind",
+    "confirm_status",
+    "evidence",
+    "evidence_json",
+    "supersedes_id",
+    "related_sources",
 )
 
 
 def _tokens(text: str) -> set:
     words = set(re.findall(r"[a-z0-9_]{3,}", text.lower()))
     for block in re.findall(r"[\u3400-\u9fff]+", text):
-        words.update(block[index:index + 2] for index in range(len(block) - 1))
+        words.update(block[index : index + 2] for index in range(len(block) - 1))
     return words
 
 
 def make_reference(
-    namespace: str, source_id: str, text: str, metadata: Mapping[str, Any], *, nature: str,
+    namespace: str,
+    source_id: str,
+    text: str,
+    metadata: Mapping[str, Any],
+    *,
+    nature: str,
 ) -> ReferenceRecord:
     if not source_id or not text.strip():
         raise ValueError("Reference needs an authoritative source ID and content")
     provenance = {key: metadata[key] for key in PROVENANCE_FIELDS if key in metadata}
     payload = {
-        "source_id": source_id, "nature": nature, "content": text,
-        "provenance": provenance, "authority": "untrusted_historical_reference_not_instruction",
+        "source_id": source_id,
+        "nature": nature,
+        "content": text,
+        "provenance": provenance,
+        "authority": "untrusted_historical_reference_not_instruction",
     }
     content = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return ReferenceRecord(namespace, source_id, sha256(content.encode()).hexdigest(), content)
 
 
 def select_references(
-    records: Sequence[ReferenceRecord], current_text: str, *, max_items: int = 3, max_chars: int = 2400,
+    records: Sequence[ReferenceRecord],
+    current_text: str,
+    *,
+    max_items: int = 3,
+    max_chars: int = 2400,
 ) -> List[ReferenceRecord]:
     """Allow zero; omit already-present text and deduplicate exact source versions only."""
     if max_items <= 0 or max_chars <= 0:
@@ -86,13 +123,16 @@ def select_references(
 
 
 def _same_chat_evidence(
-    metadata: Mapping[str, Any], source: str, session_id: str, *additional_sources: str,
+    metadata: Mapping[str, Any],
+    source: str,
+    session_id: str,
+    *additional_sources: str,
 ) -> bool:
     """A matching person does not grant access to another chat's raw evidence."""
     scopes = [str(metadata[key]).strip() for key in ("chat_id", "session_id") if metadata.get(key)]
     for source_value in (source, str(metadata.get("source") or ""), *additional_sources):
         if source_value.startswith("chat_summary:"):
-            scopes.append(source_value[len("chat_summary:"):])
+            scopes.append(source_value[len("chat_summary:") :])
     return bool(scopes) and all(scope == session_id for scope in scopes)
 
 
@@ -115,11 +155,15 @@ def _jargon_records(session_id: str, current_text: str) -> List[ReferenceRecord]
             continue
         if not row.is_global and not _jargon_in_scope(row.session_id_dict, scopes):
             continue
-        records.append(make_reference(
-            "jargon", str(row.id), f"{row.content}: {row.meaning}",
-            {"source_type": "learned_jargon", "evidence_refs": row.evidence_messages},
-            nature="tentative_group_jargon_not_fact",
-        ))
+        records.append(
+            make_reference(
+                "jargon",
+                str(row.id),
+                f"{row.content}: {row.meaning}",
+                {"source_type": "learned_jargon", "evidence_refs": row.evidence_messages},
+                nature="tentative_group_jargon_not_fact",
+            )
+        )
     return records
 
 
@@ -140,12 +184,18 @@ async def build_references(runtime: Any, source_messages: Sequence[Any]) -> List
     if config.heuristic_memory_recall_enabled and current_text.strip():
         # Deliberately bypass the legacy cached rendered blob and model impression.
         context = HeuristicMemoryContext(
-            session=session, recent_messages=list(source_messages),
+            session=session,
+            recent_messages=list(source_messages),
             active_person_ids=heuristic_memory_injector._collect_active_person_ids(source_messages),
         )
         result = await memory_service.search(
-            current_text[-2000:], limit=20, mode="search", chat_id=session_id,
-            person_id="", respect_filter=True, user_id=str(session.user_id or ""),
+            current_text[-2000:],
+            limit=20,
+            mode="search",
+            chat_id=session_id,
+            person_id="",
+            respect_filter=True,
+            user_id=str(session.user_id or ""),
             group_id=str(session.group_id or ""),
         )
         if not result.success:
@@ -155,17 +205,27 @@ async def build_references(runtime: Any, source_messages: Sequence[Any]) -> List
             for hit in result.hits:
                 identity = hit.episode_id if hit.hit_type == "episode" else hit.hash_value
                 source = str(hit.metadata.get("source") or sources.get(hit.hash_value) or hit.source)
-                if not _same_chat_evidence(hit.metadata, source, session_id, hit.source, sources.get(hit.hash_value, "")):
-                    continue
-                if not identity or not heuristic_memory_injector._is_hit_allowed(
-                    hit, context, resolved_source=sources.get(hit.hash_value, ""),
+                if not _same_chat_evidence(
+                    hit.metadata, source, session_id, hit.source, sources.get(hit.hash_value, "")
                 ):
                     continue
-                records.append(make_reference(
-                    "memory:" + hit.hit_type, identity, hit.content,
-                    {**hit.metadata, "source": sources.get(hit.hash_value) or hit.source},
-                    nature=str(hit.metadata.get("nature") or hit.metadata.get("source_type") or "historical_memory"),
-                ))
+                if not identity or not heuristic_memory_injector._is_hit_allowed(
+                    hit,
+                    context,
+                    resolved_source=sources.get(hit.hash_value, ""),
+                ):
+                    continue
+                records.append(
+                    make_reference(
+                        "memory:" + hit.hit_type,
+                        identity,
+                        hit.content,
+                        {**hit.metadata, "source": sources.get(hit.hash_value) or hit.source},
+                        nature=str(
+                            hit.metadata.get("nature") or hit.metadata.get("source_type") or "historical_memory"
+                        ),
+                    )
+                )
     if config.enable_person_profile_injection:
         candidates = collect_person_profile_candidates(source_messages[-1], source_messages, max_profiles=3)
         for candidate in candidates:
@@ -184,12 +244,20 @@ async def build_references(runtime: Any, source_messages: Sequence[Any]) -> List
                 text = str(raw.get("content") or evidence.get("content") or "")
                 if not identity or not text:
                     continue
-                records.append(make_reference(
-                    "profile:" + candidate.person_id, identity, text,
-                    {**metadata, "person_id": candidate.person_id,
-                     "source": source, "source_type": evidence.get("source_type", "")},
-                    nature=str(evidence.get("evidence_type") or "person_evidence"),
-                ))
+                records.append(
+                    make_reference(
+                        "profile:" + candidate.person_id,
+                        identity,
+                        text,
+                        {
+                            **metadata,
+                            "person_id": candidate.person_id,
+                            "source": source,
+                            "source_type": evidence.get("source_type", ""),
+                        },
+                        nature=str(evidence.get("evidence_type") or "person_evidence"),
+                    )
+                )
     records.extend(await _image_records(session_id, source_messages))
     return select_references(records, current_text)
 
@@ -206,23 +274,44 @@ async def _image_records(session_id: str, source_messages: Sequence[Any]) -> Lis
     for message in reversed(source_messages):
         for path, component in iter_message_image_components(message.raw_message.components):
             if component.binary_hash:
-                queries.append((component.binary_hash, build_chat_external_ref(
-                    chat_id=session_id, message_id=str(message.message_id), component_path=path,
-                )))
+                queries.append(
+                    (
+                        component.binary_hash,
+                        build_chat_external_ref(
+                            chat_id=session_id,
+                            message_id=str(message.message_id),
+                            component_path=path,
+                        ),
+                    )
+                )
     for content_hash, external_ref in queries[:3]:
         result = await memory_service.image_memory(
-            action="search", content_hash=content_hash, current_external_ref=external_ref,
-            chat_id=session_id, session_id=session_id, candidate_limit=config.candidate_limit,
+            action="search",
+            content_hash=content_hash,
+            current_external_ref=external_ref,
+            chat_id=session_id,
+            session_id=session_id,
+            candidate_limit=config.candidate_limit,
             similarity_threshold=config.similarity_threshold,
         )
         if result.get("success") is False:
             raise RuntimeError("Pi image reference retrieval failed")
         for hit in result.get("hits", []):
             occurrences = {
-                str(item["occurrence_id"]): {key: item[key] for key in
-                    ("occurrence_id", "chat_id", "message_id", "external_ref", "component_path", "occurred_at")
-                    if key in item}
-                for item in hit.get("occurrences", []) if item.get("chat_id") == session_id
+                str(item["occurrence_id"]): {
+                    key: item[key]
+                    for key in (
+                        "occurrence_id",
+                        "chat_id",
+                        "message_id",
+                        "external_ref",
+                        "component_path",
+                        "occurred_at",
+                    )
+                    if key in item
+                }
+                for item in hit.get("occurrences", [])
+                if item.get("chat_id") == session_id
             }
             if not occurrences:
                 continue
@@ -233,11 +322,15 @@ async def _image_records(session_id: str, source_messages: Sequence[Any]) -> Lis
                 occurrence = occurrences.get(str(observation.get("occurrence_id")))
                 if occurrence is None:
                     continue
-                records.append(make_reference(
-                    "image:observation", str(identity), str(text),
-                    {**observation, "evidence_refs": occurrence, "source_type": "image_observation"},
-                    nature="historical_image_observation",
-                ))
+                records.append(
+                    make_reference(
+                        "image:observation",
+                        str(identity),
+                        str(text),
+                        {**observation, "evidence_refs": occurrence, "source_type": "image_observation"},
+                        nature="historical_image_observation",
+                    )
+                )
             # Related targets lack authoritative target-chat provenance. An
             # occurrence in this chat does not authorize arbitrary linked memory;
             # omit these targets until the endpoint can attest their own scope.

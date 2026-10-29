@@ -10,7 +10,11 @@ import pytest
 from src.common.data_models.message_component_data_model import MessageSequence
 from src.core.tooling import ToolExecutionResult, ToolSpec
 from src.llm_models.payload_content.context_item import (
-    AssistantMessageItem, ContextItemMeta, ContextTextPart, ContextToolCall, FunctionCallItem,
+    AssistantMessageItem,
+    ContextItemMeta,
+    ContextTextPart,
+    ContextToolCall,
+    FunctionCallItem,
 )
 from src.maisaka.context.messages import ContentContextMessage
 from src.maisaka.pi_runtime.codec import encode_items
@@ -21,28 +25,54 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="Pi needs N
 
 
 def history(text, identifier):
-    return ContentContextMessage(raw_message=MessageSequence([]), visible_text=text, timestamp=datetime.now(), context_item_id=identifier)
+    return ContentContextMessage(
+        raw_message=MessageSequence([]), visible_text=text, timestamp=datetime.now(), context_item_id=identifier
+    )
 
 
 def engine():
     invoked = []
-    specs = [ToolSpec(name=name, description=name, parameters_schema={"type": "object", "properties": {}, "additionalProperties": True}, provider_name="maisaka_builtin")
-             for name in ("web_search", "web_fetch", "reply")]
+    specs = [
+        ToolSpec(
+            name=name,
+            description=name,
+            parameters_schema={"type": "object", "properties": {}, "additionalProperties": True},
+            provider_name="maisaka_builtin",
+        )
+        for name in ("web_search", "web_fetch", "reply")
+    ]
+
     async def invoke(invocation, context, **kwargs):
         invoked.append(invocation)
         return ToolExecutionResult(invocation.tool_name, True, content="source result:" + invocation.tool_name)
+
     runtime = SimpleNamespace(
-        session_id="real-chat", _chat_history=[], _chat_loop_service=SimpleNamespace(passive_replyer_override=None, _build_chat_system_prompt=lambda: "Stable persona"),
+        session_id="real-chat",
+        _chat_history=[],
+        _chat_loop_service=SimpleNamespace(
+            passive_replyer_override=None, _build_chat_system_prompt=lambda: "Stable persona"
+        ),
         _tool_registry=SimpleNamespace(list_tools=AsyncMock(return_value=specs), invoke=invoke),
-        set_current_action_tool_names=lambda names: None, _start_planner_continuation=lambda: None,
-        _end_planner_continuation=lambda: None, _agent_state="idle", _STATE_RUNNING="running",
-        _enter_stop_state=lambda: None, _update_stage_status=lambda *args: None,
-        _running=False, _schedule_message_turn=lambda: None, _has_pending_messages=lambda: False,
-        expand_message_id_aliases=lambda args: args, _trigger_trimmed_history_learning=AsyncMock(),
+        set_current_action_tool_names=lambda names: None,
+        _start_planner_continuation=lambda: None,
+        _end_planner_continuation=lambda: None,
+        _agent_state="idle",
+        _STATE_RUNNING="running",
+        _enter_stop_state=lambda: None,
+        _update_stage_status=lambda *args: None,
+        _running=False,
+        _schedule_message_turn=lambda: None,
+        _has_pending_messages=lambda: False,
+        expand_message_id_aliases=lambda args: args,
+        _trigger_trimmed_history_learning=AsyncMock(),
     )
-    obj = SimpleNamespace(_runtime=runtime, _build_tool_availability_context=lambda: None,
-                          _build_tool_execution_context=lambda _: None, _record_tool_execution_effects=AsyncMock(),
-                          _build_tool_result_media_messages=lambda call, result: [])
+    obj = SimpleNamespace(
+        _runtime=runtime,
+        _build_tool_availability_context=lambda: None,
+        _build_tool_execution_context=lambda _: None,
+        _record_tool_execution_effects=AsyncMock(),
+        _build_tool_result_media_messages=lambda call, result: [],
+    )
     return obj, invoked
 
 
@@ -59,13 +89,21 @@ class ScriptedProvider:
         meta = ContextItemMeta.create(logical_turn_id=f"native-turn-{self.count}")
         if call:
             name, args = call
-            item = FunctionCallItem(meta, ContextToolCall.create(call_id=f"call-{self.count}", func_name=name, args=args))
+            item = FunctionCallItem(
+                meta, ContextToolCall.create(call_id=f"call-{self.count}", func_name=name, args=args)
+            )
             content = [{"type": "toolCall", "id": item.tool_call.call_id, "name": name, "arguments": args}]
         else:
             item = AssistantMessageItem(meta, (ContextTextPart("done"),))
             content = [{"type": "text", "text": "done"}]
-        return {"message": {"role": "assistant", "content": content, "stopReason": "toolUse" if call else "stop",
-                            "native": {"items": encode_items([item])}}}
+        return {
+            "message": {
+                "role": "assistant",
+                "content": content,
+                "stopReason": "toolUse" if call else "stop",
+                "native": {"items": encode_items([item])},
+            }
+        }
 
 
 @pytest.mark.asyncio
@@ -74,7 +112,9 @@ async def test_real_pi_search_read_reply_and_next_batch_prefix(monkeypatch, tmp_
     host, invoked = engine()
     host._runtime._chat_history.append(history("first", "m1"))
     runner = PiGroupRunner(host, data_dir=tmp_path)
-    scripted = ScriptedProvider([("web_search", {}), ("web_fetch", {}), ("reply", {"text": "exact main agent text"}), None])
+    scripted = ScriptedProvider(
+        [("web_search", {}), ("web_fetch", {}), ("reply", {"text": "exact main agent text"}), None]
+    )
     runner.provider = scripted
     try:
         await runner.run([])
@@ -86,8 +126,8 @@ async def test_real_pi_search_read_reply_and_next_batch_prefix(monkeypatch, tmp_
         host._runtime._chat_history.append(history("second", "m2"))
         await runner.run([])
         after = await runner.bridge.request("state", sessionId=runner.session_id)
-        assert after["messages"][:len(before["messages"])] == before["messages"]
-        assert scripted.payloads[-1][:len(context_from_pi(before["messages"]))] == context_from_pi(before["messages"])
+        assert after["messages"][: len(before["messages"])] == before["messages"]
+        assert scripted.payloads[-1][: len(context_from_pi(before["messages"]))] == context_from_pi(before["messages"])
     finally:
         await runner.close()
 
@@ -117,6 +157,7 @@ async def test_ignored_input_is_durable_and_restart_does_not_duplicate(monkeypat
 async def test_references_are_delta_and_restore_exact_projection(monkeypatch, tmp_path: Path):
     from src.maisaka.pi_runtime.references import ReferenceRecord
     from src.maisaka.pi_runtime.provider import ledger_event_message
+
     reference = ReferenceRecord("memory", "source-1", "v1", "original evidence")
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[reference]))
     host, _ = engine()
@@ -129,7 +170,7 @@ async def test_references_are_delta_and_restore_exact_projection(monkeypatch, tm
         snapshot = await runner._db("snapshot", runner.session_id)
         assert len([event for event in snapshot.events if event.kind == "reference"]) == 1
         state = await runner.bridge.request("state", sessionId=runner.session_id)
-        assert state["messages"][:len(before["messages"])] == before["messages"]
+        assert state["messages"][: len(before["messages"])] == before["messages"]
         assert [ledger_event_message(event) for event in snapshot.events] == state["messages"]
     finally:
         await runner.close()
@@ -157,6 +198,7 @@ async def test_child_transcript_isolated_readable_and_no_parent_write(monkeypatc
         assert not any(message.get("toolName") == "web_search" for message in parent_messages)
         receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
         import json
+
         delegation = json.loads(receipt.result["content"][0]["text"])
         detail = await runner.subagents.read(runner.session_id, delegation["handle"])
         assert "web_search" in str(detail)
@@ -171,18 +213,41 @@ async def test_child_transcript_isolated_readable_and_no_parent_write(monkeypatc
 async def test_restart_never_reexecutes_lost_tool_ack(monkeypatch, tmp_path: Path, known):
     from src.llm_models.payload_content.context_item import FunctionCallOutputItem
     from src.maisaka.pi_runtime.bridge import PiBridgeError
+
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     host, invoked = engine()
     runner = PiGroupRunner(host, data_dir=tmp_path)
     await runner.ensure_initialized()
-    item = FunctionCallItem(ContextItemMeta.create(logical_turn_id="original-turn"), ContextToolCall.create(call_id="lost", func_name="reply", args={"text": "already sent"}))
-    assistant = {"role": "assistant", "content": [{"type": "toolCall", "id": "lost", "name": "reply", "arguments": {"text": "already sent"}}], "stopReason": "toolUse", "native": {"items": encode_items([item])}}
+    item = FunctionCallItem(
+        ContextItemMeta.create(logical_turn_id="original-turn"),
+        ContextToolCall.create(call_id="lost", func_name="reply", args={"text": "already sent"}),
+    )
+    assistant = {
+        "role": "assistant",
+        "content": [{"type": "toolCall", "id": "lost", "name": "reply", "arguments": {"text": "already sent"}}],
+        "stopReason": "toolUse",
+        "native": {"items": encode_items([item])},
+    }
     await runner._db("append_event", runner.session_id, "lost-assistant", assistant)
-    await runner._db("prepare_tool_execution", runner.session_id, "lost", {"name": "reply", "arguments": {"text": "already sent"}})
+    await runner._db(
+        "prepare_tool_execution", runner.session_id, "lost", {"name": "reply", "arguments": {"text": "already sent"}}
+    )
     await runner._db("claim_tool_execution", runner.session_id, "lost")
     if known:
-        output = FunctionCallOutputItem(ContextItemMeta.create(logical_turn_id="original-turn"), "lost", "sent receipt", "reply")
-        await runner._db("record_tool_outcome", runner.session_id, "lost", {"content": [{"type": "text", "text": "sent receipt"}], "details": {"native": {"items": encode_items([output])}}, "isError": False, "terminate": False})
+        output = FunctionCallOutputItem(
+            ContextItemMeta.create(logical_turn_id="original-turn"), "lost", "sent receipt", "reply"
+        )
+        await runner._db(
+            "record_tool_outcome",
+            runner.session_id,
+            "lost",
+            {
+                "content": [{"type": "text", "text": "sent receipt"}],
+                "details": {"native": {"items": encode_items([output])}},
+                "isError": False,
+                "terminate": False,
+            },
+        )
     await runner.close()
     recovered = PiGroupRunner(host, data_dir=tmp_path)
     recovered.provider = ScriptedProvider([])
@@ -204,20 +269,34 @@ async def test_unknown_side_effect_blocks_following_tool_and_provider(monkeypatc
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     host, _ = engine()
     attempts = []
+
     async def uncertain(invocation, context, **kwargs):
         attempts.append(invocation.call_id)
         raise OSError("connection lost after send")
+
     host._runtime._tool_registry.invoke = uncertain
     runner = PiGroupRunner(host, data_dir=tmp_path)
     model_calls = []
+
     async def model(params):
         model_calls.append(params)
         content, items = [], []
         for call_id in ("first-send", "second-send"):
-            item = FunctionCallItem(ContextItemMeta.create(logical_turn_id="batch"), ContextToolCall.create(call_id=call_id, func_name="reply", args={"text": "sent?"}))
+            item = FunctionCallItem(
+                ContextItemMeta.create(logical_turn_id="batch"),
+                ContextToolCall.create(call_id=call_id, func_name="reply", args={"text": "sent?"}),
+            )
             items.append(item)
             content.append({"type": "toolCall", "id": call_id, "name": "reply", "arguments": {"text": "sent?"}})
-        return {"message": {"role": "assistant", "content": content, "stopReason": "toolUse", "native": {"items": encode_items(items)}}}
+        return {
+            "message": {
+                "role": "assistant",
+                "content": content,
+                "stopReason": "toolUse",
+                "native": {"items": encode_items(items)},
+            }
+        }
+
     runner.provider = model
     try:
         with pytest.raises(RuntimeError, match="paused"):
@@ -236,13 +315,22 @@ async def test_tool_media_and_arrivals_append_after_matching_result(monkeypatch,
     host, _ = engine()
     pending = []
     host._runtime._has_pending_messages = lambda: bool(pending)
+
     async def ingest_pending():
         host._runtime._chat_history.extend(pending)
         pending.clear()
+
     host._ingest_pending_messages = ingest_pending
+
     async def invoke(invocation, context, **kwargs):
         pending.append(history("arrived during tool", "arrival"))
-        return ToolExecutionResult(invocation.tool_name, True, content="image receipt", post_history_messages=[history("image reference", "image")])
+        return ToolExecutionResult(
+            invocation.tool_name,
+            True,
+            content="image receipt",
+            post_history_messages=[history("image reference", "image")],
+        )
+
     host._runtime._tool_registry.invoke = invoke
     runner = PiGroupRunner(host, data_dir=tmp_path)
     scripted = ScriptedProvider([("web_fetch", {}), None])
@@ -266,15 +354,18 @@ async def test_tool_media_and_arrivals_append_after_matching_result(monkeypatch,
 @pytest.mark.parametrize("with_tool", [True, False])
 async def test_maintenance_compacts_then_resumes_only_unfinished_tool_loop(monkeypatch, tmp_path: Path, with_tool):
     from src.maisaka.pi_runtime.provider import ledger_event_message
+
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     host, _ = engine()
     host._runtime._chat_history.append(history("old conversation", "older"))
     runner = PiGroupRunner(host, data_dir=tmp_path)
     scripted = ScriptedProvider([("web_search", {}) if with_tool else None, None])
+
     async def pressured(params):
         response = await scripted(params)
         response["message"]["hostMaintenanceRequired"] = scripted.count == 1
         return response
+
     runner.provider = pressured
     runner.summarize = AsyncMock(return_value="Old conversation; preserve the open search task and source IDs.")
     try:
@@ -297,10 +388,14 @@ async def test_terminating_tool_does_not_consume_later_host_input(monkeypatch, t
     host, _ = engine()
     pending = []
     host._runtime._has_pending_messages = lambda: bool(pending)
-    host._ingest_pending_messages = AsyncMock(side_effect=AssertionError("terminated turn must not drain incoming queue"))
+    host._ingest_pending_messages = AsyncMock(
+        side_effect=AssertionError("terminated turn must not drain incoming queue")
+    )
+
     async def invoke(invocation, context, **kwargs):
         pending.append(history("arrived while ending", "later"))
         return ToolExecutionResult(invocation.tool_name, True, content="stopped", stop_after_execution=True)
+
     host._runtime._tool_registry.invoke = invoke
     runner = PiGroupRunner(host, data_dir=tmp_path)
     scripted = ScriptedProvider([("reply", {"text": "done"}), None])
@@ -344,7 +439,10 @@ async def test_inbox_survives_crash_before_luna_and_no_node_needed(monkeypatch, 
 async def test_actual_web_provider_specs_are_allowed_for_child():
     from src.web_search.provider import WebSearchToolProvider
     from src.maisaka.pi_runtime.runner import child_tool_allowed, pi_tool
-    config = SimpleNamespace(enabled=True, search="search", fetch="fetch", services={"search": SimpleNamespace(adapter="anysearch")})
+
+    config = SimpleNamespace(
+        enabled=True, search="search", fetch="fetch", services={"search": SimpleNamespace(adapter="anysearch")}
+    )
     provider = WebSearchToolProvider(None, lambda: config)
     specs = await provider.list_tools()
     assert {spec.name for spec in specs} == {"web_search", "web_fetch"}
@@ -357,6 +455,7 @@ async def test_actual_web_provider_specs_are_allowed_for_child():
 def test_actual_reply_schema_keeps_required_fields():
     from src.maisaka.builtin_tool.reply import get_tool_spec
     from src.maisaka.pi_runtime.runner import pi_tool
+
     spec = get_tool_spec()
     converted = pi_tool(spec.to_llm_definition())
     assert converted["parameters"]["required"] == ["msg_id", "text"]
@@ -368,8 +467,10 @@ async def test_transient_provider_error_can_recover_without_rewriting_history(mo
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     host, _ = engine()
     runner = PiGroupRunner(host, data_dir=tmp_path)
+
     async def broken(params):
         raise ConnectionError("offline")
+
     runner.provider = broken
     try:
         with pytest.raises(RuntimeError, match="paused"):
@@ -379,7 +480,7 @@ async def test_transient_provider_error_can_recover_without_rewriting_history(mo
         runner.provider = ScriptedProvider([])
         await runner.run([])
         after = await runner.bridge.request("state", sessionId=runner.session_id)
-        assert after["messages"][:len(before["messages"])] == before["messages"]
+        assert after["messages"][: len(before["messages"])] == before["messages"]
     finally:
         await runner.close()
 
@@ -389,9 +490,20 @@ async def test_repeated_known_overlimit_is_bounded_not_infinite_summary(monkeypa
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     host, _ = engine()
     runner = PiGroupRunner(host, data_dir=tmp_path)
+
     async def overlimit(params):
-        return {"message": {"role": "assistant", "content": [], "stopReason": "stop", "native": {"items": []},
-                            "hostControl": "capacity_admission", "hostMaintenanceRequired": True, "hostContinuationRequired": True}}
+        return {
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "stop",
+                "native": {"items": []},
+                "hostControl": "capacity_admission",
+                "hostMaintenanceRequired": True,
+                "hostContinuationRequired": True,
+            }
+        }
+
     runner.provider = overlimit
     runner.summarize = AsyncMock(return_value="Already compact summary")
     try:
@@ -406,18 +518,28 @@ async def test_repeated_known_overlimit_is_bounded_not_infinite_summary(monkeypa
 async def test_runner_promotes_raw_evidence_and_managed_read(monkeypatch, tmp_path: Path):
     from src.maisaka.pi_runtime.evidence import DurableEvidenceStore
     from src.maisaka.tool_result_store import ToolResultStore
+
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     host, _ = engine()
-    host._runtime._tool_registry.list_tools.return_value.append(ToolSpec(name="read_tool_result", description="read", parameters_schema={"type": "object", "additionalProperties": True}, provider_name="maisaka_builtin"))
+    host._runtime._tool_registry.list_tools.return_value.append(
+        ToolSpec(
+            name="read_tool_result",
+            description="read",
+            parameters_schema={"type": "object", "additionalProperties": True},
+            provider_name="maisaka_builtin",
+        )
+    )
     runner = PiGroupRunner(host, data_dir=tmp_path)
     await runner.ensure_initialized()
     store = ToolResultStore()
     runner.evidence = DurableEvidenceStore(tmp_path / "raw-evidence.sqlite3", store)
     read_args = {}
+
     async def invoke(invocation, context, **kwargs):
         handle = store.save(runner.session_id, "web_fetch", "original source detail, not just preview")
         read_args["result_id"] = handle
         return ToolExecutionResult("web_fetch", True, content="short preview", metadata={"result_id": handle})
+
     host._runtime._tool_registry.invoke = invoke
     runner.provider = ScriptedProvider([("web_fetch", {}), ("read_tool_result", read_args), None])
     try:
@@ -501,12 +623,20 @@ async def test_new_tool_declaration_appends_binding_without_changing_prefix(tmp_
     await first.ensure_initialized()
     before = await first.bridge.request("state", sessionId=first.session_id)
     await first.close()
-    host._runtime._tool_registry.list_tools.return_value.append(ToolSpec(name="new_tool", description="new", parameters_schema={"type": "object"}, provider_name="new-provider", provider_type="plugin"))
+    host._runtime._tool_registry.list_tools.return_value.append(
+        ToolSpec(
+            name="new_tool",
+            description="new",
+            parameters_schema={"type": "object"},
+            provider_name="new-provider",
+            provider_type="plugin",
+        )
+    )
     second = PiGroupRunner(host, data_dir=tmp_path)
     try:
         await second.ensure_initialized()
         after = await second.bridge.request("state", sessionId=second.session_id)
-        assert after["messages"][:len(before["messages"])] == before["messages"]
+        assert after["messages"][: len(before["messages"])] == before["messages"]
         assert after["messages"][-1]["toolBindings"]["new_tool"]["provider_name"] == "new-provider"
         assert after["messages"][-1]["toolBindings"]["new_tool"]["provider_type"] == "plugin"
     finally:
@@ -522,19 +652,34 @@ async def test_new_tool_declaration_appends_binding_without_changing_prefix(tmp_
 @pytest.mark.parametrize("failure", ["exception", "partial_send"])
 async def test_actual_registry_failure_after_mutation_fences_thread(monkeypatch, tmp_path: Path, failure):
     from src.core.tooling import ToolRegistry
+
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     host, _ = engine()
     calls = []
+
     class Provider:
         provider_name = "maisaka_builtin"
         provider_type = "builtin"
+
         async def list_tools(self, context):
-            return [ToolSpec(name="reply", description="reply", parameters_schema={"type": "object"}, provider_name=self.provider_name, provider_type=self.provider_type)]
+            return [
+                ToolSpec(
+                    name="reply",
+                    description="reply",
+                    parameters_schema={"type": "object"},
+                    provider_name=self.provider_name,
+                    provider_type=self.provider_type,
+                )
+            ]
+
         async def invoke(self, invocation, context):
             calls.append(invocation.call_id)
             if failure == "exception":
                 raise OSError("transport failed after send")
-            return ToolExecutionResult("reply", False, error_message="second segment failed", metadata={"sent_message_ids": ["sent-1"]})
+            return ToolExecutionResult(
+                "reply", False, error_message="second segment failed", metadata={"sent_message_ids": ["sent-1"]}
+            )
+
     registry = ToolRegistry()
     registry.register_provider(Provider())
     host._runtime._tool_registry = registry
@@ -557,22 +702,35 @@ async def test_actual_registry_failure_after_mutation_fences_thread(monkeypatch,
 @pytest.mark.asyncio
 async def test_actual_registry_revalidates_after_runner_check(monkeypatch, tmp_path: Path):
     from src.core.tooling import ToolRegistry
+
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     host, _ = engine()
     invoked = []
+
     class Provider:
         provider_name = "maisaka_builtin"
         provider_type = "builtin"
         count = 0
+
         async def list_tools(self, context):
             self.count += 1
             # Initialization and runner check see the original contract; the
             # actual dispatch route sees a changed schema after those awaits.
             schema = {"type": "object"} if self.count <= 2 else {"type": "object", "required": ["changed"]}
-            return [ToolSpec(name="reply", description="reply", parameters_schema=schema, provider_name=self.provider_name, provider_type=self.provider_type)]
+            return [
+                ToolSpec(
+                    name="reply",
+                    description="reply",
+                    parameters_schema=schema,
+                    provider_name=self.provider_name,
+                    provider_type=self.provider_type,
+                )
+            ]
+
         async def invoke(self, invocation, context):
             invoked.append(invocation)
             return ToolExecutionResult("reply", True, content="must not happen")
+
     registry = ToolRegistry()
     registry.register_provider(Provider())
     host._runtime._tool_registry = registry

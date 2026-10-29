@@ -126,9 +126,17 @@ def unregister_input_counter(name: str) -> None:
     _INPUT_COUNTERS.pop(name, None)
 
 
-_NONROUTING_HEADERS = frozenset({
-    "accept", "accept-encoding", "connection", "content-type", "content-length", "host", "user-agent",
-})
+_NONROUTING_HEADERS = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "connection",
+        "content-type",
+        "content-length",
+        "host",
+        "user-agent",
+    }
+)
 
 
 def calculate_transport_fingerprint(
@@ -149,17 +157,26 @@ def calculate_transport_fingerprint(
     """
     excluded_headers = _NONROUTING_HEADERS | {"authorization", auth_header.lower()}
     routing_headers = sorted(
-        (str(key).lower(), str(value)) for key, value in headers
+        (str(key).lower(), str(value))
+        for key, value in headers
         if str(key).lower() not in excluded_headers and not str(key).lower().startswith("x-stainless-")
     )
     routing_query = sorted(
         (str(key), str(value)) for key, value in query if not auth_query_name or key != auth_query_name
     )
     value = {
-        "route": {"provider": route.provider, "endpoint": route.endpoint, "model": route.model, "protocol": route.protocol},
-        "headers": routing_headers, "query": routing_query,
+        "route": {
+            "provider": route.provider,
+            "endpoint": route.endpoint,
+            "model": route.model,
+            "protocol": route.protocol,
+        },
+        "headers": routing_headers,
+        "query": routing_query,
     }
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _plain_text_payload(value: Any) -> bool:
@@ -565,8 +582,11 @@ async def admit_http_request(request: Any) -> None:
     original_query = tuple(request.url.params.multi_items())
     auth_query_name = scope.allowed_query[0][0] if scope.allowed_query else ""
     fingerprint = calculate_transport_fingerprint(
-        route, headers=original_headers, query=original_query,
-        auth_header=scope.auth_header, auth_query_name=auth_query_name,
+        route,
+        headers=original_headers,
+        query=original_query,
+        auth_header=scope.auth_header,
+        auth_query_name=auth_query_name,
     )
     prepared = PreparedRequest(route, body, fingerprint)
     if scope.trace_context is not None:
@@ -593,29 +613,35 @@ async def admit_http_request(request: Any) -> None:
     unknown_headers = any(key not in standard_headers and not key.startswith("x-stainless-") for key in request.headers)
     transport_unknown = scope.transport_unknown_reason
     if (
-        original_query != scope.allowed_query or unknown_headers
+        original_query != scope.allowed_query
+        or unknown_headers
         or any(request.headers.get(key, "") != value for key, value in scope.standard_route_headers)
     ):
         transport_unknown = "final transport routing metadata is not supported by the capability contract"
     expected_fingerprint = scope.config.transport_contract_fingerprint
     contract_verified = bool(
-        expected_fingerprint and expected_fingerprint == fingerprint
-        and scope.config.capability_source.strip() and scope.config.input_counter in _INPUT_COUNTERS
+        expected_fingerprint
+        and expected_fingerprint == fingerprint
+        and scope.config.capability_source.strip()
+        and scope.config.input_counter in _INPUT_COUNTERS
     )
     if expected_fingerprint and expected_fingerprint != fingerprint:
         transport_unknown = "final transport metadata differs from the declared route contract"
     # A configured credential is omitted from the digest, but a mismatched or
     # duplicated credential query cannot select an undeclared authenticated route.
-    auth_query_mismatch = bool(scope.allowed_query) and tuple(
-        pair for pair in original_query if pair[0] == auth_query_name
-    ) != scope.allowed_query
+    auth_query_mismatch = (
+        bool(scope.allowed_query)
+        and tuple(pair for pair in original_query if pair[0] == auth_query_name) != scope.allowed_query
+    )
     if (transport_unknown and not contract_verified) or auth_query_mismatch or scope.auth_header_override:
         decision = AdmissionDecision(
             "unknown",
             (
                 "request-level authentication override is outside the declared transport route contract"
-                if scope.auth_header_override else
-                "configured authentication query does not match" if auth_query_mismatch else transport_unknown
+                if scope.auth_header_override
+                else "configured authentication query does not match"
+                if auth_query_mismatch
+                else transport_unknown
             ),
             prepared.route,
             prepared.payload_hash,
@@ -625,9 +651,13 @@ async def admit_http_request(request: Any) -> None:
         decision = await assess_request(prepared, scope.config, expected_route=scope.expected_route)
         if transport_unknown and decision.status == "admitted" and decision.input_measurement.kind != "exact":
             decision = AdmissionDecision(
-                "unknown", "custom transport contract requires an authoritative exact input counter",
-                prepared.route, prepared.payload_hash, decision.input_measurement,
-                decision.output_tokens, decision.safety_margin_tokens,
+                "unknown",
+                "custom transport contract requires an authoritative exact input counter",
+                prepared.route,
+                prepared.payload_hash,
+                decision.input_measurement,
+                decision.output_tokens,
+                decision.safety_margin_tokens,
             )
     try:
         # A counter must not swallow cancellation then let a timed-out request
@@ -639,7 +669,8 @@ async def admit_http_request(request: Any) -> None:
         # Counters never receive request, only immutable PreparedRequest. Check
         # nonetheless to keep future async hooks from invalidating assessment.
         if (
-            bytes(request.content) != prepared.body or str(request.url).split("?", 1)[0] != endpoint
+            bytes(request.content) != prepared.body
+            or str(request.url).split("?", 1)[0] != endpoint
             or tuple(request.headers.multi_items()) != original_headers
             or tuple(request.url.params.multi_items()) != original_query
         ):

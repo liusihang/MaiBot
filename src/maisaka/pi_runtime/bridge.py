@@ -1,4 +1,5 @@
 """Asynchronous JSONL transport to the real Pi Agent sidecar."""
+
 from typing import Any, Awaitable, Callable, Dict, Sequence
 
 import asyncio
@@ -26,8 +27,10 @@ class PiBridge:
         # stderr is intentionally not relayed: provider/tool errors may contain
         # private chat material. RPC errors carry safe structured diagnostics.
         self._process = await asyncio.create_subprocess_exec(
-            *self.command, stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            *self.command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
             limit=64 * 1024 * 1024,
         )
         self._reader_task = asyncio.create_task(self._read())
@@ -62,7 +65,12 @@ class PiBridge:
             await self._send({"id": callback_id, "error": {"code": "cancelled", "message": "Host callback cancelled"}})
             raise
         except Exception as exc:
-            await self._send({"id": callback_id, "error": {"code": type(exc).__name__, "message": f"Host callback failed ({type(exc).__name__})"}})
+            await self._send(
+                {
+                    "id": callback_id,
+                    "error": {"code": type(exc).__name__, "message": f"Host callback failed ({type(exc).__name__})"},
+                }
+            )
         finally:
             self._callbacks.pop(callback_id, None)
 
