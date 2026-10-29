@@ -87,7 +87,7 @@ def wire_server(calls=(), *, prompt_tokens=10):
             call = next(scripted, None)
             if callable(call):
                 call = call(request, requests)
-            delta = {"content": call["text"] if isinstance(call, dict) else "done"}
+            delta = {"content": call["text"] if isinstance(call, dict) else ""}
             finish = "stop"
             if call and not isinstance(call, dict):
                 name, arguments = call
@@ -159,6 +159,24 @@ def wire_server(calls=(), *, prompt_tokens=10):
         server.shutdown()
         server.server_close()
         worker.join()
+
+
+@pytest.mark.asyncio
+async def test_chat_plain_draft_is_corrected_by_same_agent_before_host_delivery(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([{"text": "draft not sent"}, ("reply", {"text": "visible"})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        host._runtime._chat_history.append(history("question", "m1"))
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            assert [item.tool_name for item in invoked] == ["reply"]
+            assert invoked[0].arguments["text"] == "visible"
+            assert "Your preceding text was not sent" in json.dumps(requests[1]["messages"])
+            assert len(requests) == 3
+        finally:
+            await runner.close()
 
 
 @pytest.mark.asyncio
@@ -692,7 +710,7 @@ async def test_high_watermark_uses_real_sdk_summary_and_failed_batch_is_not_retr
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 2500)
     with wire_server(
-        [{"text": "old main answer"}, {"text": "real summary"}, {"text": "main answer"}], prompt_tokens=3000
+        [{"text": ""}, {"text": "real summary"}, {"text": ""}], prompt_tokens=3000
     ) as (
         config,
         requests,

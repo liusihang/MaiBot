@@ -28,6 +28,7 @@ class PiObserver:
         self.tools: Dict[str, Dict[str, Any]] = {}
         self.accounted_entry = None
         self.terminated = False
+        self.delivery_status = ""
 
     async def handle(self, event: Dict[str, Any]) -> None:
         """Observation failures cannot cancel a provider result or resend a tool."""
@@ -38,6 +39,7 @@ class PiObserver:
 
     async def _handle(self, event: Dict[str, Any]) -> None:
         kind = event["type"]
+        self.delivery_status = event.get("deliveryStatus", self.delivery_status)
         message = event.get("message", {})
         if kind == "message_start" and message.get("role") == "assistant":
             self.runtime._cycle_counter += 1
@@ -149,5 +151,11 @@ class PiObserver:
             end_reason=("provider_" + stop)
             if stop in {"error", "aborted", "length"}
             else ("tool_stop" if self.terminated else "tool_continue" if calls else "planner_no_tool"),
-            end_detail="Pi 主会话观察事件",
+            end_detail={
+                "recovering": "正文已生成但未发送，正在由原 Agent 完成发送选择",
+                "undelivered": "正文未发送：一次纠正后仍未调用发送工具",
+                "sent": "本轮已有发送工具成功回执",
+                "stopped": "本轮已明确选择不发言",
+                "waiting": "本轮已明确选择等待",
+            }.get(self.delivery_status, "Pi 主会话观察事件"),
         )

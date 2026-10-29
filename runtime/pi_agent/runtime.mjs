@@ -124,6 +124,7 @@ function publicMessage(message) {
 }
 function publicEvent(event, manager, owner) {
   const result = { type: event.type };
+  if (owner?.params.requireDelivery) result.deliveryStatus = owner.deliveryStatus;
   if (event.type === 'message_start' || event.type === 'message_end' || event.type === 'turn_end') {
     result.message = publicMessage(event.message);
     result.messageEntryId = event.messageEntryId ?? manager.getEntries().findLast((entry) => entry.type === 'message' && entry.message === event.message)?.id;
@@ -161,6 +162,8 @@ class BusinessSession {
     this.lastError = null;
     this.sources = new Map();
     this.pending = [];
+    this.deliveryStatus = 'not_requested';
+    this.deliveryRetries = 0;
   }
 
   poison(error) {
@@ -226,6 +229,7 @@ class BusinessSession {
         extensionFactory: (pi) => {
           pi.on('turn_end', async (event) => {
             this.healthy();
+            const delivery = this.checkDelivery(event);
             if (event.outcome === 'completed' && !['error', 'aborted', 'length'].includes(event.message.stopReason)) {
               this.completedTurnHead = event.toolResultEntryIds.at(-1) ?? event.messageEntryId;
             }
@@ -233,10 +237,10 @@ class BusinessSession {
             await this.notify({ type: 'turn_end', message: event.message, toolResults: event.toolResults,
               messageEntryId: event.messageEntryId, toolResultEntryIds: event.toolResultEntryIds });
             if (this.terminated || this.unresolvedCalls().length || event.outcome !== 'completed') return;
-            return { continue: this.drainPending() > 0 };
+            return { ...delivery, continue: this.drainPending() > 0 || delivery.continue === true };
           });
           pi.on('agent_before_settle', (event) => {
-            if (this.terminated || this.unresolvedCalls().length || event.outcome !== 'completed') return;
+            if (this.terminated || this.lastError || this.unresolvedCalls().length || event.outcome !== 'completed') return;
             return { continue: this.drainPending() > 0 };
           });
           pi.on('session_before_compact', (event) => this.prepareCompaction(event));
@@ -318,7 +322,7 @@ class BusinessSession {
     const finish = session.agent.finishTurn;
     session.agent.finishTurn = async (...args) => {
       const result = await finish(...args);
-      return this.terminated || this.unresolvedCalls().length || ['length', 'error', 'aborted'].includes(args[0].message.stopReason)
+      return this.terminated || this.lastError || this.unresolvedCalls().length || ['length', 'error', 'aborted'].includes(args[0].message.stopReason)
         ? { action: 'end' } : result;
     };
   }
@@ -403,7 +407,10 @@ class BusinessSession {
     let count = 0;
     while (this.pending.length) {
       const item = this.pending[0];
-      if (item.kind === 'input') this.manager.appendMessage({ ...clone(item.value), hostInboxId: item.id });
+      if (item.kind === 'input') {
+        this.manager.appendMessage({ ...clone(item.value), hostInboxId: item.id });
+        if (this.running) this.deliveryStatus = 'not_requested';
+      }
       else this.appendReference(item.value, item.id);
       this.pending.shift();
       count++;
@@ -438,6 +445,10 @@ class BusinessSession {
       const result = await this.callback('tool', { sessionId: this.id, toolCallId, name, arguments: clone(args), messageId: anchor.id }, signal);
       this.healthy();
       check(result && Array.isArray(result.content), 'INVALID_TOOL_RESULT', 'Business tool returned no content array');
+      if (this.params.requireDelivery && !result.isError) {
+        if (['reply', 'send_emoji', 'send_web_image', 'gemini_generate_image', 'gemini_selfie', 'gemini_selfie_video'].includes(name)) this.deliveryStatus = 'sent';
+        else if (['stop', 'wait'].includes(name) && this.deliveryStatus !== 'sent') this.deliveryStatus = name === 'stop' ? 'stopped' : 'waiting';
+      }
       if (result.terminate === true) this.terminated = true;
       return clone(result);
     } catch (error) {
@@ -446,6 +457,27 @@ class BusinessSession {
       this.manager.appendCustomEntry('maibot.tool_unknown', { callId: toolCallId, name, messageId: anchor.id });
       throw error;
     }
+  }
+
+  /** A chat answer needs a business receipt, not merely a normal provider stop.
+   * Only the owning chat opts in: research and auxiliary sessions keep plain finals.
+   * The SDK appends this reminder after the durable turn; no transcript is rewritten
+   * and no host-generated reply can duplicate an unknown or successful send.
+   */
+  checkDelivery(event) {
+    if (!this.params.requireDelivery || this.terminated || this.unresolvedCalls().length || event.outcome !== 'completed'
+        || event.message.stopReason !== 'stop' || !textContent(event.message.content).trim()
+        || event.message.content.some((p) => p.type === 'toolCall')
+        || ['sent', 'stopped', 'waiting'].includes(this.deliveryStatus)) return {};
+    if (this.deliveryRetries++) {
+      this.deliveryStatus = 'undelivered';
+      this.lastError = 'Chat text was generated but not sent after one delivery correction';
+      return {};
+    }
+    this.deliveryStatus = 'recovering';
+    return { continue: true, entries: [{ type: 'custom_message', customType: 'maibot.delivery_required', display: false,
+      content: 'Your preceding text was not sent to the chat. If you want to say it, call reply with a real target msg_id and the final text. If you choose silence call stop, or call wait when waiting. Do not repeat any successful or uncertain send.',
+      details: { assistantEntryId: event.messageEntryId } }] };
   }
 
   snapshot() {
@@ -470,6 +502,7 @@ class BusinessSession {
     return clone({ sessionId: this.id, revision: entries.length,
       conclusion: lastAssistant ? textContent(lastAssistant.content) : '',
       stopReason: lastAssistant?.stopReason ?? null, usage: lastAssistant?.usage ?? null,
+      ...(this.params.requireDelivery ? { deliveryStatus: this.deliveryStatus } : {}),
       queuedMessageCount: this.pending.filter((entry) => entry.kind === 'input').length,
       visibleReferenceCount: this.manager ? this.visibleReferences().length : 0,
       // Host-requested maintenance signals only, never a tokenizer/capacity guarantee.
@@ -499,8 +532,12 @@ class BusinessSession {
     this.terminated = false;
     this.lastError = null;
     this.completedTurnHead = null;
+    this.deliveryStatus = 'not_requested';
+    this.deliveryRetries = 0;
     const execution = this.session.sendCustomMessage({ customType: 'maibot.activate', display: false,
-      content: 'Process the newly recorded conversation and reference updates. Use only the registered business tools when needed.' }, { triggerTurn: true });
+      content: this.params.requireDelivery
+        ? 'Process the newly recorded conversation and reference updates. Send chat text with reply(msg_id, text). Use stop when choosing silence, or wait when waiting. Complete this run through these business tools rather than plain assistant text.'
+        : 'Process the newly recorded conversation and reference updates. Use only the registered business tools when needed.' }, { triggerTurn: true });
     this.runPromise = execution;
     try {
       await execution;

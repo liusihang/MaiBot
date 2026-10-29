@@ -236,6 +236,7 @@ class PiGroupRunner:
             toolBindings=self._bindings,
             config=export_harness_config(),
             taskName="planner",
+            requireDelivery=True,
         )
         results = []
         for call in state.get("unresolvedToolCalls", []):

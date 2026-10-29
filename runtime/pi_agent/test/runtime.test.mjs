@@ -78,6 +78,95 @@ function prefixes(wires) {
   }
 }
 
+test('chat final text without delivery continues once in the same native session and sends through reply', async (t) => {
+  const h = harness(t, { response: (n) => n === 1 ? [answer('draft, not sent')]
+    : n === 2 ? [call('reply', { msg_id: 'source', text: 'visible answer' }, 'send', 'send-item')]
+      : [call('stop', {}, 'stop', 'stop-item')],
+  execute: ({ name }) => success('ack', { terminate: name === 'stop' }) });
+  await h.initialize('group-a', ['reply', 'stop'].map(tool), { requireDelivery: true });
+  const result = await h.prompt('question', 'group-a');
+  assert.equal(result.error, null);
+  assert.deepEqual(h.calls.map((c) => c.name), ['reply', 'stop']);
+  assert.equal(result.deliveryStatus, 'sent');
+  const disk = rows(h.runtime.sessions.get('group-a'));
+  const reminder = disk.filter((e) => e.customType === 'maibot.delivery_required');
+  assert.equal(reminder.length, 1);
+  assert.ok(disk.some((e) => e.message?.content?.some?.((p) => p.text === 'draft, not sent')));
+  assert.ok(JSON.stringify(h.wires[1]).includes('not sent'));
+  assert.ok(h.events.some(({ event }) => event.deliveryStatus === 'recovering'));
+  prefixes(h.wires);
+});
+
+test('chat repeated undelivered text ends with an explicit error instead of silent completion', async (t) => {
+  const h = harness(t, { response: () => [answer('still not sent')] });
+  await h.initialize('group-a', ['reply', 'stop'].map(tool), { requireDelivery: true });
+  const result = await h.prompt();
+  assert.equal(h.wires.length, 2);
+  assert.equal(h.calls.length, 0);
+  assert.equal(result.deliveryStatus, 'undelivered');
+  assert.match(result.error, /not sent/i);
+  assert.equal(rows(h.runtime.sessions.get('group-a')).some((e) => e.customType === 'maibot.turn_completed'), false);
+});
+
+test('successful image delivery and explicit stop or wait do not trigger a text resend', async (t) => {
+  for (const name of ['send_emoji', 'reply', 'stop', 'wait']) {
+    const h = harness(t, { response: (n) => n === 1 ? [call(name, {}, 'effect', 'effect-item')] : [answer('internal follow-up')],
+      execute: () => success() });
+    await h.initialize('group-a', ['reply', 'stop', 'wait', 'send_emoji'].map(tool), { requireDelivery: true });
+    const result = await h.prompt();
+    assert.equal(result.error, null);
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.wires.length, 2);
+    assert.equal(rows(h.runtime.sessions.get('group-a')).some((e) => e.customType === 'maibot.delivery_required'), false);
+  }
+});
+
+test('uncertain delivery never requests another send', async (t) => {
+  const h = harness(t, { response: () => [call('reply', {}, 'unknown', 'unknown-item')],
+    execute: () => { throw new Error('connection lost after sending'); } });
+  await h.initialize('group-a', ['reply', 'stop'].map(tool), { requireDelivery: true });
+  const result = await h.prompt();
+  assert.equal(result.paused, true);
+  assert.equal(h.wires.length, 1);
+  assert.equal(h.calls.length, 1);
+});
+
+test('research sessions keep plain conclusions even when their catalog contains a reply tool', async (t) => {
+  const h = harness(t, { response: () => [answer('research conclusion')] });
+  await h.initialize('group-a', ['reply', 'stop'].map(tool));
+  const result = await h.prompt();
+  assert.equal(result.conclusion, 'research conclusion');
+  assert.equal(h.wires.length, 1);
+  assert.equal(result.error, null);
+});
+
+test('a new message during a successful send still requires delivery for its own unsent answer', async (t) => {
+  const h = harness(t, { response: (n) => n === 1 ? [call('reply', { text: 'first' }, 'first', 'first-item')]
+    : n === 2 ? [answer('second, not sent')] : [call('reply', { text: 'second' }, 'second', 'second-item')],
+  execute: async ({ arguments: args }, _signal, runtime) => {
+    if (args.text === 'first') await runtime.handle('append', { sessionId: 'group-a', additions: [user('new question')] });
+    return success('ack', { terminate: args.text === 'second' });
+  } });
+  await h.initialize('group-a', ['reply', 'stop'].map(tool), { requireDelivery: true });
+  const result = await h.prompt('first question');
+  assert.equal(result.error, null);
+  assert.deepEqual(h.calls.map((c) => c.arguments.text), ['first', 'second']);
+  assert.equal(h.wires.length, 3);
+});
+
+test('chat delivery check survives compaction and resets for the next logical run', async (t) => {
+  const h = harness(t, { response: (n) => n % 2 ? [answer('not sent')]
+    : [call('reply', { text: 'sent' }, `send${n}`, `item${n}`)],
+  execute: () => success('sent', { terminate: true }) });
+  await h.initialize('group-a', ['reply', 'stop'].map(tool), { requireDelivery: true });
+  await h.prompt('first');
+  await h.handle('compact', { sessionId: 'group-a', summary: 'Prior answer was sent successfully.', preserveUnprocessed: true });
+  const result = await h.prompt('second');
+  assert.equal(result.deliveryStatus, 'sent');
+  assert.equal(h.calls.length, 2);
+  assert.equal(rows(h.runtime.sessions.get('group-a')).filter((e) => e.customType === 'maibot.delivery_required').length, 2);
+});
+
 test('official AgentSession search → fetch → direct reply preserves native wire prefix and fixed tools across restart', async (t) => {
   const h = harness(t, { response: (n) => n < 4 ? [reasoning(), call(['search', 'fetch', 'reply'][n - 1], { text: 'exact main text' }, `c${n}`, `fc${n}`)] : undefined,
     execute: ({ name }) => success(name, { terminate: name === 'reply' }) });
