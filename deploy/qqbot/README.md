@@ -37,9 +37,11 @@ QQ 收发继续使用 [SnowLuma Adapter](https://github.com/Mai-with-u/MaiBot-Sn
 
 ## 提示词和配置
 
-`custom_prompts/zh-CN/` 原样保留两个实例共用的中文部署提示词，包括主 Agent、
-参与判断和记忆摘要。`maisaka_replyer.prompt` 供显式生成入口使用，普通群聊正文不经过它。
-损友人格、称呼优先级、按场合决定篇幅和政治话题限制均保持原文。
+`custom_prompts/zh-CN/` 保存中文部署提示词，包括主 Agent、参与判断和记忆摘要。
+马斯克的身份、关系与参与动机已按角色设计调整，主提示词和参与判断提供英、日文对应版本。
+本次仅应用到第一个群；更新部署资料不会自动修改其他实例。`maisaka_replyer.prompt` 供显式生成入口使用，普通群聊正文不经过它。
+称呼优先级、按场合决定篇幅、政治话题限制及现有工具能力继续保留。
+身份设计、来源与隔离回放的限制见 [ROLEPLAY.md](ROLEPLAY.md)。
 内置普通/Focus 提示词的中文、英文和日文工具约定已同步为 `reply(msg_id, text)`。
 
 - `bot_config.overlay.toml`：共同设置及第二个群的差异值。
