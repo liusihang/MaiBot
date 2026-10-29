@@ -709,9 +709,7 @@ async def test_high_watermark_uses_real_sdk_summary_and_failed_batch_is_not_retr
 
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 2500)
-    with wire_server(
-        [{"text": ""}, {"text": "real summary"}, {"text": ""}], prompt_tokens=3000
-    ) as (
+    with wire_server([{"text": ""}, {"text": "real summary"}, {"text": ""}], prompt_tokens=3000) as (
         config,
         requests,
     ):
