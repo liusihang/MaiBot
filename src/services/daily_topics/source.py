@@ -7,12 +7,12 @@ import json
 
 
 def source_fingerprint(row: Any) -> str:
-    # Display names and derived image captions can be updated later. Anchor the
-    # immutable source, not those annotations; a reused SQLite id must fail shut.
+    # Display names, derived captions and temporary outbound message IDs can be
+    # updated later. Anchor stable source fields, not delivery annotations;
+    # a reused SQLite id must fail shut.
     values = [
         row.id,
         row.session_id,
-        row.message_id,
         row.platform,
         row.user_id,
         row.group_id,

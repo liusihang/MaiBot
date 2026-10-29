@@ -114,6 +114,21 @@ def test_source_keyset_covers_equal_times_late_arrival_and_ignores_private(sourc
     assert rows[0]["text"] == "late old event" and done
 
 
+def test_source_cursor_accepts_outbound_platform_id_backfill(source_database):
+    when = datetime(2026, 10, 28, 12)
+    add_message(source_database, 1, when)
+    _, cursor, anchor, _ = read_source_page(0, 0, None)
+    with Session(source_database) as db:
+        row = db.get(Messages, 1)
+        row.message_id = "platform-confirmed-id"
+        db.add(row)
+        db.commit()
+    add_message(source_database, 2, when, text="next source")
+    rows, cursor, _, done = read_source_page(cursor, 0, anchor)
+    assert cursor == 2 and done
+    assert [row["source_id"] for row in rows] == ["message:2"]
+
+
 def test_source_cursor_reset_reuse_or_missing_fails_loudly(source_database):
     add_message(source_database, 1, datetime(2026, 10, 28, 12))
     _, cursor, anchor, _ = read_source_page(0, 0, None)
