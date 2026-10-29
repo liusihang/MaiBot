@@ -2,14 +2,14 @@
 
 from base64 import b64decode
 from binascii import Error as BinasciiError
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
+from hashlib import sha256
 from html import escape
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
 import asyncio
-import difflib
 import time
 import uuid
 
@@ -39,7 +39,6 @@ from src.llm_models.payload_content.context_item import (
     ContextItemMeta,
     RoleType,
     UserMessageItem,
-    replace_output_projection,
 )
 from src.llm_models.payload_content.tool_option import ToolCall
 from src.services import database_service as database_api
@@ -85,7 +84,8 @@ from src.maisaka.jargon_context_matcher import (
 from src.maisaka.memory.heuristic_injector import heuristic_memory_injector
 from src.maisaka.memory.image_injector import image_memory_injector
 from src.maisaka.monitor.tool_media import build_tool_result_images
-from src.maisaka.context.compaction import ContextSummaryMessage, build_context_summary
+from src.maisaka.context.compaction import ContextSummaryMessage, build_context_summary, message_text_for_compaction
+from src.maisaka.context.task_workspace import TaskWorkspace, is_bounded_tool_preview, tool_result_signature
 from src.maisaka.monitor.events import (
     emit_flow_step,
     emit_planner_snapshot,
@@ -161,6 +161,8 @@ class MaisakaReasoningEngine:
         self._last_reasoning_content: str = ""
         self._active_logical_turn_id: str | None = None
         self._turn_passive_replyer: Optional[bool] = None
+        self._task_workspace: Optional[TaskWorkspace] = None
+        self._failed_compaction_batch: Optional[str] = None
 
     @property
     def passive_replyer_enabled(self) -> bool:
@@ -181,6 +183,45 @@ class MaisakaReasoningEngine:
         """返回当前完整模型—工具—模型循环的逻辑轮次 ID。"""
 
         return self._active_logical_turn_id
+
+    @property
+    def task_workspace_snapshot(self) -> Optional[Dict[str, Any]]:
+        """只暴露当前任务锚点和执行回执，不公开模型私有推理。"""
+
+        return self._task_workspace.snapshot() if self._task_workspace is not None else None
+
+    def _start_task_workspace(
+        self,
+        logical_turn_id: str,
+        trigger_message: SessionMessage,
+        source_messages: List[SessionMessage],
+    ) -> SessionMessage:
+        """同一 wait 续轮保留锚点；新逻辑轮次创建独立工作区。"""
+
+        if self._task_workspace is None or self._task_workspace.logical_turn_id != logical_turn_id:
+            target: Optional[SessionMessage] = trigger_message
+            if target.session_id != self._runtime.session_id or target.is_notify:
+                target = next(
+                    (
+                        message.original_message for message in reversed(self._runtime._chat_history)
+                        if isinstance(message, SessionBackedMessage)
+                        and message.original_message.session_id == self._runtime.session_id
+                        and not message.original_message.is_notify
+                    ),
+                    None,
+                )
+            self._task_workspace = TaskWorkspace(logical_turn_id, trigger_message, target)
+        self._task_workspace.status = "active"
+        self._task_workspace.observe_messages(source_messages)
+        return self._task_workspace.original_trigger
+
+    def _finish_task_workspace(self, *, preserve_wait: bool) -> None:
+        """仅真实待完成的 wait 跨外部轮次保留；终止、异常和 /clear 取消均清理。"""
+
+        if self._task_workspace is not None and preserve_wait:
+            self._task_workspace.status = "waiting"
+        else:
+            self._task_workspace = None
 
     def build_builtin_tool_handlers(self) -> dict[str, "BuiltinToolHandler"]:
         """构造 Maisaka 内置工具处理器映射。
@@ -377,16 +418,7 @@ class MaisakaReasoningEngine:
         """处理 Planner 响应中的工具调用，或无工具输出策略。"""
 
         planner_content = self._get_planner_content(response)
-        if (response.tool_calls or not self.passive_replyer_enabled) and self._should_replace_reasoning(planner_content):
-            planner_content = "我应该根据我上面思考的内容进行反思，重新思考我下一步的行动，我需要分析当前场景，对话，然后直接输出我的想法："
-            replaced_items = replace_output_projection(
-                response.output_items,
-                content=planner_content,
-                replace_content=True,
-            )
-            response.output_items = replaced_items
-            logger.info(f"{self._runtime.log_prefix} 当前思考与上一轮过于相似，已替换为重新思考提示")
-
+        # 可见正文与原生 reasoning 都保持模型原样，不因文本相似度伪造新的思考内容。
         self._last_reasoning_content = planner_content
         self._runtime._chat_history.extend(response.raw_messages)
         first_tool_call_id = response.tool_calls[0].call_id if response.tool_calls else ""
@@ -474,6 +506,8 @@ class MaisakaReasoningEngine:
                 result = tool_ctx.build_failure_result("reply", f"回复执行异常：{type(exc).__name__}: {exc}")
         ended_at = time.time()
         cycle_detail.time_records["replyer"] = ended_at - started_at
+        if self._task_workspace is not None:
+            self._task_workspace.record_tool_result(execution_id, result)
         summary = result.get_history_content()
         if not result.success and any(receipt["success"] for receipt in result.metadata.get("send_results", [])):
             summary = f"部分消息已发送，本轮不再重试。{summary}"
@@ -597,9 +631,8 @@ class MaisakaReasoningEngine:
             cycle_id=self._runtime._cycle_counter,
         )
         try:
-            # 通知也可能包装为 SessionBackedMessage；引用目标必须是当前会话的非通知消息。
-            # 在请求前固定目标，避免生成期间的新消息改变本次回复的引用对象。
-            state.reply_target_message = next(
+            # 原任务默认引用目标不随工具执行期间的群聊插话漂移；显式 reply.msg_id 仍由模型选择。
+            state.reply_target_message = self._task_workspace.reply_target if self._task_workspace else next(
                 (
                     message.original_message for message in reversed(self._runtime._chat_history)
                     if isinstance(message, SessionBackedMessage)
@@ -608,9 +641,12 @@ class MaisakaReasoningEngine:
                 ),
                 None,
             )
+            tail_messages = build_consecutive_wait_reminders(self._runtime._consecutive_wait_count)
+            if self._task_workspace is not None:
+                tail_messages.append(self._task_workspace.render_reference())
             response = await self._run_interruptible_planner(
                 injected_user_messages=injected_user_messages or None,
-                tail_user_messages=build_consecutive_wait_reminders(self._runtime._consecutive_wait_count),
+                tail_user_messages=tail_messages,
                 tool_definitions=action_tool_definitions,
             )
         finally:
@@ -727,6 +763,8 @@ class MaisakaReasoningEngine:
         messages = self._runtime._collect_pending_messages()
         if messages:
             await self._ingest_messages(messages)
+            if self._task_workspace is not None:
+                self._task_workspace.observe_messages(messages)
             logger.info(f"{self._runtime.log_prefix} 已将 {len(messages)} 条新消息接入当前思考")
             await self._emit_flow_step(
                 "messages.merged", "接入新消息", f"已将 {len(messages)} 条新消息接入当前思考，供下一轮判断。",
@@ -847,7 +885,12 @@ class MaisakaReasoningEngine:
     ) -> CycleEnd:
         """渲染并广播一次内部循环的收尾信息。"""
 
-        completed_cycle = await self._end_cycle(cycle_detail)
+        if state.cycle_end.reason == "cancelled":
+            # /clear 通过取消并移除 runtime 清空上下文；取消收尾不能再次启动压缩模型请求。
+            cycle_detail.end_time = time.time()
+            completed_cycle = cycle_detail
+        else:
+            completed_cycle = await self._end_cycle(cycle_detail)
         cycle_end = state.cycle_end
         if round_index + 1 >= self._runtime._max_internal_rounds and cycle_end.reason in {
             "continue",
@@ -936,7 +979,6 @@ class MaisakaReasoningEngine:
                     extra_messages = await self._ingest_pending_messages()
                     if extra_messages:
                         cached_messages = [*cached_messages, *extra_messages]
-                        trigger_message = extra_messages[-1]
                         should_enter = True
                 if not should_enter:
                     # Keep native history bounds and background learning even when
@@ -947,6 +989,7 @@ class MaisakaReasoningEngine:
                         consume_references=False,
                     )
                     self._runtime._enter_stop_state()
+                    self._finish_task_workspace(preserve_wait=False)
                     self._runtime._update_stage_status("空闲", "Luna 判断本批无需参与；消息已保留在历史中")
                     if self._runtime._running:
                         self._runtime._schedule_message_turn()
@@ -956,6 +999,9 @@ class MaisakaReasoningEngine:
                     self._turn_passive_replyer = global_config.experimental.passive_replyer
                     self._runtime._chat_loop_service.passive_replyer_override = self._turn_passive_replyer
                     self._active_logical_turn_id = turn_start_context.logical_turn_id or uuid.uuid4().hex
+                    trigger_message = self._start_task_workspace(
+                        self._active_logical_turn_id, trigger_message, cached_messages,
+                    )
                     if force_continue_reason := self._runtime._consume_forced_turn_reason():
                         logger.info(f"{self._runtime.log_prefix} {force_continue_reason}")
                     round_index = 0
@@ -964,7 +1010,6 @@ class MaisakaReasoningEngine:
                         pending_round_messages = await self._ingest_pending_messages() if round_index > 0 else []
                         if pending_round_messages:
                             cached_messages = pending_round_messages
-                            trigger_message = pending_round_messages[-1]
 
                         cycle_detail, round_text = await self._start_cycle_round(round_index)
                         state = CycleRuntimeState()
@@ -1011,7 +1056,6 @@ class MaisakaReasoningEngine:
                                 break
 
                             cached_messages = interrupt_result.retry_messages
-                            trigger_message = interrupt_result.retry_messages[-1]
                             continue
                         except asyncio.CancelledError:
                             state.cycle_end = CycleEnd("cancelled", "思考任务已取消，本轮结束。")
@@ -1028,6 +1072,11 @@ class MaisakaReasoningEngine:
                             if not state.planner_interrupted:
                                 round_index += 1
                 finally:
+                    self._finish_task_workspace(
+                        preserve_wait=self._runtime._running
+                        and self._runtime._agent_state == self._runtime._STATE_WAIT
+                        and self._runtime._has_pending_wait_tool_call(),
+                    )
                     self._turn_passive_replyer = None
                     self._runtime._chat_loop_service.passive_replyer_override = None
                     self._active_logical_turn_id = None
@@ -1054,6 +1103,10 @@ class MaisakaReasoningEngine:
             self._runtime._update_stage_status("错误", str(exc))
             logger.exception(f"{self._runtime.log_prefix} Maisaka 内部循环发生异常")
             raise
+        finally:
+            # run_loop 取消也可能发生在等待队列时，而不在上面的单轮 finally 内。
+            self._finish_task_workspace(preserve_wait=False)
+            self._active_logical_turn_id = None
 
     async def _handle_silent_turn(
         self,
@@ -1065,6 +1118,7 @@ class MaisakaReasoningEngine:
         """群聊频率为 0 或私聊暂停时只消费消息和维护历史，不进入 Planner。"""
 
         self._runtime._clear_forced_turn_state()
+        self._finish_task_workspace(preserve_wait=False)
         if proactive_triggered:
             self._runtime._consume_proactive_trigger_message()
             self._runtime._consume_proactive_logical_turn_id()
@@ -1121,6 +1175,8 @@ class MaisakaReasoningEngine:
     def _build_wait_completed_message(self, *, has_new_messages: bool) -> ToolResultMessage:
         """构造 wait 完成后的工具结果消息。"""
         tool_call_id, logical_turn_id, elapsed_seconds, requested_seconds = self._runtime._consume_pending_wait_state()
+        if self._task_workspace is not None and self._task_workspace.logical_turn_id == logical_turn_id:
+            self._task_workspace.complete_wait(tool_call_id)
         elapsed_text = f"{elapsed_seconds:.1f} 秒"
         requested_text = f"，原计划等待 {requested_seconds:.1f} 秒" if requested_seconds is not None else ""
         content = (
@@ -1307,20 +1363,56 @@ class MaisakaReasoningEngine:
         enable_compaction: bool = True,
         consume_references: bool = True,
     ) -> None:
-        """生成滚动状态后提交裁切；压缩失败也丢弃本批旧原文，继续处理近期消息。"""
+        """仅在摘要成功且快照未改变时提交裁切，失败保留原文且不重复请求同一批。"""
         original_history = list(self._runtime._chat_history)
+        reference_uses = {
+            id(message): message.remaining_uses_value
+            for message in original_history if isinstance(message, ReferenceMessage)
+        }
+
+        def snapshot_is_current() -> bool:
+            return (
+                len(self._runtime._chat_history) == len(original_history)
+                and all(
+                    current is original
+                    for current, original in zip(self._runtime._chat_history, original_history, strict=True)
+                )
+                and all(
+                    message.remaining_uses_value == reference_uses[id(message)]
+                    for message in original_history if isinstance(message, ReferenceMessage)
+                )
+            )
+
+        # consume_once 会就地修改引用计数。规划只消费副本，失败/取消/并发更新无需回滚活对象。
+        reference_copies = {
+            id(message): copy(message)
+            for message in original_history if isinstance(message, ReferenceMessage)
+        }
+        originals_by_copy_id = {
+            id(reference_copies[id(message)]): message
+            for message in original_history if isinstance(message, ReferenceMessage)
+        }
+        planning_history = [reference_copies.get(id(message), message) for message in original_history]
         process_result = process_chat_history_after_cycle(
-            self._runtime._chat_history,
+            planning_history,
             max_context_size=self._runtime._max_context_size,
             pending_call_ids=self._runtime._get_pending_wait_tool_call_ids(),
             consume_references=consume_references,
+            force_compaction=self._runtime._chat_loop_service.context_budget_exceeded,
+            active_logical_turn_id=self._active_logical_turn_id,
         )
-        if process_result.changed_count <= 0:
+        process_result.history = [originals_by_copy_id.get(id(message), message) for message in process_result.history]
+        process_result.removed_messages = [
+            originals_by_copy_id.get(id(message), message) for message in process_result.removed_messages
+        ]
+        if process_result.removed_messages and not enable_compaction:
+            # Luna 不参与/静默只维护上下文；禁止绕过摘要事务直接提交普通裁切或预算归档。
             return
 
         trimmed_chat_count = sum(message.count_in_context for message in process_result.removed_messages)
         final_history = process_result.history
-        if process_result.removed_messages and enable_compaction:
+        summary_committed = False
+        if process_result.removed_messages:
             planner_snapshot = self._runtime._chat_loop_service.planner_request_snapshot
             if planner_snapshot is None:
                 # 冷启动或上次摘要提交后必须先完成一次 Planner 请求，才能复用真实前缀。
@@ -1329,6 +1421,14 @@ class MaisakaReasoningEngine:
             previous_summary = next(
                 (message for message in reversed(original_history) if isinstance(message, ContextSummaryMessage)), None
             )
+            batch_key = await asyncio.to_thread(
+                self._compaction_batch_fingerprint, process_result.removed_messages, previous_summary,
+            )
+            if not snapshot_is_current():
+                return
+            if batch_key == self._failed_compaction_batch:
+                # 末尾新输出不意味着这批旧原文有变化；不因每次 Planner 请求更新快照而反复付费重试。
+                return
             summary: ContextSummaryMessage | None = None
             try:
                 summary = await build_context_summary(
@@ -1340,28 +1440,39 @@ class MaisakaReasoningEngine:
                     max_summary_chars=global_config.chat.context_compaction_summary_max_chars,
                 )
             except Exception:
-                logger.exception(f"{self._runtime.log_prefix} 上下文压缩失败，将直接裁切本批旧原文，不再重试本批内容")
+                logger.exception(f"{self._runtime.log_prefix} 上下文压缩失败，保留原文；同一批未改变前不再重试")
             finally:
                 cycle_detail.time_records["context_compaction"] = time.time() - summary_started_at
-            # /clear 或其他异步操作可能在模型请求期间改变历史，禁止用旧快照覆盖新状态。
-            if len(self._runtime._chat_history) != len(original_history) or any(
-                current is not original
-                for current, original in zip(self._runtime._chat_history, original_history, strict=True)
-            ):
-                logger.info(f"{self._runtime.log_prefix} 压缩期间上下文已改变，取消提交旧快照")
+            if summary is None:
+                self._failed_compaction_batch = batch_key
+                logger.warning(f"{self._runtime.log_prefix} 本批上下文未获得有效摘要，原文保持不变")
                 return
-            if summary is not None:
-                final_history = [summary, *[
-                    message for message in final_history if not isinstance(message, ContextSummaryMessage)
-                ]]
-                logger.info(
-                    f"{self._runtime.log_prefix} 上下文压缩完成: "
-                    f"压缩={trimmed_chat_count} 保留原文={process_result.remaining_context_count} "
-                    f"摘要字符={len(summary.content)}"
-                )
-            # 失败时直接提交已规划的裁切，保留上一份有效摘要；清除快照后不再尝试同一批旧原文。
+            if batch_key != await asyncio.to_thread(
+                self._compaction_batch_fingerprint, process_result.removed_messages, previous_summary,
+            ):
+                logger.info(f"{self._runtime.log_prefix} 压缩期间原文内容已改变，取消提交旧摘要")
+                return
+            final_history = [summary, *[
+                message for message in final_history if not isinstance(message, ContextSummaryMessage)
+            ]]
+            summary_committed = True
 
+        # /clear 或其他异步操作可能在模型请求期间改变历史，禁止覆盖新状态或恢复旧引用计数。
+        if not snapshot_is_current():
+            logger.info(f"{self._runtime.log_prefix} 压缩期间上下文或参考消息生命周期已改变，取消提交旧快照")
+            return
+        for message in original_history:
+            if isinstance(message, ReferenceMessage):
+                message.remaining_uses_value = reference_copies[id(message)].remaining_uses_value
         self._runtime._chat_history = final_history
+        if summary_committed:
+            self._failed_compaction_batch = None
+            self._runtime._chat_loop_service.context_budget_exceeded = False
+            logger.info(
+                f"{self._runtime.log_prefix} 上下文压缩完成: "
+                f"压缩={trimmed_chat_count} 保留原文={process_result.remaining_context_count} "
+                f"摘要字符={len(summary.content)}"
+            )
         if process_result.removed_messages:
             self._runtime._chat_loop_service.planner_request_snapshot = None
         if trimmed_chat_count <= 0:
@@ -1396,40 +1507,18 @@ class MaisakaReasoningEngine:
         )
 
     @staticmethod
-    def _calculate_similarity(text1: str, text2: str) -> float:
-        """计算两个文本之间的相似度。
+    def _compaction_batch_fingerprint(
+        messages: List[LLMContextMessage], previous_summary: Optional[ContextSummaryMessage],
+    ) -> str:
+        """只对待压缩资料和上份摘要作指纹；内容实质改变后允许再次尝试。"""
 
-        Args:
-            text1: 第一个文本
-            text2: 第二个文本
-
-        Returns:
-            float: 相似度值，范围 0-1，1 表示完全相同
-        """
-        return difflib.SequenceMatcher(None, text1, text2).ratio()
-
-    def _should_replace_reasoning(self, current_content: str) -> bool:
-        """判断是否需要替换推理内容。
-
-        当当前推理内容与上一次相似度大于90%时，返回True。
-
-        Args:
-            current_content: 当前的推理内容
-
-        Returns:
-            bool: 是否需要替换
-        """
-        if not self._last_reasoning_content or not current_content:
-            logger.debug(
-                f"{self._runtime.log_prefix} 跳过思考相似度判定: "
-                f"上一轮为空={not bool(self._last_reasoning_content)} "
-                f"当前为空={not bool(current_content)} 相似度=0.00"
-            )
-            return False
-
-        similarity = self._calculate_similarity(current_content, self._last_reasoning_content)
-        logger.debug(f"{self._runtime.log_prefix} 思考内容相似度: {similarity:.2f}")
-        return similarity > 0.9
+        digest = sha256()
+        for message in ([previous_summary] if previous_summary is not None else []) + messages:
+            digest.update(str(id(message)).encode("ascii"))
+            digest.update(b"\0")
+            digest.update(message_text_for_compaction(message).encode("utf-8"))
+            digest.update(b"\0")
+        return digest.hexdigest()
 
     def _build_tool_invocation(self, tool_call: ToolCall, latest_thought: str) -> ToolInvocation:
         """将模型输出的工具调用转换为统一调用对象。
@@ -1576,6 +1665,13 @@ class MaisakaReasoningEngine:
     ) -> None:
         """落库工具记录并执行工具后置副作用。"""
 
+        workspace = self._task_workspace
+        if workspace is not None:
+            signature = await asyncio.to_thread(
+                tool_result_signature, invocation.tool_name, invocation.arguments, result,
+            )
+            if self._task_workspace is workspace:
+                workspace.record_tool_result(invocation.call_id, result, signature=signature)
         saved_record = await self._store_tool_execution_record(invocation, result, tool_spec)
         await handle_tool_post_execution_effects(
             invocation=invocation,
@@ -2134,7 +2230,7 @@ class MaisakaReasoningEngine:
                 raw_history_content,
                 success=result.success,
                 # 统一联网工具已保存原文并生成预览；原始 MCP 工具仍沿用原来的整理逻辑。
-                already_previewed=result.metadata.get("web_result_preview") is True,
+                already_previewed=is_bounded_tool_preview(result),
             ):
                 self._runtime._update_stage_status(
                     f"工具结果整理 · {invocation.tool_name}",

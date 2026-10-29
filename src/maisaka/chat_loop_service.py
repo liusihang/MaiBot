@@ -652,6 +652,9 @@ class MaisakaChatLoopService:
         self._prompt_load_lock = asyncio.Lock()
         self._llm_chat_clients: dict[str, LLMServiceClient] = {}
         self.planner_request_snapshot: PlannerRequestSnapshot | None = None
+        self.context_budget_exceeded = False
+        self.last_request_visible_chars = 0
+        self.last_reported_prompt_tokens = 0
         self.passive_replyer_override: Optional[bool] = None
 
     @property
@@ -1302,6 +1305,17 @@ class MaisakaChatLoopService:
             tool_definitions=all_tools,
             tool_provider_types=tool_provider_types,
         )
+        if request_kind == "planner":
+            # Measure after hooks, including tool definitions. Opaque provider state
+            # and media are intentionally not converted from bytes into fake tokens.
+            self.last_request_visible_chars = sum(section.chars for section in context_sections)
+            if self.last_request_visible_chars >= global_config.chat.context_visible_char_high_watermark:
+                self.context_budget_exceeded = True
+                logger.warning(
+                    f"Planner visible-input high watermark: chars={self.last_request_visible_chars}; "
+                    "completed tool turns will be archived at the next safe boundary. "
+                    "Active provider state is preserved; this is not a hard token limit."
+                )
 
         prompt_section: RenderableType | None = None
         prompt_html_uri: str | None = None
@@ -1335,6 +1349,10 @@ class MaisakaChatLoopService:
                 ),
             )
         if request_kind == "planner":
+            # Use the provider receipt before after_response hooks can rewrite usage.
+            self.last_reported_prompt_tokens = generation_result.prompt_tokens
+            if self.last_reported_prompt_tokens >= global_config.chat.context_prompt_token_high_watermark:
+                self.context_budget_exceeded = True
             self.planner_request_snapshot = (
                 PlannerRequestSnapshot(external_snapshot, tuple(selected_history)) if external_planner else
                 PlannerRequestSnapshot(generation_result.request_snapshot, tuple(selected_history))

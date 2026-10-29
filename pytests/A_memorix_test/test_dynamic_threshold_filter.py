@@ -154,3 +154,23 @@ def test_threshold_statistics_use_constant_space_and_record_effective_threshold(
     assert statistics["avg_threshold"] == approx(threshold)
     assert statistics["min_threshold_used"] == approx(threshold)
     assert statistics["max_threshold_used"] == approx(threshold)
+
+
+def test_minimum_recall_is_marked_as_candidate_without_mutating_inputs() -> None:
+    results = _build_results([0.10, 0.08, 0.05])
+    filtered = DynamicThresholdFilter().filter(results)
+
+    assert [item.score for item in filtered] == [0.10, 0.08, 0.05]
+    assert all(item.metadata["retrieval_evidence"] == {
+        "threshold": approx(0.29), "passed": False, "backfilled": True,
+    } for item in filtered)
+    assert all(item.metadata == {} for item in results)
+    assert all(item is not original for item, original in zip(filtered, results, strict=True))
+
+
+def test_passing_hit_and_minimum_recall_have_distinct_evidence_status() -> None:
+    filtered = DynamicThresholdFilter().filter(_build_results([0.9, 0.05]))
+    assert filtered[0].metadata["retrieval_evidence"]["passed"] is True
+    assert filtered[0].metadata["retrieval_evidence"]["backfilled"] is False
+    assert filtered[1].metadata["retrieval_evidence"]["passed"] is False
+    assert filtered[1].metadata["retrieval_evidence"]["backfilled"] is True

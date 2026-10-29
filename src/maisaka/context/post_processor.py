@@ -36,6 +36,8 @@ def process_chat_history_after_cycle(
     max_context_size: int,
     pending_call_ids: set[str] | None = None,
     consume_references: bool = True,
+    force_compaction: bool = False,
+    active_logical_turn_id: str | None = None,
 ) -> HistoryPostProcessResult:
     """在每轮结束后统一执行历史裁切与清理。"""
 
@@ -61,6 +63,7 @@ def process_chat_history_after_cycle(
             processed_history,
             target_context_count=target_context_count,
             pending_call_ids=pending_call_ids,
+            active_logical_turn_id=active_logical_turn_id,
         )
         processed_history, removed_after_trim_count, moved_after_trim_count = _normalize_history_structure(
             processed_history,
@@ -68,6 +71,18 @@ def process_chat_history_after_cycle(
         )
         compact_removed_count = len(removed_messages) + removed_after_trim_count
         moved_tool_result_count += moved_after_trim_count
+
+    if force_compaction:
+        # Chat-count windows do not account for tool output. Archive whole completed
+        # protocol groups even when fewer than five real messages exist; keep those
+        # real messages and all current/pending turn items exactly as they were.
+        archived = _archive_completed_tool_turns(
+            processed_history,
+            active_logical_turn_id=active_logical_turn_id,
+            pending_call_ids=pending_call_ids,
+        )
+        removed_messages.extend(archived)
+        compact_removed_count += len(archived)
 
     remaining_context_count = sum(1 for message in processed_history if message.count_in_context)
     removed_count = one_shot_removed_count + normalized_removed_count + compact_removed_count
@@ -111,6 +126,7 @@ def _trim_history_to_context_target(
     *,
     target_context_count: int,
     pending_call_ids: Optional[Set[str]] = None,
+    active_logical_turn_id: Optional[str] = None,
 ) -> list[LLMContextMessage]:
     """选择连续历史前缀，保留最近五条真实聊天消息、最近用户回合和未完成的工具调用。"""
 
@@ -148,6 +164,8 @@ def _trim_history_to_context_target(
     for turn_id, indexes in turn_indexes.items():
         start = min(indexes[0], anchors.get(turn_id, indexes[0]))
         spans.append((start, indexes[-1] + 1))
+        if turn_id == active_logical_turn_id:
+            protected_start = min(protected_start, start)
     # user 消息触发的工具调用不能在裁切点两侧拆开，否则剩余历史会从
     # function call 开始，违反部分模型的消息顺序要求。
     for index, message in enumerate(chat_history):
@@ -171,6 +189,43 @@ def _trim_history_to_context_target(
     removed_messages = [message for message in chat_history[:boundary] if not isinstance(message, ContextSummaryMessage)]
     chat_history[:boundary] = [message for message in chat_history[:boundary] if isinstance(message, ContextSummaryMessage)]
     return removed_messages
+
+
+def _archive_completed_tool_turns(
+    chat_history: list[LLMContextMessage],
+    *,
+    active_logical_turn_id: Optional[str],
+    pending_call_ids: Optional[Set[str]],
+) -> list[LLMContextMessage]:
+    """Plan atomic removal of completed rounds; the engine commits only with a summary.
+
+    Real user/assistant messages are retained. Native reasoning, calls, outputs
+    and attached media of an archived turn are removed together, in original order.
+    Without an explicit active turn, conservatively keep the newest tool turn.
+    """
+    turn_ids = _collect_tool_turn_ids(chat_history)
+    ordered_turns = list(dict.fromkeys(
+        turn_id for message in chat_history
+        if (turn_id := _get_logical_turn_id(message)) in turn_ids
+    ))
+    protected = {active_logical_turn_id} if active_logical_turn_id else set(ordered_turns[-1:])
+    call_turns = {
+        call.call_id: _get_logical_turn_id(message)
+        for message in chat_history if isinstance(message, ModelOutputContextMessage)
+        for call in message.tool_calls
+    }
+    protected.update(call_turns.get(call_id) for call_id in (pending_call_ids or set()))
+    archived_turns = turn_ids - protected
+    removed: list[LLMContextMessage] = []
+    retained: list[LLMContextMessage] = []
+    for message in chat_history:
+        turn_id = (
+            call_turns.get(message.tool_call_id)
+            if isinstance(message, ToolResultMediaMessage) else _get_logical_turn_id(message)
+        )
+        (removed if turn_id in archived_turns else retained).append(message)
+    chat_history[:] = retained
+    return removed
 
 
 def _get_logical_turn_id(message: LLMContextMessage) -> str | None:

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -14,6 +16,10 @@ def message(text="今天什么情况", mid="new-1", uid="user-1", is_at=False):
     return NS(
         message_id=mid,
         processed_plain_text=text,
+        session_id="offline-participation-test",
+        timestamp=datetime(2026, 1, 1),
+        is_notify=False,
+        reply_to=None,
         is_at=is_at,
         is_mentioned=False,
         received_at=None,
@@ -229,7 +235,7 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
         await engine.run_loop()
         engine._run_planner_request.assert_awaited_once()
         self.assertEqual(engine._run_planner_request.call_args.kwargs["source_messages"], [m, new])
-        self.assertIs(engine._run_planner_request.call_args.kwargs["trigger_message"], new)
+        self.assertIs(engine._run_planner_request.call_args.kwargs["trigger_message"], m)
 
 
 def ready_runtime():

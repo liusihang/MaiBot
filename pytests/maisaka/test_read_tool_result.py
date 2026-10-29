@@ -21,19 +21,27 @@ def _invocation(**arguments: Any) -> ToolInvocation:
     return ToolInvocation(tool_name="read_tool_result", arguments=arguments, call_id="call-read")
 
 
-def test_store_assigns_short_ids_per_session_and_evicts_oldest() -> None:
+def test_store_assigns_unique_scoped_handles_and_evicts_oldest() -> None:
     store = ToolResultStore()
-
-    assert store.save("chat-a", "tool", "一") == "r1"
-    assert store.save("chat-a", "tool", "二") == "r2"
-    assert store.save("chat-b", "tool", "别的聊天") == "r1"
-    assert store.get("chat-a", "r2").content == "二"
-    assert store.get("chat-b", "r2") is None
-
+    first = store.save("chat-a", "tool", "一")
+    second = store.save("chat-a", "tool", "二")
+    elsewhere = store.save("chat-b", "tool", "别的聊天")
+    assert len({first, second, elsewhere}) == 3
+    assert store.get("chat-a", second).content == "二"
+    assert store.get("chat-b", second) is None
+    assert store.get("chat-a", elsewhere) is None
     for index in range(MAX_STORED_RESULTS_PER_SESSION):
-        store.save("chat-a", "tool", f"新结果{index}")
-    assert store.get("chat-a", "r1") is None
-    assert store.get("chat-a", f"r{MAX_STORED_RESULTS_PER_SESSION + 2}") is not None
+        last = store.save("chat-a", "tool", f"新结果{index}")
+    assert store.get("chat-a", first) is None
+    assert store.get("chat-a", last) is not None
+    restarted = ToolResultStore()
+    assert restarted.save("chat-a", "tool", "重启后新原文") != first
+    assert restarted.get("chat-a", first) is None
+
+
+def test_store_refuses_missing_session() -> None:
+    with pytest.raises(ValueError, match="session_id"):
+        ToolResultStore().save("", "tool", "raw")
 
 
 @pytest.mark.asyncio
@@ -63,7 +71,9 @@ async def test_read_tool_result_pages_through_original_by_offset() -> None:
     tool_ctx = _tool_ctx("chat-read")
 
     first = await read_tool_result.handle_tool(tool_ctx, _invocation(result_id=result_id))
-    second = await read_tool_result.handle_tool(tool_ctx, _invocation(result_id=result_id, offset=2000, max_chars=99999))
+    second = await read_tool_result.handle_tool(
+        tool_ctx, _invocation(result_id=result_id, offset=2000, max_chars=99999)
+    )
 
     assert first.success
     assert f"[{result_id} · maibot_release_info 原始结果 · 共 3500 字 · 本段 0–2000]" in first.content
@@ -97,10 +107,10 @@ async def test_read_tool_result_reports_expired_ids() -> None:
     assert "重新调用原来的工具" in result.error_message
 
 
-def test_read_tool_result_is_exposed_with_the_condense_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_tool_result_remains_exposed_without_condense_or_native_web(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(model_config.model_task_config, "web_search", WebSearchTaskConfig())
     monkeypatch.setattr(global_config.capabilities, "tool_result_condense", False)
-    assert "read_tool_result" not in {tool_spec.name for tool_spec in get_all_builtin_tool_specs()}
+    assert "read_tool_result" in {tool_spec.name for tool_spec in get_all_builtin_tool_specs()}
 
     monkeypatch.setattr(global_config.capabilities, "tool_result_condense", True)
     assert "read_tool_result" in {tool_spec.name for tool_spec in get_all_builtin_tool_specs()}
@@ -116,3 +126,59 @@ def test_web_preview_skips_condense_but_raw_mcp_result_does_not(monkeypatch: pyt
     monkeypatch.setattr(global_config.capabilities, "tool_result_condense_threshold", 3000)
     assert not should_condense_tool_result("web_search", "x" * 5000, success=True, already_previewed=True)
     assert should_condense_tool_result("web_search", "x" * 5000, success=True)
+
+
+@pytest.mark.asyncio
+async def test_keyword_reads_share_one_budget_and_can_continue() -> None:
+    import re
+
+    content = ("😀关键词" + "甲" * 600) * 20
+    result_id = tool_result_store.save("chat-budget", "query_memory", content)
+    first = await read_tool_result.handle_tool(
+        _tool_ctx("chat-budget"), _invocation(result_id=result_id, keyword="关键词", max_chars=120)
+    )
+    ranges = [(int(a), int(b)) for a, b in re.findall(r"--- 位置 (\d+)–(\d+) ---", first.content)]
+    assert sum(end - start for start, end in ranges) <= 120
+    assert len(first.content) <= read_tool_result.READ_OUTPUT_MAX_CHARS
+    assert len(ranges) == 1
+    end = ranges[-1][1]
+    second = await read_tool_result.handle_tool(
+        _tool_ctx("chat-budget"), _invocation(result_id=result_id, keyword="关键词", offset=end, max_chars=120)
+    )
+    second_ranges = [(int(a), int(b)) for a, b in re.findall(r"--- 位置 (\d+)–(\d+) ---", second.content)]
+    assert second_ranges[0][0] >= end
+    for start, stop in [*ranges, *second_ranges]:
+        assert content[start:stop] in first.content + second.content
+
+
+@pytest.mark.asyncio
+async def test_unicode_offsets_dense_matches_and_invalid_keyword_stay_bounded() -> None:
+    import re
+
+    content = "İ" * 20 + ("😀中文" * 5000)
+    result_id = tool_result_store.save("chat-unicode", "a" * 100_000, content)
+    ctx = _tool_ctx("chat-unicode")
+    dense = await read_tool_result.handle_tool(ctx, _invocation(result_id=result_id, keyword="😀", max_chars=999999))
+    assert dense.success and len(dense.content) <= read_tool_result.READ_OUTPUT_MAX_CHARS
+    for start, end in re.findall(r"--- 位置 (\d+)–(\d+) ---", dense.content):
+        assert content[int(start) : int(end)] in dense.content
+    invalid = await read_tool_result.handle_tool(ctx, _invocation(result_id=result_id, keyword="中" * 100_000))
+    assert not invalid.success and len(invalid.error_message) < 200
+
+
+@pytest.mark.asyncio
+async def test_expired_or_cross_session_handle_never_returns_other_evidence() -> None:
+    from src.core.tooling import ToolExecutionContext
+
+    result_id = tool_result_store.save("chat-original", "query_memory", "PRIVATE-ORIGINAL")
+    tool_result_store.save("chat-other", "query_memory", "OTHER-FACT")
+    result = await read_tool_result.handle_tool(_tool_ctx("chat-other"), _invocation(result_id=result_id))
+    assert not result.success and "PRIVATE-ORIGINAL" not in result.content and "OTHER-FACT" not in result.content
+    mismatch = await read_tool_result.handle_tool(
+        _tool_ctx("chat-original"), _invocation(result_id=result_id), ToolExecutionContext(session_id="other")
+    )
+    assert not mismatch.success and "不一致" in mismatch.error_message
+    for _ in range(MAX_STORED_RESULTS_PER_SESSION):
+        tool_result_store.save("chat-original", "query_memory", "new")
+    expired = await read_tool_result.handle_tool(_tool_ctx("chat-original"), _invocation(result_id=result_id))
+    assert not expired.success and "过期" in expired.error_message
