@@ -469,7 +469,8 @@ class DecisionsParticipationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence["new_messages"][0]["time"], "2026-01-01T00:00:00")
         self.assertEqual(evidence["new_messages"][0]["received_at"], "2026-01-01T12:00:01")
         self.assertEqual(evidence["new_messages"][0]["reply_to"][0]["msg_id"], "someone-else")
-        self.assertIn("全批只在讨论政治", instructions)
+        ignore_policy = instructions.split("# ignore", 1)[1].split("# uncertain", 1)[0]
+        self.assertIn("政治", ignore_policy)
         self.assertIn("不替主 Agent 写立场、语气或回复方向", instructions)
         self.assertTrue(evidence["recent_messages"][0]["is_bot"])
 
