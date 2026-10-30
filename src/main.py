@@ -200,6 +200,10 @@ class MainSystem:
         asyncio.create_task(chat_manager.regularly_save_sessions())
 
         logger.info(t("startup.chat_manager_initialized"))
+        # Routes/plugins and source sessions must exist before pending work resumes.
+        from src.chat.heart_flow.heartflow_manager import heartflow_manager
+
+        await heartflow_manager.restore_pi_work()
         await memory_automation_service.start()
 
         from src.services.daily_topics.service import daily_topic_service

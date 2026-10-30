@@ -183,6 +183,8 @@ export async function runAuxiliaryOperation(runtime, operation, payload, { signa
     headers: { ...provider.default_headers, ...extra.headers }, query: { ...provider.default_query, ...extra.query },
     credentialDigest: hash(provider.api_key ?? ''), authType: provider.auth_type ?? 'bearer', authHeaderName: provider.auth_header_name,
     authHeaderPrefix: provider.auth_header_prefix, authQueryName: provider.auth_query_name, organization: provider.organization, project: provider.project,
-    mimeType: payload.input?.mimeType ?? null, preprocessVersion: payload.input?.preprocessVersion ?? null });
+    // Image file encodings share one embedding space. Keep the established PNG
+    // probe identity so valid stored vectors do not need to be rebuilt.
+    mimeType: operation === 'embed_image' ? 'image/png' : (payload.input?.mimeType ?? null), preprocessVersion: payload.input?.preprocessVersion ?? null });
   return { ...result, route, ...route, requestProtocolHash, usage: typeof raw === 'object' ? (raw.usage ?? raw.usageMetadata ?? null) : null };
 }

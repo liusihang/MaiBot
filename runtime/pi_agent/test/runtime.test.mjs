@@ -688,3 +688,17 @@ test('maintenance preserves arrivals queued during a terminating tool after the 
   assert.deepEqual(strings(compacted), ['arrived during wait']);
   assert.equal(compacted.messages.some((message) => message.role === 'toolResult'), false);
 });
+
+test('completed business request survives restart without repeating delivery', async (t) => {
+  const first = harness(t, { response: () => [call('reply', { text: 'sent once' }, 'send-once')], execute: async () => success('sent', { terminate: true }) });
+  await first.initialize('group-a', [tool('reply')], { requireDelivery: true });
+  const result = await first.prompt('question', 'group-a', { requestId: 'work-1' });
+  assert.equal(result.completedRequestId, 'work-1');
+  await first.runtime.shutdown();
+  const restored = harness(t, { root: first.dir });
+  await restored.initialize('group-a', [tool('reply')], { requireDelivery: true });
+  const retry = await restored.handle('prompt', { sessionId: 'group-a', requestId: 'work-1' });
+  assert.equal(retry.completedRequestId, 'work-1');
+  assert.equal(restored.wires.length, 0);
+  assert.equal(restored.calls.length, 0);
+});

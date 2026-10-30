@@ -16,6 +16,7 @@ import time
 import uuid
 
 from src.common.paths import get_instance_root
+from src.common.logger import get_logger
 from src.config.config import global_config
 from src.services.pi_harness.config import export_harness_config
 from src.core.tooling import ToolInvocation
@@ -30,11 +31,14 @@ from src.maisaka.context.messages import (
 )
 
 from .bridge import PiBridge, PiBridgeError
-from .business_store import BusinessStore
+from .business_store import BusinessStore, LedgerConflict
 from .evidence import DurableEvidenceStore, READ_THREAD_ARCHIVE_TOOL_DEFINITION
 from .references import build_references
 from .observer import PiObserver
 from .subagents import PiSubagentService, READ_ONLY_TOOL_NAMES, SUBAGENT_TOOL_DEFINITIONS
+
+
+logger = get_logger("pi_runner")
 
 
 def pi_tool(definition: Dict[str, Any]) -> Dict[str, Any]:
@@ -255,12 +259,43 @@ class PiGroupRunner:
                     }
                 )
         if results:
-            await self.bridge.request("resolve_tools", sessionId=self.session_id, results=results)
+            state = await self.bridge.request("resolve_tools", sessionId=self.session_id, results=results)
         self._initialized = True
         await self.subagents.recover(self.session_id)
         pending = await self._db("pending_inputs", self.session_id)
+        turn = await self._db("pending_turn", self.session_id)
+        if turn and state.get("completedRequestId") == turn["turn_id"]:
+            await self._db("complete_turn", self.session_id, turn["turn_id"])
+            turn = None
         if any(event.payload.get("piChildCompletion") for event in pending):
             self._wake_for_child_completion()
+
+    async def restore_pending_turn(self) -> None:
+        """Schedule once at host startup, not during an already active run's reconnect."""
+        await self.ensure_initialized()
+        turn = await self._db("pending_turn", self.session_id)
+        if turn is None:
+            return
+        state = await self.bridge.request("state", sessionId=self.session_id)
+        try:
+            await self._db("assert_no_unresolved_executions", self.session_id)
+            if state.get("unresolvedToolCalls"):
+                raise LedgerConflict("Native tool outcome needs reconciliation")
+        except LedgerConflict:
+            logger.error(f"[{self.session_id}] 未完成轮次包含结果未知的工具，保留待核对，不自动重发")
+        else:
+            self._wake_for_recovery(turn["turn_id"], turn["source_ids"])
+
+    def _wake_for_recovery(self, turn_id: str, source_ids: List[str]) -> None:
+        task_id = "pi-recover:" + turn_id
+        description = (
+            f"继续重启前未完成的群聊任务，原始消息 ID：{', '.join(source_ids) or '见线程中未完成的任务'}。"
+            "这是内部恢复事件，不是新的群友发言。结合当前时间和最新消息判断如何接续；"
+            "回复引用真实原始消息，已成功发送的内容不再发送，工具结果未知时不重试。"
+        )
+        self.runtime._arm_forced_turn_state(message_id=task_id, reason="恢复未完成群聊任务")
+        self.runtime._queue_proactive_turn(self.runtime._build_proactive_trigger_message(task_id, description))
+        logger.info(f"[{self.session_id}] 已调度恢复未完成轮次: {turn_id}")
 
     def _wake_for_child_completion(self) -> None:
         """Reuse the existing forced internal-turn scheduler, bypassing Luna cooldown."""
@@ -369,6 +404,9 @@ class PiGroupRunner:
 
     async def run(self, source_messages: List[Any]) -> None:
         async with self._orchestration_lock:
+            await self.ensure_initialized()
+            await self._db("assert_no_unresolved_executions", self.session_id)
+            turn = await self._db("begin_turn", self.session_id, [str(message.message_id) for message in source_messages])
             focus_group = getattr(self.runtime, "_focus_group", None)
             await self.ingest(
                 source_message_ids={message.message_id for message in source_messages}
@@ -391,6 +429,7 @@ class PiGroupRunner:
                 state = await self.bridge.request(
                     "prompt",
                     sessionId=self.session_id,
+                    requestId=turn["turn_id"],
                     references=references,
                     additions=[
                         user_message(
@@ -402,6 +441,9 @@ class PiGroupRunner:
                     raise RuntimeError(
                         "Pi session paused: " + str(state.get("error") or state.get("unresolvedToolCalls"))
                     )
+                if state.get("completedRequestId") != turn["turn_id"]:
+                    raise RuntimeError("Pi request returned without durable completion")
+                await self._db("complete_turn", self.session_id, turn["turn_id"])
             except asyncio.CancelledError:
                 # Cancelling the Python wait must stop the SDK run as well. Wait
                 # for its terminal persistence/unknown-effect marker before exit.

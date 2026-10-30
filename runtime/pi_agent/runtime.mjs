@@ -503,6 +503,7 @@ class BusinessSession {
       conclusion: lastAssistant ? textContent(lastAssistant.content) : '',
       stopReason: lastAssistant?.stopReason ?? null, usage: lastAssistant?.usage ?? null,
       ...(this.params.requireDelivery ? { deliveryStatus: this.deliveryStatus } : {}),
+      completedRequestId: entries.findLast((entry) => entry.customType === 'maibot.request_completed')?.data.requestId ?? null,
       queuedMessageCount: this.pending.filter((entry) => entry.kind === 'input').length,
       visibleReferenceCount: this.manager ? this.visibleReferences().length : 0,
       // Host-requested maintenance signals only, never a tokenizer/capacity guarantee.
@@ -523,6 +524,11 @@ class BusinessSession {
 
   async prompt(params) {
     this.writable();
+    if (params.requestId) {
+      check(typeof params.requestId === 'string', 'INVALID_REQUEST_ID', 'Business request ID must be a string');
+      // A host ACK can be lost after native completion. Never send that work twice.
+      if (this.manager.getEntries().some((e) => e.customType === 'maibot.request_completed' && e.data.requestId === params.requestId)) return this.snapshot();
+    }
     if (!this.running && !this.transition) this.drainPending();
     this.appendReferences(params.references ?? []);
     const accepted = this.append(params.additions ?? []);
@@ -534,6 +540,10 @@ class BusinessSession {
     this.completedTurnHead = null;
     this.deliveryStatus = 'not_requested';
     this.deliveryRetries = 0;
+    if (params.requestId) {
+      const started = this.manager.getEntries().findLast((e) => e.customType === 'maibot.request_started' && e.data.requestId === params.requestId);
+      if (!started) this.manager.appendCustomEntry('maibot.request_started', { requestId: params.requestId });
+    }
     const execution = this.session.sendCustomMessage({ customType: 'maibot.activate', display: false,
       content: this.params.requireDelivery
         ? 'Process the newly recorded conversation and reference updates. Send chat text with reply(msg_id, text). Use stop when choosing silence, or wait when waiting. Complete this run through these business tools rather than plain assistant text.'
@@ -546,6 +556,7 @@ class BusinessSession {
       // last completed assistant/tool batch, not a later pending inbox append.
       if (this.completedTurnHead && !this.snapshot().error && !this.unresolvedCalls().length) {
         this.manager.appendCustomEntry('maibot.turn_completed', { throughEntryId: this.completedTurnHead });
+        if (params.requestId) this.manager.appendCustomEntry('maibot.request_completed', { requestId: params.requestId });
       }
     } finally {
       this.running = false;

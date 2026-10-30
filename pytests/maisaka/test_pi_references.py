@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from src.maisaka.pi_runtime.references import make_reference, select_references
 
 
@@ -245,3 +247,36 @@ def test_all_known_evidence_scopes_must_agree():
     assert not _same_chat_evidence({"chat_id": "a", "source": "chat_summary:b"}, "chat_summary:a", "a")
     assert not _same_chat_evidence({}, "person_fact:p", "a")
     assert not _same_chat_evidence({"chat_id": "a"}, "chat_summary:a", "a", "chat_summary:b")
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "timeout", "cancelled"])
+def test_optional_image_recall_failure_keeps_current_chat_available(monkeypatch, failure):
+    import asyncio
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from src.maisaka.pi_runtime import references
+    config = SimpleNamespace(enabled=True, candidate_limit=8, similarity_threshold=0.8)
+    monkeypatch.setitem(sys.modules, "src.config.config", SimpleNamespace(global_config=SimpleNamespace(a_memorix=SimpleNamespace(image_memory=config))))
+    api = AsyncMock(return_value={"success": False, "error": "image space changed"})
+    if failure == "timeout":
+        async def slow(**kwargs):
+            await asyncio.sleep(1)
+        api.side_effect = slow
+        monkeypatch.setattr(references, "IMAGE_RECALL_TIMEOUT_SECONDS", 0.01)
+    elif failure == "cancelled":
+        api.side_effect = asyncio.CancelledError
+    monkeypatch.setitem(sys.modules, "src.services.memory_service", SimpleNamespace(memory_service=SimpleNamespace(image_memory=api)))
+    monkeypatch.setitem(sys.modules, "src.A_memorix.core.image.component_paths", SimpleNamespace(
+        iter_message_image_components=lambda parts: [("0", SimpleNamespace(binary_hash="picture"))],
+        build_chat_external_ref=lambda **kwargs: "current-image",
+    ))
+    message = SimpleNamespace(message_id="42", raw_message=SimpleNamespace(components=[]))
+    if failure == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(references._image_records("group", [message]))
+        return
+    result = asyncio.run(references._image_records("group", [message]))
+    assert len(result) == 1
+    assert json.loads(result[0].content)["nature"] == "retrieval_status_not_evidence"
+    assert "不可用" in json.loads(result[0].content)["content"]

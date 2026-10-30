@@ -87,3 +87,19 @@ def test_tool_media_ownership_commits_with_receipt_and_cannot_rebind(tmp_path: P
         restored.record_tool_outcome("group", "call-2", result)
     assert restored.lookup_tool_execution("group", "call-2").result is None
     assert restored.lookup_tool_execution("group", "call-1").result == result
+
+
+def test_selected_turn_survives_inbox_ack_and_completion_is_scoped(tmp_path):
+    store = BusinessStore(tmp_path / "business.sqlite3")
+    store.enqueue_input("ignored", "a", {"sourceMessageId": "a"})
+    store.acknowledge_input("ignored", "a")
+    turn = store.begin_turn("group", ["one"])
+    assert store.begin_turn("group", ["two"])["turn_id"] == turn["turn_id"]
+    restored = BusinessStore(tmp_path / "business.sqlite3")
+    assert restored.pending_turn("group")["source_ids"] == ["one", "two"]
+    assert restored.recovery_streams() == ["group"]
+    with pytest.raises(LedgerConflict):
+        restored.complete_turn("group", "other-turn")
+    restored.complete_turn("group", turn["turn_id"])
+    assert restored.pending_turn("group") is None
+    assert restored.recovery_streams() == []

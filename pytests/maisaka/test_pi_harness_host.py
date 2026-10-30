@@ -219,6 +219,8 @@ async def test_ignored_messages_persist_in_real_sdk_and_restart_once(monkeypatch
         await first.close()
         second = PiGroupRunner(host, data_dir=tmp_path)
         try:
+            await second.ensure_initialized()
+            host._runtime._queue_proactive_turn.assert_not_called()
             await second.run([])
             wire = json.dumps(requests[0]["messages"])
             assert wire.count("ignored unique message") == 1
@@ -277,6 +279,9 @@ async def test_actual_registry_unknown_send_stops_model_and_restart(monkeypatch,
             await runner.close()
         restored = PiGroupRunner(host, data_dir=tmp_path)
         try:
+            await restored.ensure_initialized()
+            await restored.restore_pending_turn()
+            host._runtime._queue_proactive_turn.assert_not_called()
             with pytest.raises(RuntimeError):
                 await restored.run([])
             assert effects == ["call-1"] and len(requests) == 1
@@ -811,7 +816,7 @@ async def test_background_child_allows_new_parent_turn_and_delivers_completion_o
         outputs = [m for m in request["messages"] if m["role"] == "tool"]
         if is_child:
             return {"text": "CHILD_FINISHED"} if outputs else ("web_fetch", {})
-        return {"text": "PARENT_CONTINUES"} if outputs else ("subagent", {"task": "BACKGROUND_TASK", "wait": False})
+        return ("reply", {"text": "PARENT_CONTINUES"}) if outputs else ("subagent", {"task": "BACKGROUND_TASK", "wait": False})
 
     with wire_server([route] * 12) as (config, requests):
         monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
@@ -819,6 +824,8 @@ async def test_background_child_allows_new_parent_turn_and_delivers_completion_o
 
         async def invoke(invocation, context, **kwargs):
             effects.append(invocation)
+            if invocation.tool_name == "reply":
+                return ToolExecutionResult("reply", True, content="parent sent", metadata={"pause_execution": True})
             await release.wait()
             return ToolExecutionResult("web_fetch", True, content="CHILD_PRIVATE_SOURCE")
 
@@ -898,3 +905,75 @@ async def test_completion_inbox_deduplicates_without_extra_wake_during_parent_re
         host._runtime._queue_proactive_turn.assert_not_called()
     finally:
         await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_turn_before_reference_failure_wakes_on_restart(monkeypatch, tmp_path):
+    references = AsyncMock(side_effect=RuntimeError("reference failure"))
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", references)
+    with wire_server([("reply", {"text": "recovered answer"})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        host._runtime._chat_history.append(history("unanswered question", "question"))
+        first = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            with pytest.raises(RuntimeError, match="reference failure"):
+                await first.run([])
+            assert await first._db("pending_turn", first.session_id)
+            assert not await first._db("pending_inputs", first.session_id)
+            assert not requests
+        finally:
+            await first.close()
+        references.side_effect = None
+        references.return_value = []
+        restored_host, _ = engine()
+        restored_host._runtime._tool_registry.invoke = AsyncMock(return_value=ToolExecutionResult(
+            "reply", True, content="sent", metadata={"pause_execution": True},
+        ))
+        restored = PiGroupRunner(restored_host, data_dir=tmp_path)
+        try:
+            await restored.ensure_initialized()
+            restored_host._runtime._queue_proactive_turn.assert_not_called()
+            await restored.restore_pending_turn()
+            restored_host._runtime._queue_proactive_turn.assert_called_once()
+            await restored.run([])
+            assert len(requests) == 1
+            assert "unanswered question" in json.dumps(requests[0]["messages"])
+            assert await restored._db("pending_turn", restored.session_id) is None
+        finally:
+            await restored.close()
+
+
+@pytest.mark.asyncio
+async def test_native_completion_survives_lost_python_turn_ack(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([("reply", {"text": "already sent"})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        host._runtime._tool_registry.invoke = AsyncMock(return_value=ToolExecutionResult(
+            "reply", True, content="sent receipt", metadata={"pause_execution": True},
+        ))
+        first = PiGroupRunner(host, data_dir=tmp_path)
+        original = first._db
+
+        async def lose_ack(method, *args, **kwargs):
+            if method == "complete_turn":
+                raise OSError("lost Python completion ack")
+            return await original(method, *args, **kwargs)
+
+        monkeypatch.setattr(first, "_db", lose_ack)
+        try:
+            with pytest.raises(OSError, match="completion ack"):
+                await first.run([])
+        finally:
+            await first.close()
+        new_host, _ = engine()
+        restored = PiGroupRunner(new_host, data_dir=tmp_path)
+        try:
+            await restored.ensure_initialized()
+            assert await restored._db("pending_turn", restored.session_id) is None
+            new_host._runtime._queue_proactive_turn.assert_not_called()
+            assert len(requests) == 1
+            host._runtime._tool_registry.invoke.assert_awaited_once()
+        finally:
+            await restored.close()
