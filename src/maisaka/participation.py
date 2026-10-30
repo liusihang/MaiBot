@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 import json
+import re
 import time
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
@@ -15,14 +16,14 @@ from src.common.prompt_i18n import load_prompt_template
 from src.config.config import global_config
 from src.llm_models.payload_content.context_item import ContextItemBuilder, RoleType
 from src.llm_models.payload_content.resp_format import RespFormat, RespFormatType
+from src.maisaka.pi_runtime.bridge import PiBridgeError
 from src.services.llm_service import LLMServiceClient
+from src.services.pi_harness.inference import PiInferenceClient
 
 if TYPE_CHECKING:
     from src.maisaka.runtime import MaisakaHeartFlowChatting
 
 logger = get_logger("maisaka_participation")
-PARTICIPATION_MODEL = "group-helper"
-PARTICIPATION_TIMEOUT_SECONDS = 30
 PARTICIPATION_INTERVAL_SECONDS = 30.0
 RECENT_MESSAGES = 24
 TEXT_LIMIT = 1600
@@ -53,9 +54,14 @@ def message_record(message, *, is_bot: bool) -> dict:
         "is_bot": is_bot,
         "text": shorten(message.processed_plain_text or ""),
     }
-    when = getattr(message, "received_at", None)
+    when = getattr(message, "timestamp", None)
+    received = getattr(message, "received_at", None)
     if when is not None:
         record["time"] = when.isoformat()
+    elif received is not None:
+        record["time"] = received.isoformat()
+    if received is not None:
+        record["received_at"] = received.isoformat()
     replies = []
     for component in getattr(getattr(message, "raw_message", None), "components", []):
         if getattr(component, "format_name", "") == "reply":
@@ -73,17 +79,27 @@ def message_record(message, *, is_bot: bool) -> dict:
 
 
 def build_payload(runtime, messages) -> dict:
+    def check_scope(message) -> None:
+        scope = getattr(message, "session_id", None)
+        if scope and scope != runtime.session_id:
+            raise ValueError("Participation input belongs to another session")
+
+    for message in messages:
+        check_scope(message)
     pending_ids = {str(message.message_id) for message in messages}
     recent = []
     for entry in runtime._chat_history:
         original = getattr(entry, "original_message", None)
         if original is None or not entry.count_in_context or str(original.message_id) in pending_ids:
             continue
+        check_scope(original)
         record = message_record(original, is_bot=entry.source == "guided_reply")
         # Native history can include refreshed media descriptions absent from the raw plain text.
         record["text"] = shorten(entry.processed_plain_text or record["text"])
         recent.append(record)
     return {
+        "session_id": runtime.session_id,
+        "evaluation_time": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
         "bot_names": list(dict.fromkeys([global_config.bot.nickname, *global_config.bot.alias_names])),
         "recent_messages": recent[-RECENT_MESSAGES:],
         "new_messages": [message_record(m, is_bot=False) for m in messages],
@@ -132,6 +148,7 @@ class ParticipationJudge:
     def __init__(self, runtime: MaisakaHeartFlowChatting):
         self.runtime = runtime
         self._client = None
+        self._decisions_client = None
         self._last_judgment_started_at: float | None = None
 
     def cooldown_remaining(self) -> float:
@@ -178,33 +195,68 @@ class ParticipationJudge:
             return True
         started = time.monotonic()
         self._last_judgment_started_at = started
-        runtime._update_stage_status("参与判断", "Luna 判断连续对话、开放提问与可参与话题")
+        mode = global_config.chat.participation_mode
+        model_name = global_config.chat.participation_model
+        timeout = global_config.chat.participation_timeout_seconds
+        runtime._update_stage_status("参与判断", f"{mode} 判断连续对话、开放提问与可参与话题")
         try:
             payload = build_payload(runtime, messages)
-            if self._client is None:
-                self._client = LLMServiceClient(
-                    task_name="fast_model", request_type="participation_judge", session_id=runtime.session_id
-                )
-            context = build_context(payload)
-            result = await asyncio.wait_for(
-                self._client.generate_response_with_context(
-                    context_factory=lambda _: context,
-                    options=LLMGenerationOptions(
-                        model_name=PARTICIPATION_MODEL,
-                        retain_replay=False,
-                        response_format=RespFormat(RespFormatType.JSON_SCHEMA, DECISION_SCHEMA),
+            if mode == "decisions":
+                if self._decisions_client is None:
+                    self._decisions_client = PiInferenceClient(
+                        task_name="fast_model", request_type="participation_judge", session_id=runtime.session_id
+                    )
+                result = await asyncio.wait_for(
+                    self._decisions_client.decide_participation(
+                        payload,
+                        load_prompt_template("participation_judge", locale="zh-CN").template,
+                        model_name=model_name,
+                        timeout_seconds=timeout,
                     ),
-                ),
-                timeout=PARTICIPATION_TIMEOUT_SECONDS,
-            )
-            decision = parse_decision(result.response)
+                    timeout=timeout,
+                )
+                decision = result.decision
+                # Confidence is diagnostic only; no uncalibrated threshold changes
+                # the API's explicit engage / ignore / uncertain choice.
+                diagnostic = f" confidence={result.confidence:.4f}"
+            elif mode == "chat":
+                if self._client is None:
+                    self._client = LLMServiceClient(
+                        task_name="fast_model", request_type="participation_judge", session_id=runtime.session_id
+                    )
+                context = build_context(payload)
+                result = await asyncio.wait_for(
+                    self._client.generate_response_with_context(
+                        context_factory=lambda _: context,
+                        options=LLMGenerationOptions(
+                            model_name=model_name,
+                            retain_replay=False,
+                            response_format=RespFormat(RespFormatType.JSON_SCHEMA, DECISION_SCHEMA),
+                        ),
+                    ),
+                    timeout=timeout,
+                )
+                decision = parse_decision(result.response)
+                diagnostic = ""
+            else:
+                raise ValueError("Unknown participation mode")
             logger.info(
-                f"{runtime.log_prefix} 参与判断 模型={result.model_name} decision={decision} "
+                f"{runtime.log_prefix} 参与判断 API={mode} 模型={result.model_name} decision={decision}{diagnostic} "
                 f"新消息={len(messages)} 耗时={time.monotonic() - started:.2f}s"
             )
             return decision != "ignore"
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning(f"{runtime.log_prefix} 参与判断失败，交给主 Agent：{type(exc).__name__}")
+            code = exc.code if isinstance(exc, PiBridgeError) else type(exc).__name__
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", code):
+                code = type(exc).__name__
+            # Never log provider bodies, auth headers, URLs or untrusted exception
+            # text; the sidecar supplies a bounded error code and HTTP status.
+            status = exc.details.get("httpStatus") if isinstance(exc, PiBridgeError) else None
+            status_text = f" HTTP={status}" if type(status) is int and 100 <= status <= 599 else ""
+            logger.warning(
+                f"{runtime.log_prefix} 参与判断 API={mode} 失败 code={code}{status_text}，交给主 Agent（未判为 ignore）"
+            )
+            runtime._update_stage_status("参与判断异常", f"{mode}: {code}{status_text}；原消息保留并交给主 Agent")
             return True

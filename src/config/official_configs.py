@@ -826,6 +826,45 @@ class ChatConfig(ConfigBase):
     )
     """兼容旧配置键；主线程始终使用 Pi coding-agent，不再允许切回 Python 模型编排。"""
 
+    participation_mode: Literal["decisions", "chat"] = Field(
+        default="decisions",
+        json_schema_extra={
+            "label": {
+                "zh_CN": "群聊参与判断接口",
+                "en_US": "Group participation API",
+                "ja_JP": "グループ参加判断 API",
+            }
+        },
+    )
+    """decisions 使用 OpenAI Decisions API；chat 显式保留旧 JSON 判断。失败只交给主 Agent，不自动切换接口。"""
+
+    participation_model: str = Field(
+        default="group-helper",
+        min_length=1,
+        json_schema_extra={
+            "label": {
+                "zh_CN": "群聊参与判断模型",
+                "en_US": "Participation model",
+                "ja_JP": "参加判断モデル",
+            }
+        },
+    )
+    """参与判断使用的已配置模型名称。decisions 当前要求其 model_identifier 为 gpt-6-luna，供应商支持 /decisions。"""
+
+    participation_timeout_seconds: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=120.0,
+        json_schema_extra={
+            "label": {
+                "zh_CN": "群聊参与判断超时（秒）",
+                "en_US": "Participation timeout (seconds)",
+                "ja_JP": "参加判断のタイムアウト（秒）",
+            }
+        },
+    )
+    """单次参与判断超时；Node 还受模型任务及供应商超时约束。超时不视为 ignore，不丢弃原消息。"""
+
     __ui_label__ = "聊天"
     __ui_order__ = 20
     __ui_use_subtabs__ = True

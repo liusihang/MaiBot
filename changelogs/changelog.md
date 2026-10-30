@@ -1,5 +1,16 @@
 # 更新日志
 
+# Fork 定制 - Decisions 群聊参与入口（未部署）
+
+## 主要功能
+
+- 是否参与群聊默认通过 Pi 原生 classifier 调用 OpenAI Decisions API；仅选择 engage、ignore 或 uncertain，不生成回复计划，不改变持续主线程和自主工具/回复。
+
+## 细节与修复
+
+- 独立 classifier 路由复用已有 Luna 配置和鉴权；保留显式 chat 模式，错误、拒答和超时可观察且不吞源消息、不静默回退。
+- 严格校验真实 /decisions 请求与响应，按实际缓存读写记录 token；近期说话人、引用和时间作为数据输入，跨群隔离与并发新消息保留。
+
 # Fork 定制 - 每群最近话题日总结（未部署）
 
 ## 主要功能
