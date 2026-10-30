@@ -306,11 +306,15 @@ async def _image_records(session_id: str, source_messages: Sequence[Any]) -> Lis
             result = {"success": False, "error": "image reference retrieval timed out"}
         if result.get("success") is False:
             logger.warning(f"[{session_id}] 本轮历史图片参考不可用，继续处理当前消息: {result.get('error', 'unknown')}")
-            records.append(make_reference(
-                "image:retrieval-status", content_hash,
-                "本次历史相似图片检索不可用，未取得历史图片证据；当前收到的图片和文字仍可正常理解。",
-                {"chat_id": session_id, "status": "unavailable"}, nature="retrieval_status_not_evidence",
-            ))
+            records.append(
+                make_reference(
+                    "image:retrieval-status",
+                    content_hash,
+                    "本次历史相似图片检索不可用，未取得历史图片证据；当前收到的图片和文字仍可正常理解。",
+                    {"chat_id": session_id, "status": "unavailable"},
+                    nature="retrieval_status_not_evidence",
+                )
+            )
             continue
         for hit in result.get("hits", []):
             occurrences = {

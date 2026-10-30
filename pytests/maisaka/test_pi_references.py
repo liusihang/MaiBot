@@ -256,21 +256,34 @@ def test_optional_image_recall_failure_keeps_current_chat_available(monkeypatch,
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from src.maisaka.pi_runtime import references
+
     config = SimpleNamespace(enabled=True, candidate_limit=8, similarity_threshold=0.8)
-    monkeypatch.setitem(sys.modules, "src.config.config", SimpleNamespace(global_config=SimpleNamespace(a_memorix=SimpleNamespace(image_memory=config))))
+    monkeypatch.setitem(
+        sys.modules,
+        "src.config.config",
+        SimpleNamespace(global_config=SimpleNamespace(a_memorix=SimpleNamespace(image_memory=config))),
+    )
     api = AsyncMock(return_value={"success": False, "error": "image space changed"})
     if failure == "timeout":
+
         async def slow(**kwargs):
             await asyncio.sleep(1)
+
         api.side_effect = slow
         monkeypatch.setattr(references, "IMAGE_RECALL_TIMEOUT_SECONDS", 0.01)
     elif failure == "cancelled":
         api.side_effect = asyncio.CancelledError
-    monkeypatch.setitem(sys.modules, "src.services.memory_service", SimpleNamespace(memory_service=SimpleNamespace(image_memory=api)))
-    monkeypatch.setitem(sys.modules, "src.A_memorix.core.image.component_paths", SimpleNamespace(
-        iter_message_image_components=lambda parts: [("0", SimpleNamespace(binary_hash="picture"))],
-        build_chat_external_ref=lambda **kwargs: "current-image",
-    ))
+    monkeypatch.setitem(
+        sys.modules, "src.services.memory_service", SimpleNamespace(memory_service=SimpleNamespace(image_memory=api))
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "src.A_memorix.core.image.component_paths",
+        SimpleNamespace(
+            iter_message_image_components=lambda parts: [("0", SimpleNamespace(binary_hash="picture"))],
+            build_chat_external_ref=lambda **kwargs: "current-image",
+        ),
+    )
     message = SimpleNamespace(message_id="42", raw_message=SimpleNamespace(components=[]))
     if failure == "cancelled":
         with pytest.raises(asyncio.CancelledError):

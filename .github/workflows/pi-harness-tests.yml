@@ -6,6 +6,9 @@ on:
       - "src/maisaka/pi_runtime/**"
       - "src/maisaka/builtin_tool/reply.py"
       - "src/services/pi_harness/**"
+      - "src/services/daily_topics/**"
+      - "prompts/**/daily_topics*"
+      - "pytests/services/test_daily_topic*.py"
       - "pytests/maisaka/test_pi_*.py"
       - "pytests/maisaka/test_single_agent_reply.py"
       - "pytests/services/test_pi_harness_bridge.py"
@@ -43,3 +46,6 @@ jobs:
           pytests/maisaka/test_pi_observer_integration.py
           pytests/maisaka/test_single_agent_reply.py
           pytests/services/test_pi_harness_bridge.py
+          pytests/services/test_daily_topics.py
+          pytests/services/test_daily_topic_service.py
+          pytests/maisaka/test_pi_daily_topics.py

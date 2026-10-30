@@ -206,6 +206,10 @@ class MainSystem:
         await heartflow_manager.restore_pi_work()
         await memory_automation_service.start()
 
+        from src.services.daily_topics.service import daily_topic_service
+
+        await daily_topic_service.start()
+
         from src.agent.service import agent_service
         from src.computer.service import computer_service
         from src.desktop_pet.service import desktop_pet_service
@@ -335,6 +339,9 @@ async def main() -> None:
         emoji_manager.shutdown()
         await image_manager.shutdown()
         await expression_vector_service.stop()
+        from src.services.daily_topics.service import daily_topic_service
+
+        await daily_topic_service.shutdown()
         await memory_automation_service.shutdown()
         await a_memorix_host_service.stop()
         await get_plugin_runtime_manager().bridge_event("on_stop")
