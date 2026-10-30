@@ -43,12 +43,19 @@ messages; reusing a source with changed content is an error. References have
 injected twice; newer versions append, and compacted-away details can be retrieved
 again. New time information belongs only in new tail messages.
 
-Provider/service endpoints share this sidecar: `model.generate`,
+Provider/service endpoints share this sidecar: `model.generate`, `model.decide`,
 `model.embed_text`, `model.embed_image`, `model.transcribe`, `model.generate_image`,
 `model.release`, and `model.cancel`. Native response handles are Node-owned and
 scoped. Chat generation uses an isolated official AgentSession; explicit non-chat
 capability adapters are not fake chat requests. Closing the transport cancels
 outstanding operations.
+
+`model.decide` is a participation-only facade over Pi 1.4.0's native
+`ModelRuntime.classify()` / `openai-decisions`, not structured chat output. The
+same configured Luna alias has a separate classifier registration, so memory and
+chat retain their original API. Its GA `input_json`/cache mapping, strict answer
+validation, cache-token receipt accounting, cancellation, and safe HTTP diagnostics
+are described in [Decisions participation](../../docs/decisions-participation.md).
 
 ## Business callbacks
 

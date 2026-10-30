@@ -9,7 +9,7 @@ const canonical = (value) => JSON.stringify(value, (_, v) => v && typeof v === '
 const hash = (value) => createHash('sha256').update(canonical(value)).digest('hex');
 const endpoint = (base, suffix) => `${base.replace(/\/$/, '')}/${suffix}`;
 
-function selectRoute(runtime, payload) {
+export function selectAuxiliaryRoute(runtime, payload) {
   const state = getHostRuntimeState(runtime);
   const task = state.config.model_task_config?.[payload.taskName];
   const names = payload.modelOverride ? [payload.modelOverride] : task?.model_list;
@@ -52,7 +52,7 @@ function imageProtocol(provider, pi) {
 
 export async function runAuxiliaryOperation(runtime, operation, payload, { signal } = {}) {
   signal?.throwIfAborted();
-  const selected = selectRoute(runtime, payload);
+  const selected = selectAuxiliaryRoute(runtime, payload);
   const { info, provider, task, fetchImpl } = selected;
   // Embedding dimensions, audio input and generated images do not have the
   // chat-token semantics required by this admission contract. Audit keeps the

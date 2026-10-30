@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { streamSimple } from '@earendil-works/pi-ai/compat';
+import { openAIDecisionsApi } from '@earendil-works/pi-ai/api/openai-decisions.lazy';
 import { makeImageProvider } from './image-provider.mjs';
 
 function memoryCredentials() {
@@ -216,6 +217,21 @@ export async function createHostModelRuntime(config, { fetch: fetchImpl } = {}) 
     const api = extra.pi.api ?? API[provider.client_type];
     const route = { info, provider, extra, capability, api };
     routes.set(info.name, route);
+    // Pi 1.4 has a native classifier operation. Register it separately so the
+    // same Luna alias can keep serving chat/memory without changing their API.
+    if (info.model_identifier === 'gpt-6-luna' && (info.model_type ?? 'llm') === 'llm'
+        && ['openai', 'openai_responses'].includes(provider.client_type) && !extra.pi.operation) {
+      const classifierId = `maibot:${encodeURIComponent(provider.name)}:${encodeURIComponent(info.name)}:decisions`;
+      route.classifierProviderId = classifierId;
+      runtime.registerProvider(classifierId, {
+        baseUrl: provider.base_url, authHeader: (provider.auth_type ?? 'bearer') === 'bearer',
+        models: [{ type: 'classifier', id: info.model_identifier, name: info.name, api: 'openai-decisions',
+          input: ['text'], contextWindow: capability.contextKnown ? capability.contextWindow : 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }],
+        classifiers: { 'openai-decisions': openAIDecisionsApi() },
+      });
+      await runtime.setRuntimeApiKey(classifierId, provider.api_key || 'maibot-no-auth');
+    }
     if (extra.pi.operation === 'image') {
       const imageApi = extra.pi.api ?? (provider.client_type === 'gemini' ? 'maibot-google-images' : ['openai', 'openai_responses'].includes(provider.client_type) ? 'maibot-openai-images' : undefined);
       if (!imageApi) throw error('UNSUPPORTED_IMAGE_PROVIDER', `Image API must be configured for ${info.name}`);

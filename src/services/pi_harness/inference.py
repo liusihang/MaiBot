@@ -7,8 +7,9 @@ handles; the main conversation never uses this short-operation service.
 
 from dataclasses import dataclass
 from datetime import datetime
+from math import ceil
 from time import perf_counter
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple
 
 import asyncio
 import base64
@@ -46,6 +47,18 @@ class PiInputCapabilities:
     @staticmethod
     def get_support_image_formats() -> List[str]:
         return ["jpeg", "jpg", "png", "gif", "webp"]
+
+
+@dataclass(frozen=True)
+class PiParticipationDecision:
+    """Typed classification receipt, never assistant text or a reply plan."""
+
+    decision: Literal["engage", "ignore", "uncertain"]
+    confidence: float
+    probabilities: Dict[str, float]
+    model_name: str
+    usage: Dict[str, Any]
+    provider_usage: Dict[str, Any]
 
 
 class PiInferenceClient:
@@ -171,6 +184,41 @@ class PiInferenceClient:
             raise ValueError("Unknown configured model: " + name)
         provider = next((item for item in config.api_providers if model and item.name == model.api_provider), None)
         return PiInputCapabilities(provider), model
+
+    async def decide_participation(
+        self,
+        evidence: Dict[str, Any],
+        instructions: str,
+        *,
+        model_name: Optional[str] = None,
+        session_id: str = "",
+        timeout_seconds: float = 30.0,
+    ) -> PiParticipationDecision:
+        """Send only evidence and policy to Pi's typed Decisions operation.
+
+        Node owns route validation, auth, the exact wire schema, cancellation,
+        refusal/error handling and usage. There is no Python model transport or
+        a generate-response fallback, and no native replay handle is retained.
+        """
+        payload = await self._rpc(
+            "model.decide",
+            input=evidence,
+            instructions=instructions,
+            options={"timeoutMs": ceil(timeout_seconds * 1000)},
+            modelOverride=model_name or self.model_override,
+            session_id=session_id,
+        )
+        decision = payload["decision"]
+        if decision not in {"engage", "ignore", "uncertain"}:
+            raise PiBridgeError("Pi returned an invalid participation decision", code="INVALID_DECISION_RESPONSE")
+        return PiParticipationDecision(
+            decision=decision,
+            confidence=payload["confidence"],
+            probabilities=dict(payload["probabilities"]),
+            model_name=payload["route"]["modelName"],
+            usage=dict(payload["usage"]),
+            provider_usage=dict(payload.get("providerUsage") or {}),
+        )
 
     async def release_responses(self, handles: Sequence[str], *, session_id: str = "") -> int:
         """Release caller-owned native replay handles after the last continuation."""

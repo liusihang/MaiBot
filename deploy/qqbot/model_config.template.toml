@@ -1,4 +1,4 @@
-# QQ group deployment profile, revision 1.
+# QQ group deployment profile, revision 2.
 [inner]
 version = "1.17.26"
 
@@ -28,6 +28,9 @@ X-OpenAI-Internal-Codex-Responses-Lite = "true"
 [[models]]
 model_type = "llm"
 model_identifier = "gpt-6-luna"
+# chat.participation_mode="decisions" uses this alias only for /decisions.
+# The gateway must support that endpoint; no chat fallback is performed.
+# Chat reasoning/stream options below remain for other tasks, not Decisions.
 name = "group-helper"
 api_provider = "codex-provider"
 send_temperature = false

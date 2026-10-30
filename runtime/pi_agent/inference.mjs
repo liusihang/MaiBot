@@ -14,7 +14,7 @@ import { createHostModelRuntime, resolveTaskModel } from './provider.mjs';
 const clone = (value) => structuredClone(value);
 const fail = (code, message) => Object.assign(new Error(message), { code });
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const METHODS = new Set(['model.generate', 'model.embed_text', 'model.embed_image', 'model.transcribe', 'model.generate_image']);
+const METHODS = new Set(['model.generate', 'model.decide', 'model.embed_text', 'model.embed_image', 'model.transcribe', 'model.generate_image']);
 
 function toolDefinitions(raw) {
   if (!Array.isArray(raw)) throw fail('INVALID_TOOLS', 'toolOptions must be an array');
@@ -199,6 +199,9 @@ export function createInferenceDispatcher({ createRuntime = createHostModelRunti
     }
     const runtime = await runtimeFor(params.config);
     signal.throwIfAborted();
+    if (method === 'model.decide') {
+      return (await import('./decisions.mjs')).decideParticipation(runtime, params, { signal });
+    }
     if (method !== 'model.generate') {
       const run = auxiliary ?? (await import('./auxiliary.mjs')).runAuxiliaryOperation;
       return run(runtime, method.slice('model.'.length), params, { signal });
