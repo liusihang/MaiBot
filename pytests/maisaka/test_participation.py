@@ -471,7 +471,7 @@ class DecisionsParticipationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence["new_messages"][0]["reply_to"][0]["msg_id"], "someone-else")
         ignore_policy = instructions.split("# ignore", 1)[1].split("# uncertain", 1)[0]
         self.assertIn("政治", ignore_policy)
-        self.assertIn("不替主 Agent 写立场、语气或回复方向", instructions)
+        self.assertEqual(instructions, part.load_prompt_template("participation_judge", locale="zh-CN").template)
         self.assertTrue(evidence["recent_messages"][0]["is_bot"])
 
     async def test_errors_are_observable_and_never_ignore_or_retry_chat(self):
