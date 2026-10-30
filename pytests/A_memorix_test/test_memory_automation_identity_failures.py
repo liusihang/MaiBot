@@ -48,12 +48,13 @@ async def test_identity_failure_still_enqueues_and_reports_error(automation, mon
     assert "kernel_not_ready" in str(caught.value.exceptions[0])
     assert admin.await_count == 3
     assert service.image_writeback.enqueue.await_count == (direction == "incoming")
-    assert service.fact_writeback.enqueue.await_count == (direction == "sent")
+    assert service.fact_writeback.enqueue.await_count == (direction == "incoming")
     assert service.chat_summary_writeback.enqueue.await_count == (direction == "sent")
 
 
 @pytest.mark.asyncio
-async def test_transient_identity_failure_retries_same_snapshot_without_reenqueuing(automation, monkeypatch):
+@pytest.mark.parametrize("direction", ["incoming", "sent"])
+async def test_transient_identity_failure_retries_same_snapshot_without_reenqueuing(automation, monkeypatch, direction):
     service, message = automation
     calls = []
 
@@ -65,12 +66,19 @@ async def test_transient_identity_failure_retries_same_snapshot_without_reenqueu
         return {"success": True}
 
     monkeypatch.setattr(flow.memory_service, "profile_admin", observe)
-    await service.on_message_sent(message)
+    callback = service.on_incoming_message if direction == "incoming" else service.on_message_sent
+    await callback(message)
     assert len(calls) == 2
     assert calls[0] == calls[1]
     assert calls[1]["aliases"] == ["原昵称", "群昵称"]
-    service.fact_writeback.enqueue.assert_awaited_once_with(message)
-    service.chat_summary_writeback.enqueue.assert_awaited_once_with(message)
+    assert service.image_writeback.enqueue.await_count == (direction == "incoming")
+    assert service.fact_writeback.enqueue.await_count == (direction == "incoming")
+    assert service.chat_summary_writeback.enqueue.await_count == (direction == "sent")
+    if direction == "incoming":
+        service.fact_writeback.enqueue.assert_awaited_once_with(message)
+        service.image_writeback.enqueue.assert_awaited_once_with(message)
+    else:
+        service.chat_summary_writeback.enqueue.assert_awaited_once_with(message)
 
 
 @pytest.mark.asyncio
@@ -89,16 +97,22 @@ async def test_identity_rejects_missing_real_id_without_calling_admin(automation
 
 
 @pytest.mark.asyncio
-async def test_queue_failure_does_not_prevent_other_tasks_and_stays_visible(automation, monkeypatch):
+@pytest.mark.parametrize("direction", ["incoming", "sent"])
+async def test_queue_failure_does_not_prevent_other_tasks_and_stays_visible(automation, monkeypatch, direction):
     service, message = automation
     admin = AsyncMock(return_value={"success": True})
     monkeypatch.setattr(flow.memory_service, "profile_admin", admin)
-    service.fact_writeback.enqueue.side_effect = RuntimeError("person queue failed")
+    queue = service.fact_writeback if direction == "incoming" else service.chat_summary_writeback
+    queue.enqueue.side_effect = RuntimeError("queue failed")
+    callback = service.on_incoming_message if direction == "incoming" else service.on_message_sent
     with pytest.raises(ExceptionGroup) as caught:
-        await service.on_message_sent(message)
-    assert str(caught.value.exceptions[0]) == "person queue failed"
+        await callback(message)
+    assert str(caught.value.exceptions[0]) == "queue failed"
     admin.assert_awaited_once()
-    service.chat_summary_writeback.enqueue.assert_awaited_once_with(message)
+    queue.enqueue.assert_awaited_once_with(message)
+    assert service.image_writeback.enqueue.await_count == (direction == "incoming")
+    assert service.fact_writeback.enqueue.await_count == (direction == "incoming")
+    assert service.chat_summary_writeback.enqueue.await_count == (direction == "sent")
 
 
 @pytest.mark.asyncio
