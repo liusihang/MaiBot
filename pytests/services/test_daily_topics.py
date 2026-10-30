@@ -2,7 +2,9 @@
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest import IsolatedAsyncioTestCase
+from unittest.mock import patch
 import asyncio
 import sqlite3
 import unittest
@@ -79,6 +81,10 @@ class DailyTopicTests(IsolatedAsyncioTestCase):
         renewal_seen, finish_model = asyncio.Event(), asyncio.Event()
         loop = asyncio.get_running_loop()
         real_renew = self.store.renew
+        elapsed = 0.0
+        # Keep lease time independent of SQLite fsync/thread scheduling. Only
+        # replace this module's clock; asyncio still runs its real heartbeat.
+        self.enterContext(patch("src.services.daily_topics.core.time", SimpleNamespace(monotonic=lambda: elapsed)))
 
         def record_renew(*args):
             real_renew(*args)
@@ -87,6 +93,8 @@ class DailyTopicTests(IsolatedAsyncioTestCase):
         self.store.renew = record_renew
 
         async def slow(topics, parts, info):
+            nonlocal elapsed
+            elapsed = 0.2
             await finish_model.wait()
             return await fold(topics, parts, info)
 

@@ -62,4 +62,4 @@ uv run pytest -q pytests/maisaka/test_pi_daily_topics.py
 npm --prefix runtime/pi_agent test
 ```
 
-三语提示词位于 `prompts/{zh-CN,en-US,ja-JP}/daily_topics.prompt`。不需要改主 Agent 人格、工具合同或旧压缩模板。本功能 PR 为叠加在 Pi 群线程 PR 上的 Draft；未合并、未部署、未进行付费模型调用或真实 QQ 测试。
+三语提示词位于 `prompts/{zh-CN,en-US,ja-JP}/daily_topics.prompt`。不需要改主 Agent 人格、工具合同或旧压缩模板。上述测试使用离线模型回执，不涉及付费模型调用或真实 QQ 发送；生产启用后仍需观察实际摘要质量。
