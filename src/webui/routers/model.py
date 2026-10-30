@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 import httpx
 import tomlkit
 
+from src.common.data_models.llm_service_data_models import LLMResponseResult
 from src.common.logger import get_logger
 from src.config.config import CONFIG_DIR
 from src.config.model_configs import APIProvider, TaskConfig
@@ -29,7 +30,7 @@ from src.llm_models.openai_compat import build_openai_compatible_client_config, 
 from src.llm_models.payload_content.context_item import ContextItem, ContextItemBuilder, RoleType
 from src.llm_models.payload_content.tool_option import ToolCall
 from src.llm_models.request_snapshot import format_request_snapshot_log_info
-from src.llm_models.utils_model import LLMOrchestrator, LLMResponseResult
+from src.services.pi_harness.inference import PiInferenceClient
 from src.webui.dependencies import require_auth
 from src.common.http_client import get_shared_ssl_context_async
 from src.common.network_security import validate_public_url
@@ -113,29 +114,28 @@ class ModelTestResponse(BaseModel):
     """嵌入对比相似度结果；仅嵌入测试返回。"""
 
 
-class _SingleModelTestOrchestrator(LLMOrchestrator):
-    """复用 LLM 调度器，但将 WebUI 测试请求限制到单个模型。"""
+class _SingleModelTestOrchestrator(PiInferenceClient):
+    """单模型诊断只传任务快照；推理和 provider I/O 统一由 Node Pi 执行。"""
 
     def __init__(self, model_name: str, *, replyer_test: bool = False) -> None:
-        self._model_test_task_config = TaskConfig(
-            model_list=[model_name],
-            max_tokens=512,
-            temperature=0.7,
-            selection_strategy="sequential",
-            hard_timeout=90.0,
-        )
         super().__init__(
             task_name="replyer" if replyer_test else "webui_model_test",
             request_type="webui_model_test",
+            model_override=model_name,
+            task_config_override=TaskConfig(
+                model_list=[model_name],
+                # 显式诊断请求预算，不修改用户的模型/任务配置或生产输出预算。
+                max_tokens=512,
+                temperature=0.7,
+                selection_strategy="sequential",
+                hard_timeout=90.0,
+            ),
         )
-
-    def _get_task_config_or_raise(self) -> TaskConfig:
-        return self._model_test_task_config
 
 
 @router.get("/client-types")
 def get_registered_client_types():
-    """返回当前主程序与插件已注册的 LLM Provider client_type。"""
+    """返回 provider 注册元数据；此接口不构造 Python 模型客户端或发起推理。"""
     for client_type in MODEL_FETCHER_CONFIG:
         ensure_client_type_loaded(client_type)
 
@@ -281,7 +281,7 @@ async def _fetch_models_from_provider(
     default_query: Optional[Dict[str, str]] = None,
     allow_configured_private_network: bool = False,
 ) -> List[Dict]:
-    """从提供商 API 获取模型列表。
+    """从提供商 API 获取模型列表（元数据诊断，不执行模型推理）。
 
     Args:
         base_url: 提供商的基础 URL。
@@ -812,7 +812,7 @@ async def _test_provider_connection(
     allow_configured_private_network: bool = False,
 ):
     """
-    测试提供商连接状态
+    测试提供商连接状态（仅网络/模型列表诊断，不执行模型推理）
 
     分两步测试：
     1. 网络连通性测试：向 base_url 发送请求，检查是否能连接

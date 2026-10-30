@@ -8,6 +8,7 @@ from src.common.logger import get_logger
 from src.config.model_configs import APIProvider
 from src.llm_models.generation_diagnostics import sanitize_generation_diagnostic
 from src.llm_models.exceptions import RespParseException
+from src.llm_models.request_admission import guard_unsupported_route
 from src.llm_models.model_client.base_client import (
     APIResponse,
     AudioTranscriptionRequest,
@@ -55,6 +56,7 @@ class PluginLLMClient(BaseClient):
             plugin_id: 目标插件 ID。
             client_type: 目标客户端类型。
         """
+        raise RuntimeError("Python provider transport retired; use the Node Pi harness")
         super().__init__(api_provider)
         self._supervisor = supervisor
         self._plugin_id = plugin_id
@@ -74,6 +76,7 @@ class PluginLLMClient(BaseClient):
         """
         if request.stream_response_handler is not None or request.async_response_parser is not None:
             raise RespParseException(message="插件 LLM Provider 暂不支持 Host 侧自定义流式处理器或响应解析器")
+        guard_unsupported_route(request.model_info, self.api_provider, operation="plugin_rpc")
         validate_context_items(request.context_items, ContextProtocolMode.REQUEST_CONTEXT)
         payload = serialize_response_request_snapshot(request)
         result = await self._invoke_provider("response", payload)
@@ -131,6 +134,7 @@ class PluginLLMClient(BaseClient):
         Returns:
             APIResponse: 音频转录响应。
         """
+        guard_unsupported_route(request.model_info, self.api_provider, operation="plugin_audio_transcription")
         result = await self._invoke_provider("audio_transcription", serialize_audio_request_snapshot(request))
         return self._build_api_response(result, request.model_info.name, request.model_info.api_provider)
 

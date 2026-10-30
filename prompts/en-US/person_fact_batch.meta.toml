@@ -1,0 +1,3 @@
+display_name = "Batched person facts"
+description = "Extract stable facts from new user messages, preserving real authors and source evidence."
+advanced = true

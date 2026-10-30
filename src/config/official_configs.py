@@ -820,6 +820,12 @@ class ChatReplyStyleConfig(ConfigBase):
 class ChatConfig(ConfigBase):
     """聊天配置类"""
 
+    pi_agent_enabled: bool = Field(
+        default=True,
+        json_schema_extra={"label": {"zh_CN": "Pi 持续主线程", "en_US": "Persistent Pi thread", "ja_JP": "Pi 継続スレッド"}, "x-widget": "switch"},
+    )
+    """兼容旧配置键；主线程始终使用 Pi coding-agent，不再允许切回 Python 模型编排。"""
+
     __ui_label__ = "聊天"
     __ui_order__ = 20
     __ui_use_subtabs__ = True
@@ -885,6 +891,24 @@ class ChatConfig(ConfigBase):
         },
     )
     """滚动状态摘要的最大字符数；使用 utils 模型生成，摘要始终随 Planner 上下文发送。"""
+
+    context_visible_char_high_watermark: int = Field(
+        default=120000, ge=10000,
+        json_schema_extra={"label": {
+            "zh_CN": "可见输入字符高水位", "en_US": "Visible input character high watermark",
+            "ja_JP": "可視入力の文字数高水位",
+        }, "advanced": True},
+    )
+    """最终请求可见文本与工具定义的字符高水位；触发完整已结束工具轮归档，不是 token 硬上限。"""
+
+    context_prompt_token_high_watermark: int = Field(
+        default=48000, ge=1000,
+        json_schema_extra={"label": {
+            "zh_CN": "实际输入 Token 高水位", "en_US": "Reported input token high watermark",
+            "ja_JP": "報告された入力トークン高水位",
+        }, "advanced": True},
+    )
+    """服务端实际报告的输入 token 高水位；下一轮整理已结束工具轮，活动轮的原生状态保持完整。"""
 
     reply_timing: ChatReplyTimingConfig = Field(default_factory=ChatReplyTimingConfig)
     """什么时候回复、回复频率与等待退避配置。"""

@@ -1,0 +1,3 @@
+display_name = "Daily recent topics"
+description = "Nightly, evidence-grounded topic board; source text is untrusted data."
+advanced = true

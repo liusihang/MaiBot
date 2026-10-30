@@ -200,7 +200,15 @@ class MainSystem:
         asyncio.create_task(chat_manager.regularly_save_sessions())
 
         logger.info(t("startup.chat_manager_initialized"))
+        # Routes/plugins and source sessions must exist before pending work resumes.
+        from src.chat.heart_flow.heartflow_manager import heartflow_manager
+
+        await heartflow_manager.restore_pi_work()
         await memory_automation_service.start()
+
+        from src.services.daily_topics.service import daily_topic_service
+
+        await daily_topic_service.start()
 
         from src.agent.service import agent_service
         from src.computer.service import computer_service
@@ -326,16 +334,21 @@ async def main() -> None:
         from src.plugin_runtime.integration import get_plugin_runtime_manager
         from src.services.expression_vector_service import expression_vector_service
         from src.services.memory_flow_service import memory_automation_service
+        from src.services.pi_harness.client import get_harness_client
 
         emoji_manager.shutdown()
         await image_manager.shutdown()
         await expression_vector_service.stop()
+        from src.services.daily_topics.service import daily_topic_service
+
+        await daily_topic_service.shutdown()
         await memory_automation_service.shutdown()
         await a_memorix_host_service.stop()
         await get_plugin_runtime_manager().bridge_event("on_stop")
         await get_plugin_runtime_manager().stop()
         await async_task_manager.stop_and_wait_all_tasks()
         await get_mcp_service().close()
+        await get_harness_client().close()
         await config_manager.stop_file_watcher()
         set_main_loop(None)
 

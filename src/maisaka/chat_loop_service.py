@@ -652,6 +652,9 @@ class MaisakaChatLoopService:
         self._prompt_load_lock = asyncio.Lock()
         self._llm_chat_clients: dict[str, LLMServiceClient] = {}
         self.planner_request_snapshot: PlannerRequestSnapshot | None = None
+        self.context_budget_exceeded = False
+        self.last_request_visible_chars = 0
+        self.last_reported_prompt_tokens = 0
         self.passive_replyer_override: Optional[bool] = None
 
     @property
@@ -916,19 +919,11 @@ class MaisakaChatLoopService:
             return ""
         rule = self._localized_text(
             {
-                "en-US": "- subagent(): When something needs looking up before you can answer or judge it (reading docs, searching the web, checking version or plugin information, finding images, verifying a claim, and so on), prefer handing it to a sub-agent: state clearly what to find out and grant it the tools it may need. It only hands you its conclusion. Call a tool directly only for things that take a single step.",
-                "ja-JP": "- subagent()：答えたり判断したりする前に調べものが必要なこと（ドキュメントの確認、ウェブ検索、バージョンやプラグイン情報の確認、画像探し、ある主張の検証など）は、サブエージェントに任せることを優先してください。何を調べるかを明確に書き、使えそうなツールを許可します。サブエージェントは結論だけをあなたに渡します。一手で済むことだけ、該当するツールを直接呼び出してください。",
-                "zh-CN": "- subagent()：遇到需要查资料才能回答或判断的事（查文档、搜网页、查版本或插件信息、找图、核实某个说法等），优先交给子代理：写清楚要查什么，把用得上的工具授权给它；它查完只把结论交给你。只有一步就能完成的事才直接调用对应工具。",
+                "en-US": "- subagent(task, wait): Prefer an independent child for multi-step research or complex actions; it has the same tools. Include relevant context and message IDs in the task. wait=true returns its result before continuing; wait=false returns immediately and delivers completion later. read_subagent(handle, wait=true) joins a running task. Ordinary chat and one-step work can be handled directly. Do not resend completed actions.",
+                "ja-JP": "- subagent(task, wait)：複数段階の調査や複雑な操作は独立した子 Agent に任せることを優先する。同じツールを使える。タスクに必要な文脈とメッセージ ID を含める。wait=true は結果を待ち、wait=false はすぐ戻って完了後に結果を受け取る。read_subagent(handle, wait=true) で実行中のタスクを待てる。普通の会話や一手で終わることは自分で行ってよい。実行済みの操作を繰り返さない。",
+                "zh-CN": "- subagent(task, wait)：多步查询和复杂操作优先交给独立子 Agent，它有相同的工具。任务写清必要前情和相关消息 ID。wait=true 等结果后继续；wait=false 立即返回，完成后会收到结果。read_subagent(handle, wait=true) 可以等待已派发任务。普通接话和一步操作可直接处理，已完成的动作不用重复。",
             }
         )
-        if global_config.capabilities.advanced_sub_agent:
-            rule += self._localized_text(
-                {
-                    "en-US": " The sub-agent runs in the background: after dispatching it you do not need to wait and can keep chatting; its conclusion will be sent back to you later.",
-                    "ja-JP": "サブエージェントはバックグラウンドで動作します。依頼したあとは待つ必要はなく、会話を続けてかまいません。結論は後であなたに返されます。",
-                    "zh-CN": "子代理在后台运行，派发后不用等它，可以继续聊天，结论稍后会送回给你。",
-                }
-            )
         return f"\n{rule}"
 
     def _build_current_chat_attention_tail_message(self) -> str:
@@ -1302,6 +1297,17 @@ class MaisakaChatLoopService:
             tool_definitions=all_tools,
             tool_provider_types=tool_provider_types,
         )
+        if request_kind == "planner":
+            # Measure after hooks, including tool definitions. Opaque provider state
+            # and media are intentionally not converted from bytes into fake tokens.
+            self.last_request_visible_chars = sum(section.chars for section in context_sections)
+            if self.last_request_visible_chars >= global_config.chat.context_visible_char_high_watermark:
+                self.context_budget_exceeded = True
+                logger.warning(
+                    f"Planner visible-input high watermark: chars={self.last_request_visible_chars}; "
+                    "completed tool turns will be archived at the next safe boundary. "
+                    "Active provider state is preserved; this is not a hard token limit."
+                )
 
         prompt_section: RenderableType | None = None
         prompt_html_uri: str | None = None
@@ -1335,6 +1341,10 @@ class MaisakaChatLoopService:
                 ),
             )
         if request_kind == "planner":
+            # Use the provider receipt before after_response hooks can rewrite usage.
+            self.last_reported_prompt_tokens = generation_result.prompt_tokens
+            if self.last_reported_prompt_tokens >= global_config.chat.context_prompt_token_high_watermark:
+                self.context_budget_exceeded = True
             self.planner_request_snapshot = (
                 PlannerRequestSnapshot(external_snapshot, tuple(selected_history)) if external_planner else
                 PlannerRequestSnapshot(generation_result.request_snapshot, tuple(selected_history))

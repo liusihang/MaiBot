@@ -11,7 +11,7 @@ from sqlmodel import select
 from src.chat.replyer.expression_vector_index import ExpressionVectorIndexUpsertItem, expression_vector_index
 from src.chat.utils.utils import is_bot_self
 from src.common.data_models.expression_data_model import MaiExpression
-from src.common.data_models.llm_service_data_models import LLMResponseResult
+from src.common.data_models.llm_service_data_models import LLMGenerationOptions, LLMResponseResult
 from src.common.data_models.message_component_data_model import MessageSequence, TextComponent
 from src.common.database.database import get_db_session
 from src.common.database.database_model import Expression, ModifiedBy
@@ -417,6 +417,7 @@ class ExpressionLearner:
                 return False
             generation_result = await express_learn_model.generate_response_with_context(
                 lambda _client: learning_messages,
+                options=LLMGenerationOptions(retain_replay=False),
                 session_id=learning_session_id,
             )
             self._log_learning_context_preview(

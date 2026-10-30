@@ -8,6 +8,7 @@ from openai._types import omit
 from openai.types.responses import Response, ResponseStreamEvent
 
 from src.common.logger import get_logger
+from src.llm_models.request_admission import admitted_response, reraise_admission_denial
 from src.llm_models.exceptions import (
     EmptyResponseException,
     NetworkConnectionError,
@@ -607,6 +608,10 @@ def _parse_completed_response(
 
     api_response = APIResponse(
         output_items=tuple(output_items),
+        # Only an explicit completed response proves that tool arguments are complete.
+        stop_reason=("toolUse" if any(isinstance(item, FunctionCallItem) for item in output_items) else "stop")
+        if status == "completed"
+        else "unknown",
         generation_trace=GenerationTrace(
             provider=provider_name,
             endpoint=base_url,
@@ -667,6 +672,7 @@ async def _consume_response_stream(
 class OpenAIResponsesClient(OpenaiClient):
     """使用 OpenAI Responses API 的客户端。"""
 
+    @admitted_response("openai_responses")
     async def get_response(self, request: ResponseRequest) -> APIResponse:
         """执行 Responses API 请求并返回统一响应。"""
 
@@ -778,6 +784,7 @@ class OpenAIResponsesClient(OpenaiClient):
             await asyncio.to_thread(self._attach_failure_snapshot, exc, request, snapshot_provider_request)
             raise
         except APIConnectionError as exc:
+            reraise_admission_denial()
             wrapped_error = NetworkConnectionError(str(exc))
             await asyncio.to_thread(
                 self._attach_failure_snapshot, wrapped_error, request, snapshot_provider_request, original_error=exc

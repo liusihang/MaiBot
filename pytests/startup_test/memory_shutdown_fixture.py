@@ -24,6 +24,9 @@ def install(monkeypatch) -> None:
         "src.chat.message_receive": {"__path__": []},
         "src.chat.message_receive.chat_manager": {"chat_manager": UnusedHost()},
         "src.services.llm_service": {"LLMServiceClient": UnusedHost},
+        # 嵌入入口现经 Pi；存储关停测试禁止构造其 broker，而不替换真实内核。
+        "src.services.pi_harness": {"__path__": []},
+        "src.services.pi_harness.inference": {"PiInferenceClient": forbidden},
         "src.services.message_service": {
             "get_messages_by_time_in_chat": forbidden,
             "build_readable_messages": forbidden,

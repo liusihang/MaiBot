@@ -438,6 +438,7 @@ class ReasoningReplayRequest(BaseModel):
     """推理过程重放请求。"""
 
     source_path: str | None = Field(default=None, description="原始 prompt JSON 相对路径")
+    session_id: str = Field(default="", description="已有真实聊天流 ID；仅为 Pi 辅助调用句柄作用域，不恢复主会话")
     stage: str = Field(default="", description="原始推理阶段")
     model_name: str = Field(..., min_length=1, description="要用于重放的模型名称")
     item_schema_version: int = Field(default=CONTEXT_ITEM_SCHEMA_VERSION)
@@ -2329,12 +2330,25 @@ async def replay_reasoning_prompt(request: ReasoningReplayRequest):
         raise HTTPException(status_code=400, detail="重放 Items 不能为空")
 
     tool_definitions = request.tool_definitions
-    if tool_definitions is None and request.source_path:
-        source_path = _resolve_prompt_log_path(request.source_path, {".json"})
+    session_id = request.session_id.strip()
+    if request.source_path:
+        source_path = await asyncio.to_thread(_resolve_prompt_log_path, request.source_path, {".json"})
         source_payload = await asyncio.to_thread(_load_prompt_json, source_path)
-        raw_tool_definitions = source_payload.get("tool_definitions")
-        if isinstance(raw_tool_definitions, list):
-            tool_definitions = [item for item in raw_tool_definitions if isinstance(item, dict)]
+        metadata = source_payload.get("metadata", {})
+        source_session_id = str(metadata.get("session_id") or "").strip() if isinstance(metadata, dict) else ""
+        if session_id and source_session_id and session_id != source_session_id:
+            raise HTTPException(status_code=400, detail="重放聊天流与原始记录作用域不一致")
+        session_id = session_id or source_session_id
+        if tool_definitions is None:
+            raw_tool_definitions = source_payload.get("tool_definitions")
+            if isinstance(raw_tool_definitions, list):
+                tool_definitions = [item for item in raw_tool_definitions if isinstance(item, dict)]
+    if session_id:
+        def session_exists() -> bool:
+            return _get_chat_manager().get_existing_session_by_session_id(session_id) is not None
+
+        if not await asyncio.to_thread(session_exists):
+            raise HTTPException(status_code=404, detail="重放所指定的真实聊天流不存在")
     if tool_definitions is None:
         tool_definitions = []
 
@@ -2353,6 +2367,7 @@ async def replay_reasoning_prompt(request: ReasoningReplayRequest):
         LLMServiceRequest(
             task_name=task_name,
             request_type=f"webui.reasoning_replay.{request.stage or 'unknown'}",
+            session_id=session_id,
             context_factory=lambda _: replay_items,
             model_name=model_name,
             tool_options=tool_definitions,

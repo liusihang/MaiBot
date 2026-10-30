@@ -454,6 +454,40 @@ def _extract_finish_reason(response: GenerateContentResponse | None) -> str | No
     return None
 
 
+def _candidate_stop_reason(candidate: Any) -> str:
+    """规范化单个候选的真实停止信号；未返回信号不意味着已完成。"""
+    raw_reason = getattr(candidate, "finish_reason", None) or getattr(candidate, "finishReason", None)
+    reason = str(raw_reason or "").rsplit(".", 1)[-1].upper()
+    if reason in {"MAX_TOKENS", "CONTINUATION"}:
+        return "length"
+    known_failures = {
+        "SAFETY", "RECITATION", "LANGUAGE", "OTHER", "BLOCKLIST", "PROHIBITED_CONTENT",
+        "SPII", "MALFORMED_FUNCTION_CALL", "IMAGE_SAFETY", "UNEXPECTED_TOOL_CALL", "TOO_MANY_TOOL_CALLS",
+        "IMAGE_PROHIBITED_CONTENT", "NO_IMAGE", "IMAGE_RECITATION", "IMAGE_OTHER",
+    }
+    if reason in known_failures:
+        return "error"
+    return "stop" if reason == "STOP" else "unknown"
+
+
+def _combine_stop_reasons(reasons: List[str], *, has_tool_calls: bool) -> str:
+    """本适配器收集所有候选内容，因此所有候选均完成才可执行其工具。"""
+    if "length" in reasons:
+        return "length"
+    if "error" in reasons:
+        return "error"
+    if reasons and all(reason == "stop" for reason in reasons):
+        return "toolUse" if has_tool_calls else "stop"
+    return "unknown"
+
+
+def _normalize_stop_reason(response: GenerateContentResponse | None, *, has_tool_calls: bool) -> str:
+    """只根据真实 candidate 结束信号确认完整；截断优先于可解析工具参数。"""
+    candidates = _get_candidates(response) if response is not None else []
+    return _combine_stop_reasons([_candidate_stop_reason(candidate) for candidate in candidates],
+                                 has_tool_calls=has_tool_calls)
+
+
 def _warn_if_max_tokens_truncated(
     response: GenerateContentResponse | None,
     content: str | None,
@@ -573,6 +607,7 @@ def _build_stream_api_response(
     tool_calls_buffer: List[ToolCall],
     last_response: GenerateContentResponse | None,
     logical_turn_id: str,
+    stop_reason: str | None = None,
 ) -> APIResponse:
     """根据流式缓冲区内容构建统一响应对象。
 
@@ -606,6 +641,10 @@ def _build_stream_api_response(
         for tool_call in tool_calls_buffer
     ]
     return APIResponse(
+        stop_reason=(
+            _normalize_stop_reason(last_response, has_tool_calls=bool(tool_calls_buffer))
+            if stop_reason is None else "toolUse" if stop_reason == "stop" and tool_calls_buffer else stop_reason
+        ),
         output_items=build_portable_output_items(
             content=content,
             reasoning=reasoning_content,
@@ -636,6 +675,8 @@ async def _default_stream_response_handler(
     tool_calls_buffer: List[ToolCall] = []
     usage_record: Optional[UsageTuple] = None
     last_response: GenerateContentResponse | None = None
+    candidate_stop_reasons: Dict[int, str] = {}
+    ambiguous_candidates = False
 
     try:
         async for chunk in response_stream:
@@ -643,7 +684,23 @@ async def _default_stream_response_handler(
             if interrupt_flag and interrupt_flag.is_set():
                 raise ReqAbortException("请求被外部信号中断")
             _process_stream_chunk(chunk, content_buffer, reasoning_buffer, tool_calls_buffer)
+            # Some gateways emit a usage-only chunk after the terminal candidate. Do not
+            # replace the observed terminal signal with that chunk's missing finish reason.
+            candidates = _get_candidates(chunk)
+            for index, candidate in enumerate(candidates):
+                candidate_index = getattr(candidate, "index", None)
+                if candidate_index is None:
+                    ambiguous_candidates = ambiguous_candidates or len(candidates) > 1
+                    candidate_index = index
+                previous = candidate_stop_reasons.get(candidate_index, "unknown")
+                current = _candidate_stop_reason(candidate)
+                # A later chunk cannot rehabilitate an already truncated/failed candidate.
+                candidate_stop_reasons[candidate_index] = previous if previous in {"length", "error"} else current
             usage_record = _extract_usage_record(chunk) or usage_record
+        stop_reasons = list(candidate_stop_reasons.values())
+        if ambiguous_candidates:
+            stop_reasons.append("unknown")
+        stop_reason = _combine_stop_reasons(stop_reasons, has_tool_calls=False)
         return (
             _build_stream_api_response(
                 content_buffer,
@@ -651,6 +708,7 @@ async def _default_stream_response_handler(
                 tool_calls_buffer,
                 last_response,
                 logical_turn_id,
+                stop_reason,
             ),
             usage_record,
         )
@@ -712,6 +770,7 @@ def _default_normal_response_parser(
     ]
     return (
         APIResponse(
+            stop_reason=_normalize_stop_reason(response, has_tool_calls=bool(tool_calls)),
             output_items=build_portable_output_items(
                 content=content,
                 reasoning=reasoning_content,
@@ -802,6 +861,7 @@ class GeminiClient(AdapterClient[AsyncIterator[GenerateContentResponse], Generat
         Args:
             api_provider: API 提供商配置。
         """
+        raise RuntimeError("Python provider transport retired; use the Node Pi harness")
         super().__init__(api_provider)
         self.client = genai.Client(
             api_key=api_provider.api_key,

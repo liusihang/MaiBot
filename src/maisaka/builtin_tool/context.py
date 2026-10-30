@@ -29,9 +29,9 @@ from src.common.logger import get_logger
 from src.config.config import global_config
 from src.core.tooling import ToolExecutionResult
 from src.core.local_operator import MAISAKA_CLI_BOT_ID
-from src.maisaka.context.emoji_candidates import EmojiCandidateMessage
 from src.maisaka.context.image_attachment import resolve_context_image
 from src.maisaka.context.message_id_alias import to_display_message_id
+from src.maisaka.emoji_store import EmojiCandidateStore
 from src.plugin_runtime.integration import get_plugin_runtime_manager
 
 if TYPE_CHECKING:
@@ -56,9 +56,12 @@ class BuiltinToolRuntimeContext:
         self,
         engine: "MaisakaReasoningEngine",
         runtime: "MaisakaHeartFlowChatting",
+        *,
+        emoji_store: Optional[EmojiCandidateStore] = None,
     ) -> None:
         self.engine = engine
         self.runtime = runtime
+        self._emoji_store = emoji_store if emoji_store is not None else EmojiCandidateStore()
 
     @staticmethod
     def build_success_result(
@@ -318,21 +321,20 @@ class BuiltinToolRuntimeContext:
 
         return await resolve_context_image(self.runtime, target_message_id, image_index)
 
+    async def allocate_emoji_candidates(self, emoji_hashes: Sequence[str]) -> Dict[int, str]:
+        """持久化当前真实会话的编号映射；两个事件循环均不执行同步 SQLite I/O。"""
+        return await asyncio.to_thread(self._emoji_store.allocate, self.runtime.session_id, list(emoji_hashes))
+
     async def _resolve_emoji_attachment(self, raw_index: Any) -> EmojiComponent:
-        """把 attach_emoji 参数解析为表情包组件。"""
+        """把 attach_emoji 参数按持久化的会话资源映射解析为表情包组件。"""
 
         if type(raw_index) is not int or raw_index < 1:
             raise ValueError("attach_emoji 必须填写 show_emoji_list 拼图中的正整数序号。")
-        emoji_hash = next(
-            (
-                message.emoji_hashes[raw_index]
-                for message in self.runtime._chat_history
-                if isinstance(message, EmojiCandidateMessage) and raw_index in message.emoji_hashes
-            ),
-            None,
-        )
+        emoji_hash = await asyncio.to_thread(self._emoji_store.resolve, self.runtime.session_id, raw_index)
         if emoji_hash is None:
-            raise ValueError(f"表情包序号 {raw_index} 不在当前历史中，请先调用 show_emoji_list。")
+            raise ValueError(
+                f"表情包序号 {raw_index} 在当前会话中没有持久映射（旧进程编号不可恢复），请重新调用 show_emoji_list。"
+            )
         return await self.load_emoji_attachment(emoji_hash)
 
     @staticmethod

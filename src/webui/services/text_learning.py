@@ -154,7 +154,9 @@ async def extract_text_candidates(text: str, kind: LearningKind) -> List[Learned
     # 输出预算交由模型/任务配置决定；推理模型的思考也占用该预算，不能在此写死截断上限。
     result = await client.generate_response_with_context(
         lambda _client: messages,
-        options=LLMGenerationOptions(response_format=RespFormat(format_type=RespFormatType.JSON_OBJ)),
+        options=LLMGenerationOptions(
+            response_format=RespFormat(format_type=RespFormatType.JSON_OBJ), retain_replay=False,
+        ),
     )
     if not result.response.strip():
         logger.warning(

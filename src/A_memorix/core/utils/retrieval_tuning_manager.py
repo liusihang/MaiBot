@@ -1634,37 +1634,22 @@ class RetrievalTuningManager:
         if resolved_model is None:
             raise RuntimeError("no_llm_model")
 
-        retry = self._llm_retry_cfg()
-        max_attempts = int(retry["max_attempts"])
-        min_wait = float(retry["min_wait_seconds"])
-        max_wait = float(retry["max_wait_seconds"])
-        backoff = float(retry["backoff_multiplier"])
-
-        last_error: Optional[Exception] = None
-        for idx in range(max_attempts):
-            try:
-                result = await generate_with_resolved_model(
-                    resolved_model,
-                    request_type=request_type,
-                    prompt=prompt,
-                    temperature=getattr(resolved_model.task_config, "temperature", None),
-                    max_tokens=getattr(resolved_model.task_config, "max_tokens", None),
-                )
-                success = bool(result.success)
-                response = str(result.completion.response or "")
-                if not success:
-                    raise RuntimeError("llm_generation_failed")
-                text = str(response or "").strip()
-                if text:
-                    return text
-                raise RuntimeError("empty_llm_response")
-            except Exception as e:
-                last_error = e
-                if idx >= max_attempts - 1:
-                    break
-                delay = min(max_wait, min_wait * (backoff**idx))
-                await asyncio.sleep(max(0.05, delay))
-        raise RuntimeError(f"LLM call failed: {last_error}")
+        # Temporary MaiBot Pi integration: provider errors, admission refusal,
+        # and empty output must not replay the same request behind the harness.
+        # Keep model execution/lifecycle in Pi; this layer only validates text.
+        result = await generate_with_resolved_model(
+            resolved_model,
+            request_type=request_type,
+            prompt=prompt,
+            temperature=resolved_model.task_config.temperature,
+            max_tokens=resolved_model.task_config.max_tokens,
+        )
+        if not result.success:
+            raise RuntimeError(result.error or "llm_generation_failed")
+        text = str(result.completion.response or "").strip()
+        if not text:
+            raise RuntimeError("empty_llm_response")
+        return text
 
     async def _generate_nl_queries_with_llm(self, anchors: List[Dict[str, Any]], *, enabled: bool) -> Dict[str, str]:
         if not enabled or llm_api is None or not anchors:

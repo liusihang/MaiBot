@@ -52,6 +52,9 @@ class DirectReplyTests(unittest.IsolatedAsyncioTestCase):
 
         self.send = AsyncMock(side_effect=send)
         self.patches = [
+            patch.object(reply, "find_messages", return_value=[]),
+            # Assert direct-body identity without the independently configured random typo effect.
+            patch.object(reply.config_module.global_config.chinese_typo, "enable", False),
             patch.object(reply.send_service, "_send_to_target_with_message", self.send),
             patch.object(
                 reply.replyer_manager, "get_replyer", side_effect=AssertionError("Replyer generation forbidden")
@@ -81,6 +84,22 @@ class DirectReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.sent[0]["set_reply"])
         self.assertIs(self.sent[0]["reply_message"], self.target)
         self.assertTrue(self.sent[0]["sync_to_maisaka_history"])
+
+    async def test_reply_resolves_a_persisted_target_outside_the_runtime_mirror(self):
+        self.runtime.find_source_message_by_id = lambda key: None
+        reply.find_messages.return_value = [self.target]
+        result = await self.invoke(text="保留的旧消息也能回复。")
+        self.assertTrue(result.success, result.error_message)
+        reply.find_messages.assert_called_once_with(
+            session_id="single-agent-acceptance", message_id="test-target", limit=1
+        )
+        self.assertIs(self.sent[0]["reply_message"], self.target)
+
+    async def test_invalid_target_is_a_known_pre_dispatch_failure(self):
+        result = await self.invoke(msg_id="not-in-this-chat")
+        self.assertFalse(result.success)
+        self.assertEqual(result.metadata["execution_outcome"], "not_executed")
+        self.assertFalse(self.sent)
 
     async def test_schema_and_options(self):
         schema = reply.get_tool_spec().parameters_schema

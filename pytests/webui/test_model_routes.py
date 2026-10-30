@@ -39,7 +39,10 @@ def load_model_routes(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "src.webui.dependencies", dependencies_module)
 
     sys.modules.pop("src.webui.routers.model", None)
-    return importlib.import_module("src.webui.routers.model")
+    module = importlib.import_module("src.webui.routers.model")
+    # These tests exercise auth/routing, not DNS policy. Keep all transport fixtures offline.
+    monkeypatch.setattr(module, "validate_public_url", lambda url, **kwargs: url)
+    return module
 
 
 @pytest.mark.asyncio
@@ -294,6 +297,7 @@ async def test_test_model_capability_requires_tool_call_and_keeps_visual_flag(
         """
 [[models]]
 name = "vision-model"
+model_type = "llm"
 model_identifier = "vision-model-id"
 api_provider = "Fake"
 visual = true
@@ -350,6 +354,7 @@ async def test_test_model_capability_tests_embedding_task_model_via_embedding(
         """
 [[models]]
 name = "embed-model"
+model_type = "embedding"
 model_identifier = "embed-model-id"
 api_provider = "Fake"
 
@@ -400,11 +405,11 @@ async def test_test_model_capability_tests_visual_embedding_via_images(
     model_identifier: str,
     image_task_config: str,
 ) -> None:
-    """模型标识或图片嵌入任务应让模型测试发送图片，而非走对话或文本嵌入。"""
+    """显式图片嵌入类型应发送图片，不按标识或任务名猜测协议。"""
     model_routes = load_model_routes(monkeypatch)
     (tmp_path / "model_config.toml").write_text(
         f'[[models]]\nname = "my-vector"\nmodel_identifier = "{model_identifier}"\n'
-        f'api_provider = "Fake"\n\n{image_task_config}',
+        f'api_provider = "Fake"\nmodel_type = "image_embedding"\n\n{image_task_config}',
         encoding="utf-8",
     )
     monkeypatch.setattr(model_routes, "CONFIG_DIR", str(tmp_path))
@@ -449,6 +454,7 @@ async def test_test_model_capability_keeps_chat_test_for_non_embedding_model(
         """
 [[models]]
 name = "chat-model"
+model_type = "llm"
 model_identifier = "chat-model-id"
 api_provider = "Fake"
 
@@ -514,3 +520,124 @@ def test_model_test_image_base64_is_valid_png(monkeypatch: pytest.MonkeyPatch) -
     assert chunk_types[0] == b"IHDR"
     assert b"IDAT" in chunk_types
     assert chunk_types[-1] == b"IEND"
+
+
+@pytest.fixture
+def diagnostic_pi_rpc(monkeypatch):
+    """Only fake the IPC boundary, leaving the real facade and route entry intact."""
+    import aiohttp
+    import openai
+
+    from src.config.model_configs import APIProvider, ModelInfo, ModelTaskConfig, TaskConfig
+    from src.llm_models.utils_model import LLMOrchestrator
+    from src.services.pi_harness import config as pi_config
+    from src.services.pi_harness import inference
+
+    module = load_model_routes(monkeypatch)
+    provider = APIProvider(name="fixture", base_url="https://model.invalid/v1", api_key="not-a-credential")
+    model = ModelInfo(
+        name="selected", model_identifier="chat-fixture", api_provider=provider.name, model_type="llm",
+        extra_params={"reasoning_effort": "high"},
+    )
+    task = TaskConfig(model_list=["selected"], max_tokens=25600)
+    config = SimpleNamespace(models=[model], api_providers=[provider], model_task_config=ModelTaskConfig(replyer=task))
+    manager = SimpleNamespace(get_model_config=lambda: config)
+    monkeypatch.setattr(pi_config, "config_manager", manager)
+    monkeypatch.setattr(inference, "config_manager", manager)
+    monkeypatch.setattr(module, "_get_model_config", lambda name: model.model_dump(mode="json"))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Diagnostic inference may not call Python network/legacy clients")
+
+    for name in ("get_client_class_instance", "get_client_class_instance_async"):
+        monkeypatch.setattr(module.client_registry, name, forbidden)
+    monkeypatch.setattr(LLMOrchestrator, "generate_response_with_context_async", forbidden)
+    monkeypatch.setattr(LLMOrchestrator, "get_embedding", forbidden)
+    monkeypatch.setattr(LLMOrchestrator, "get_image_embedding", forbidden)
+    monkeypatch.setattr(module.httpx, "AsyncClient", forbidden)
+    monkeypatch.setattr(module.httpx, "Client", forbidden)
+    monkeypatch.setattr(openai, "AsyncOpenAI", forbidden)
+    monkeypatch.setattr(openai, "OpenAI", forbidden)
+    monkeypatch.setattr(aiohttp, "ClientSession", forbidden)
+    calls = []
+    failure = []
+
+    async def request(method, **payload):
+        calls.append((method, payload))
+        if failure:
+            raise failure[0]
+        route = {"modelName": model.name, "modelIdentifier": model.model_identifier, "apiProvider": provider.name}
+        if method in {"model.embed_text", "model.embed_image"}:
+            return {"route": route, "embedding": [0.1, 0.2, 0.3], "requestProtocolHash": "node-protocol-hash"}
+        assert method == "model.generate"
+        content = (
+            [{"type": "text", "text": "周末出去走走吧"}]
+            if payload["taskName"] == "replyer"
+            else [{"type": "toolCall", "id": "diagnostic-call", "name": module.MODEL_TEST_TOOL_NAME,
+                   "arguments": {"status": "ok", "echo": "maibot model test", "saw_image": model.visual}}]
+        )
+        return {
+            "route": route, "message": {"content": content, "stopReason": "toolUse" if content[0]["type"] == "toolCall" else "stop"},
+            "responseHandle": "node-diagnostic-handle",
+        }
+
+    monkeypatch.setattr(inference, "get_harness_client", lambda: SimpleNamespace(request=request))
+    return SimpleNamespace(module=module, config=config, model=model, calls=calls, failure=failure)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, visual, expected_method, expected_count", [
+    ("chat", False, "model.generate", 1),
+    ("chat", True, "model.generate", 1),
+    ("replyer", False, "model.generate", 1),
+    ("embedding", False, "model.embed_text", 3),
+    ("image_embedding", False, "model.embed_image", 3),
+])
+async def test_actual_diagnostic_entry_uses_pi_facade_only(diagnostic_pi_rpc, kind, visual, expected_method, expected_count):
+    fixture = diagnostic_pi_rpc
+    fixture.model.model_type = "llm" if kind in {"chat", "replyer"} else kind
+    fixture.model.model_identifier = "mai_replier_test" if kind == "replyer" else "fixture-model-id"
+    fixture.model.visual = visual
+
+    result = await fixture.module.test_model_capability(fixture.module.ModelTestRequest(model_name="selected"))
+
+    assert result.success is True, result.error
+    assert len(fixture.calls) == expected_count
+    for method, payload in fixture.calls:
+        assert method == expected_method
+        assert payload["modelOverride"] == "selected"
+        assert payload["requestType"] == "webui_model_test"
+        task_name = "replyer" if kind == "replyer" else "webui_model_test"
+        assert payload["taskName"] == task_name
+        expected_task = {
+            "model_list": ["selected"], "max_tokens": 512, "temperature": 0.7,
+            "selection_strategy": "sequential", "hard_timeout": 90.0,
+        }
+        actual_task = payload["config"]["model_task_config"][task_name]
+        assert {key: actual_task[key] for key in expected_task} == expected_task
+    assert fixture.config.model_task_config.replyer.max_tokens == 25600
+    assert fixture.model.extra_params["reasoning_effort"] == "high"
+    if kind == "chat":
+        payload = fixture.calls[0][1]
+        assert payload["options"]["maxTokens"] == 512
+        assert payload["options"]["toolOptions"][0]["name"] == fixture.module.MODEL_TEST_TOOL_NAME
+        content = payload["messages"][0]["content"]
+        assert any(part["type"] == "image" for part in content) is visual
+    elif kind == "image_embedding":
+        images = [base64.b64decode(payload["input"]["data"]) for _, payload in fixture.calls]
+        assert images[0] == images[1] and images[0] != images[2]
+        assert fixture.calls[0][1]["input"]["preprocessVersion"] == "webui_model_test_v1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["llm", "embedding", "image_embedding"])
+async def test_diagnostic_rpc_failure_is_exposed_without_python_fallback(diagnostic_pi_rpc, kind):
+    fixture = diagnostic_pi_rpc
+    fixture.model.model_type = kind
+    fixture.failure.append(RuntimeError("unsupported Pi adapter"))
+
+    result = await fixture.module.test_model_capability(fixture.module.ModelTestRequest(model_name="selected"))
+
+    assert result.success is False
+    assert "unsupported Pi adapter" in result.error
+    assert len(fixture.calls) == 1

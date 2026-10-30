@@ -149,26 +149,20 @@ async def generate_with_resolved_model(
                 task_name=model.task_name,
                 request_type=request_type,
                 prompt=prompt,
+                retain_replay=False,
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
         )
 
-    client = llm_api.LLMServiceClient(task_name=model.task_name, request_type=request_type)
-    client._orchestrator.model_for_task = model.task_config
-    client._orchestrator.model_usage = {model.selected_model_name: (0, 0, 0)}
-
-    def _refresh_single_model_task() -> Any:
-        client._orchestrator.model_for_task = model.task_config
-        client._orchestrator.model_usage = {
-            model.selected_model_name: client._orchestrator.model_usage.get(
-                model.selected_model_name,
-                (0, 0, 0),
-            )
-        }
-        return model.task_config
-
-    client._orchestrator._refresh_task_config = _refresh_single_model_task
+    # MaiBot 临时兼容补丁；上游归属 A-Dawn/A_memorix 的 MaiBot_branch。
+    # 仅传业务侧任务快照和显式模型选择，生命周期与原生历史由 Pi 持有。
+    client = llm_api.LLMServiceClient(
+        task_name=model.task_name,
+        request_type=request_type,
+        task_config_override=model.task_config,
+        model_override=model.selected_model_name,
+    )
     try:
         completion = await client.generate_response(
             prompt=prompt,

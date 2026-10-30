@@ -15,15 +15,12 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-import aiohttp
 import numpy as np
-import openai
 
 from src.common.logger import get_logger
 from src.config.config import config_manager
 from src.config.model_configs import APIProvider, ModelInfo
-from src.llm_models.exceptions import NetworkConnectionError
-from src.llm_models.model_client.base_client import EmbeddingRequest, client_registry
+from src.services.pi_harness.inference import PiInferenceClient
 
 logger = get_logger("A_Memorix.EmbeddingAPIAdapter")
 
@@ -211,6 +208,12 @@ class EmbeddingAPIAdapter:
         sanitized = dict(extra_params or {})
         sanitized.pop("dimensions", None)
         sanitized.pop("output_dimensionality", None)
+        # Pi accepts a nested body envelope as well as legacy flat body fields.
+        if isinstance(sanitized.get("body"), dict):
+            body = dict(sanitized["body"])
+            body.pop("dimensions", None)
+            body.pop("output_dimensionality", None)
+            sanitized["body"] = body
         return sanitized
 
     def _build_request_extra_params(
@@ -228,7 +231,7 @@ class EmbeddingAPIAdapter:
         client_type = str(getattr(api_provider, "client_type", "") or "").strip().lower()
         if client_type in {"gemini", "google"}:
             extra_params["output_dimensionality"] = int(requested_dimension)
-        elif client_type == "openai":
+        elif client_type in {"openai", "openai_responses"}:
             extra_params["dimensions"] = int(requested_dimension)
         return extra_params
 
@@ -243,46 +246,6 @@ class EmbeddingAPIAdapter:
             raise RuntimeError(f"{source} 返回了非有限 embedding 值")
         return array
 
-    async def _request_with_retry(self, client, model_info, text: str, extra_params: dict):
-        retriable_exceptions = (
-            openai.APIConnectionError,
-            openai.APITimeoutError,
-            aiohttp.ClientError,
-            asyncio.TimeoutError,
-            NetworkConnectionError,
-        )
-
-        last_exc: Optional[BaseException] = None
-        for attempt in range(1, self.max_attempts + 1):
-            try:
-                return await client.get_embedding(
-                    EmbeddingRequest(
-                        model_info=model_info,
-                        embedding_input=text,
-                        extra_params=extra_params,
-                    )
-                )
-            except retriable_exceptions as exc:
-                last_exc = exc
-                if attempt >= self.max_attempts:
-                    raise
-                wait_seconds = min(
-                    self.max_wait_seconds,
-                    self.min_wait_seconds * (self.backoff_multiplier ** (attempt - 1)),
-                )
-                logger.warning(
-                    "Embedding 请求失败，重试 "
-                    f"{attempt}/{max(1, self.max_attempts - 1)}，"
-                    f"{wait_seconds:.1f}s 后重试: {exc}"
-                )
-                await asyncio.sleep(wait_seconds)
-            except Exception:
-                raise
-
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("Embedding 请求失败：未知错误")
-
     async def _get_embedding_direct(
         self,
         text: str,
@@ -296,50 +259,36 @@ class EmbeddingAPIAdapter:
 
         # 在发起请求前解析完整配置，配置错误不能吞掉已经成功的模型响应。
         self._dimension_cache_key()
-
-        last_exc: Optional[BaseException] = None
-        for candidate_name in candidate_names:
-            try:
-                model_info = self._find_model_info(candidate_name)
-                api_provider = self._find_provider(model_info.api_provider)
-                client = client_registry.get_client_class_instance(api_provider)
-
-                should_include_dimension = self._should_include_dimension(dimensions, include_dimension)
-                requested_dimension = (
-                    self._resolve_canonical_dimension(dimensions) if should_include_dimension else None
-                )
-                extra_params = self._build_request_extra_params(
-                    api_provider=api_provider,
-                    base_extra_params=dict(getattr(model_info, "extra_params", {}) or {}),
-                    requested_dimension=requested_dimension,
-                    include_dimension=should_include_dimension,
-                )
-
-                response = await self._request_with_retry(
-                    client=client,
-                    model_info=model_info,
-                    text=text,
-                    extra_params=extra_params,
-                )
-                embedding = getattr(response, "embedding", None)
-                if embedding is None:
-                    raise RuntimeError(f"模型 {candidate_name} 未返回 embedding")
-                vector = self._validate_embedding_vector(
-                    embedding,
-                    source=f"embedding 模型 {candidate_name}",
-                )
-                self._last_success_model_name = str(candidate_name or "").strip()
-                self._last_success_primary_model_name = candidate_names[0]
-                self._last_success_provider_name = str(model_info.api_provider or "").strip()
-                self._last_success_dimension = int(vector.size)
-                return vector.tolist()
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(f"embedding 模型 {candidate_name} 请求失败: {exc}")
-
-        if last_exc is not None:
-            logger.error(f"通过直接 Client 获取 Embedding 失败: {last_exc}")
-        return None
+        # MaiBot 临时兼容补丁：模型 I/O 与重试归 Pi；不得在 Python 静默换向量空间。
+        # 上游归属 A-Dawn/A_memorix 的 MaiBot_branch，后续应同步同等宿主接入变更。
+        model_name = candidate_names[0]
+        model_info = self._find_model_info(model_name)
+        api_provider = self._find_provider(model_info.api_provider)
+        should_include_dimension = self._should_include_dimension(dimensions, include_dimension)
+        requested_dimension = self._resolve_canonical_dimension(dimensions) if should_include_dimension else None
+        extra_params = self._build_request_extra_params(
+            api_provider=api_provider,
+            base_extra_params=dict(model_info.extra_params),
+            requested_dimension=requested_dimension,
+            include_dimension=should_include_dimension,
+        )
+        response = await PiInferenceClient(
+            task_name="embedding", request_type="a_memorix.embedding",
+        ).get_embedding(
+            text, model_name=model_name, extra_params=extra_params, extra_params_replace=True,
+        )
+        if response.model_name != model_name or response.api_provider != model_info.api_provider:
+            raise RuntimeError("Pi embedding 返回了与显式请求不一致的模型身份")
+        vector = self._validate_embedding_vector(response.embedding, source=f"embedding 模型 {model_name}")
+        if requested_dimension is not None and int(vector.size) != requested_dimension:
+            raise RuntimeError(
+                f"embedding 请求维度 {requested_dimension} 与返回维度 {vector.size} 不一致，拒绝切换向量空间"
+            )
+        self._last_success_model_name = model_name
+        self._last_success_primary_model_name = model_name
+        self._last_success_provider_name = model_info.api_provider
+        self._last_success_dimension = int(vector.size)
+        return vector.tolist()
 
     def get_embedding_configuration_key(self) -> str:
         """复用向量库指纹规则；首选模型变化立即生效，备用顺序不改变当前身份。"""
@@ -398,52 +347,24 @@ class EmbeddingAPIAdapter:
             return self._dimension
 
         logger.info("检测嵌入维度...")
-        if self.dimension_request_mode == "always":
-            try:
-                target_dim = self.default_dimension
-                logger.debug(f"尝试请求指定维度: {target_dim}")
-                test_embedding = await self._get_embedding_direct("test", dimensions=target_dim)
-                if test_embedding and isinstance(test_embedding, list):
-                    detected_dim = len(test_embedding)
-                    if detected_dim == target_dim:
-                        logger.info(f"嵌入维度: {detected_dim}")
-                    else:
-                        logger.warning(
-                            f"requested_dimension={target_dim} 但模型返回 detected_dimension={detected_dim}，将使用真实输出维度"
-                        )
-                    self._dimension = detected_dim
-                    self._dimension_detected = True
-                    # 模型身份和维度来自同一次探测，不能被后续普通编码拆开覆盖。
-                    self._GLOBAL_DIMENSION_CACHE[cache_key] = (
-                        int(detected_dim),
-                        self._last_success_model_name,
-                        self._last_success_provider_name,
-                    )
-                    return detected_dim
-            except Exception as exc:
-                logger.debug(f"带维度参数探测失败: {exc}，尝试不带维度参数探测")
-
-        try:
-            test_embedding = await self._get_embedding_direct("test", include_dimension=False)
-            if test_embedding and isinstance(test_embedding, list):
-                detected_dim = len(test_embedding)
-                self._dimension = detected_dim
-                self._dimension_detected = True
-                self._GLOBAL_DIMENSION_CACHE[cache_key] = (
-                    int(detected_dim),
-                    self._last_success_model_name,
-                    self._last_success_provider_name,
-                )
-                logger.info(f"嵌入维度: {detected_dim} (自然输出)")
-                return detected_dim
-            logger.warning(f"嵌入维度检测失败，使用 configured_dimension: {self.default_dimension}")
-        except Exception as exc:
-            logger.error(f"嵌入维度检测异常: {exc}，使用 configured_dimension: {self.default_dimension}")
-
-        self._dimension = self.default_dimension
+        # 显式维度必须保持；失败不能改为自然维度重试或缓存未经观测的配置值。
+        target_dim = self.default_dimension if self.dimension_request_mode == "always" else None
+        test_embedding = await self._get_embedding_direct(
+            "test", dimensions=target_dim, include_dimension=target_dim is not None,
+        )
+        if not test_embedding or not isinstance(test_embedding, list):
+            raise RuntimeError("嵌入维度检测失败：Pi 未返回有效向量")
+        detected_dim = len(test_embedding)
+        self._dimension = detected_dim
         self._dimension_detected = True
-        self._GLOBAL_DIMENSION_CACHE[cache_key] = (int(self.default_dimension), "", "")
-        return self.default_dimension
+        # 模型身份和维度来自同一次探测，不能被后续普通编码拆开覆盖。
+        self._GLOBAL_DIMENSION_CACHE[cache_key] = (
+            int(detected_dim),
+            self._last_success_model_name,
+            self._last_success_provider_name,
+        )
+        logger.info(f"嵌入维度: {detected_dim}")
+        return detected_dim
 
     async def encode(
         self,

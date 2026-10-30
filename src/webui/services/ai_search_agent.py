@@ -14,14 +14,12 @@ from src.llm_models.payload_content.context_item import (
     ContextItem,
     ContextItemBuilder,
     ContextItemMeta,
-    ContextToolCall,
     FunctionCallItem,
     FunctionCallOutputItem,
-    replace_output_projection,
 )
 from src.llm_models.payload_content.resp_format import RespFormat, RespFormatType
 from src.llm_models.payload_content.tool_option import ToolCall, ToolDefinitionInput
-from src.services.llm_service import LLMServiceClient
+from src.services.llm_service import LLMServiceClient, release_response
 
 from .ai_search_documents import (
     AI_SEARCH_DEFAULT_TOOL_LIMIT,
@@ -330,6 +328,32 @@ async def run_ai_search_agent(
 ) -> AISearchResponse:
     """运行有限轮次的文档检索 Agent，并生成经过校验的搜索响应。"""
 
+    # The public HTTP result exports no replay handles. Keep every native result
+    # through its final continuation, then retire it even on parse/tool failure.
+    retained_results: List[LLMResponseResult] = []
+    try:
+        return await _run_ai_search_agent(request, progress_callback, retained_results)
+    finally:
+        released_handles: set[str] = set()
+        for result in retained_results:
+            payload = result.provider_response or {}
+            handle = payload.get("responseHandle")
+            if not isinstance(handle, str) or handle in released_handles:
+                continue
+            released_handles.add(handle)
+            try:
+                await release_response(result)
+            except Exception:
+                # Cleanup cannot trigger another model request or hide the
+                # original business outcome. Shutdown remains the final owner.
+                logger.exception("释放 AI 搜索 Pi 原生回放句柄失败")
+
+
+async def _run_ai_search_agent(
+    request: AISearchRequest,
+    progress_callback: AISearchProgressCallback | None,
+    retained_results: List[LLMResponseResult],
+) -> AISearchResponse:
     model = _get_ai_search_model()
     locale = resolve_prompt_locale(request.language)
     messages: List[ContextItem] = [_build_text_item(_build_ai_search_prompt(request, locale))]
@@ -352,27 +376,18 @@ async def run_ai_search_agent(
             lambda _client: list(messages),
             options=LLMGenerationOptions(tool_options=tools),
         )
+        retained_results.append(generation_result)
         total_tokens += generation_result.total_tokens
-        tool_calls = (generation_result.tool_calls or [])[:AI_SEARCH_MAX_TOOL_CALLS_PER_ROUND]
+        tool_calls = generation_result.tool_calls or []
+        if len(tool_calls) > AI_SEARCH_MAX_TOOL_CALLS_PER_ROUND:
+            raise AISearchOutputError("模型工具调用超过本轮上限；不截断原生调用，也不执行部分工具")
         if not tool_calls:
             # 模型不再调用工具时，本轮输出就是它给出的最终回答
             messages.extend(generation_result.output_items)
             answer_result = generation_result
             break
 
-        selected_output_items = replace_output_projection(
-            generation_result.output_items,
-            tool_calls=[
-                ContextToolCall.create(
-                    call_id=tool_call.call_id,
-                    func_name=tool_call.func_name,
-                    args=tool_call.args,
-                    extra_content=tool_call.extra_content,
-                )
-                for tool_call in tool_calls
-            ],
-            replace_tool_calls=len(tool_calls) != len(generation_result.tool_calls or []),
-        )
+        selected_output_items = generation_result.output_items
         messages.extend(selected_output_items)
         logical_turn_by_call_id = {
             item.tool_call.call_id: item.meta.logical_turn_id
@@ -409,6 +424,7 @@ async def run_ai_search_agent(
         await _emit_progress(progress_callback, AISearchProgressEvent(stage="finalizing"))
         answer_messages.append(_build_text_item(load_prompt("webui_ai_search_final", locale=locale)))
         answer_result = await _generate_json_answer(model, answer_messages)
+        retained_results.append(answer_result)
         total_tokens += answer_result.total_tokens
         answer_messages.extend(answer_result.output_items)
         parsed_output = _extract_model_output(answer_result.response)
@@ -428,6 +444,7 @@ async def run_ai_search_agent(
             _build_text_item(load_prompt("webui_ai_search_correction", locale=locale, error=str(exc)))
         )
         answer_result = await _generate_json_answer(model, answer_messages)
+        retained_results.append(answer_result)
         total_tokens += answer_result.total_tokens
         model_output = _normalize_model_output(
             _extract_model_output(answer_result.response),

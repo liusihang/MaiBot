@@ -1,6 +1,13 @@
 # QQ group deployment profile, revision 1.
 [inner]
-version = "1.17.25"
+version = "1.17.26"
+
+# Pi preserves each model's explicit admission mode. Default audit mode permits
+# unknown capacity and makes no hard context guarantee; it is not forced strict.
+# Explicit strict rejects unknown proof or known excess before dispatch. Never
+# guess capacity from model names, clamp output budgets, or drop native replay.
+# Non-chat adapters without operation-specific proof reject explicit strict.
+# See docs/pi-harness-migration.md for provider and deployment boundaries.
 
 [[models]]
 model_type = "llm"

@@ -67,6 +67,21 @@ class HeartflowManager:
             logger.error(f"创建心流聊天 {session_id} 失败: {exc}", exc_info=True)
             raise
 
+    async def restore_pi_work(self) -> None:
+        """Start only sessions with durable unfinished work after routes are ready."""
+        from src.common.paths import get_instance_root
+        from src.maisaka.pi_runtime.business_store import BusinessStore
+
+        path = get_instance_root() / "data/pi_harness/business.sqlite3"
+        if not await asyncio.to_thread(path.exists):
+            return
+        store = await asyncio.to_thread(BusinessStore, path)
+        for session_id in await asyncio.to_thread(store.recovery_streams):
+            try:
+                await self.get_or_create_heartflow_chat(session_id)
+            except Exception:
+                logger.exception(f"恢复 Pi 未完成任务失败，记录保留待处理: {session_id}")
+
     def _ensure_running(self) -> None:
         if self._stopping:
             raise RuntimeError("心流管理器正在关停，不能创建聊天运行实例")

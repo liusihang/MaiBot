@@ -1,0 +1,3 @@
+display_name = "人物情報の一括抽出"
+description = "新しい発言をまとめて分析し、実際の発言者とメッセージの証拠に基づく安定した事実を抽出します。"
+advanced = true

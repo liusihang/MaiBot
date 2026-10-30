@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional
 
-from src.config.config import global_config, model_config
+from src.config.config import global_config
 from src.core.tooling import ToolAvailabilityContext, ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
 from src.llm_models.payload_content.tool_option import ToolDefinitionInput
 
@@ -160,9 +160,8 @@ def _is_builtin_tool_enabled_by_config(entry: BuiltinToolEntry) -> bool:
     if entry.name in {"subagent_status", "subagent_stop"}:
         # 只有后台子代理才有需要查看和终止的任务
         return global_config.capabilities.planner_subagent and global_config.capabilities.advanced_sub_agent
-    if entry.name == "read_tool_result":
-        # 长结果整理和统一联网工具均会暂存原文，任一开启都需要回查入口。
-        return global_config.capabilities.tool_result_condense or bool(model_config.model_task_config.web_search.model_list)
+    # read_tool_result 是只读的会话级入口。记忆/联网/整理都可能留下句柄，
+    # 不能因随后关闭某项能力而隐藏续读入口，也不应耦合某个插件的名称。
     return True
 
 

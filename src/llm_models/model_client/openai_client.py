@@ -42,6 +42,7 @@ from src.llm_models.exceptions import (
     RespNotOkException,
     RespParseException,
 )
+from src.llm_models.request_admission import admitted_response, admit_http_request, reraise_admission_denial
 from src.llm_models.openai_compat import (
     build_openai_compatible_client_config,
     split_openai_request_overrides,
@@ -980,6 +981,17 @@ def _apply_xml_tool_call_fallback(
     return cleaned_content, cleaned_reasoning, extracted_tool_calls
 
 
+def _normalize_stop_reason(finish_reason: str | None, *, has_tool_calls: bool) -> str:
+    """保留上游截断/过滤信号，不能因工具 JSON 可解析而误认完整。"""
+    if finish_reason == "length":
+        return "length"
+    if finish_reason == "content_filter":
+        return "error"
+    if finish_reason in {"stop", "tool_calls", "function_call"}:
+        return "toolUse" if has_tool_calls else "stop"
+    return "unknown"
+
+
 def _build_portable_api_response(
     *,
     content: str | None,
@@ -987,6 +999,7 @@ def _build_portable_api_response(
     tool_calls: List[ToolCall] | None,
     logical_turn_id: str,
     raw_data: Any,
+    finish_reason: str | None = None,
 ) -> APIResponse:
     """将 Chat Completions 的复合输出冻结为通用 Context Items。"""
 
@@ -1000,6 +1013,7 @@ def _build_portable_api_response(
         for tool_call in (tool_calls or [])
     ]
     return APIResponse(
+        stop_reason=_normalize_stop_reason(finish_reason, has_tool_calls=bool(tool_calls)),
         output_items=build_portable_output_items(
             content=content,
             reasoning=reasoning_content,
@@ -1245,6 +1259,7 @@ class _OpenAIStreamAccumulator:
             tool_calls=resolved_tool_calls,
             logical_turn_id=self.logical_turn_id,
             raw_data=raw_data,
+            finish_reason=self.finish_reason,
         )
 
     def close(self) -> None:
@@ -1423,6 +1438,7 @@ def _default_normal_response_parser(
             tool_calls=resolved_tool_calls,
             logical_turn_id=logical_turn_id,
             raw_data=resp,
+            finish_reason=finish_reason,
         ),
         usage_record,
     )
@@ -1431,6 +1447,8 @@ def _default_normal_response_parser(
 @client_registry.register_client_class("openai")
 class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletion]):
     """OpenAI 兼容客户端。"""
+
+    supports_final_wire_admission = True
 
     client: AsyncOpenAI
     reasoning_parse_mode: ReasoningParseMode
@@ -1443,6 +1461,7 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
         Args:
             api_provider: API 提供商配置。
         """
+        raise RuntimeError("Python provider transport retired; use the Node Pi harness")
         super().__init__(api_provider)
         client_config = build_openai_compatible_client_config(api_provider)
         self.reasoning_parse_mode = _normalize_reasoning_parse_mode(api_provider.reasoning_parse_mode)
@@ -1453,7 +1472,9 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
         # 此时若没有自定义 Authorization 头覆盖占位密钥，每次请求都要显式省略它
         self._omit_sdk_authorization = not client_config.api_key and _AUTHORIZATION_HEADER not in default_headers
         self.client = AsyncOpenAI(
-            http_client=DefaultAsyncHttpxClient(verify=get_shared_ssl_context()),
+            http_client=DefaultAsyncHttpxClient(
+                verify=get_shared_ssl_context(), event_hooks={"request": [admit_http_request]},
+            ),
             api_key=client_config.api_key or _SDK_AUTH_PLACEHOLDER_API_KEY,
             organization=api_provider.organization,
             project=api_provider.project,
@@ -1544,6 +1565,7 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
 
         return default_response_parser
 
+    @admitted_response("openai_chat")
     async def _execute_response_request(
         self,
         request: ResponseRequest,
@@ -1735,6 +1757,7 @@ class OpenaiClient(AdapterClient[AsyncStream[ChatCompletionChunk], ChatCompletio
             attach_request_snapshot(exc, snapshot_path)
             raise
         except APIConnectionError as exc:
+            reraise_admission_denial()
             snapshot_path = await asyncio.to_thread(
                 save_failed_request_snapshot,
                 api_provider=self.api_provider,

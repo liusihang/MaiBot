@@ -191,6 +191,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._min_extraction_interval = 30
         self._last_expression_extraction_time = 0.0
         self._trimmed_history_learning_task: Optional[asyncio.Task[None]] = None
+        self._pi_learning_source_ids: set[str] = set()
         self._queued_trimmed_learning_progress: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self._expression_learner = ExpressionLearner(session_id)
         self._jargon_learner = JargonLearner(session_id)
@@ -282,6 +283,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             await self._init_mcp()
 
         await self._restore_recent_context_from_db()
+        await self._reasoning_engine.restore_pi_pending()
         self._running = True
         if self._is_focus_mode_active_for_current_chat():
             await focus_mode_manager.attach(self)
@@ -559,6 +561,10 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
             finally:
                 self._internal_loop_task = None
 
+        # Focus owns no member run_loop task, so its member Pi session still
+        # needs an explicit shutdown after scheduler cancellation has settled.
+        if self._reasoning_engine._pi_runner is not None:
+            await self._reasoning_engine._pi_runner.close()
         await self._tool_registry.close()
         remove_stage_status(self.session_id)
 
@@ -1014,8 +1020,6 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
 
     async def _register_message(self, message: SessionMessage) -> None:
         """按聊天串行登记，避免媒体构建期间同一条消息重复进入共享上下文。"""
-        if self._focus_group is not None and self._focus_group.has_message(self.session_id, message.message_id):
-            return
         if self._running:
             self._ensure_background_tasks_running()
         if message.received_at is None:
@@ -1026,6 +1030,11 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._last_message_received_at = max(self._last_message_received_at, received_at)
         self._update_message_trigger_state(message)
         self._observe_message_debounce(message, received_at)
+        # Persist and validate original source content even for a duplicate in a
+        # Focus scheduler. Every real chat retains its own durable Pi inbox.
+        await self._reasoning_engine.record_pi_pending(message)
+        if self._focus_group is not None and self._focus_group.has_message(self.session_id, message.message_id):
+            return
         self.message_cache.append(message)
         self._emit_monitor_message_ingested(message)
         self._prune_processed_message_cache()
@@ -1045,25 +1054,8 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         )
 
     def _request_planner_interrupt_for_message(self, message: SessionMessage) -> None:
-        """快速反应模式下，用新消息打断运行中的 Planner。"""
-        if not global_config.chat.reply_timing.planner_message_steering or self._agent_state != self._STATE_RUNNING:
-            return
-
-        request_result = self._planner_interrupt.request()
-        if request_result == "idle":
-            return
-        if request_result == "duplicate":
-            logger.info(
-                f"{self.log_prefix} 收到新消息，但当前请求已发起过一次规划器打断，"
-                f"本次不重复打断; 消息编号={message.message_id}"
-            )
-            return
-
-        logger.info(
-            f"{self.log_prefix} 收到新消息，发起规划器打断; "
-            f"消息编号={message.message_id} 缓存条数={len(self.message_cache)} "
-            f"时间戳={time.time():.3f}"
-        )
+        """New arrivals are queued durably; never cancel native reasoning or a tool effect."""
+        del message
 
     def _get_effective_reply_frequency(self) -> float:
         """返回当前会话生效的回复频率。"""
@@ -1836,6 +1828,22 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         if self._pending_wait_tool_call_id is None:
             return set()
         return {self._pending_wait_tool_call_id}
+
+    async def _trigger_pi_source_learning(self, context_messages: Sequence[LLMContextMessage]) -> None:
+        """Collect actual source batches independently of Pi context compaction.
+
+        This is the existing bounded business learner buffer, not model history.
+        Its extraction thresholds, concurrency gates and failure retention remain
+        unchanged. Restored source material may be collected again after restart;
+        no durable learned receipt is claimed for an in-memory pending buffer.
+        """
+        sources = [message for message in context_messages
+                   if isinstance(message, SessionBackedMessage)
+                   and message.message_id not in self._pi_learning_source_ids]
+        if not sources:
+            return
+        await self._trigger_trimmed_history_learning(sources)
+        self._pi_learning_source_ids.update(message.message_id for message in sources)
 
     async def _trigger_trimmed_history_learning(
         self,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence
 
 import json
+import re
 import time
 
 from src.chat.message_receive.chat_manager import chat_manager
@@ -117,7 +118,11 @@ class MemorySearchHitProcessingService(KernelServiceBase):
                 paragraph = self.metadata_store.project_fact_paragraph(paragraphs[hit["hash"]])
                 if paragraph is None:
                     continue
-                hit = {**hit, "content": paragraph["content"], "metadata": paragraph["metadata"]}
+                hit = {
+                    **hit,
+                    "content": paragraph["content"],
+                    "metadata": self._preserve_retrieval_evidence(paragraph["metadata"], hit),
+                }
             elif hit.get("type") == "relation" and relation_paragraphs.get(hit.get("hash")):
                 supported = False
                 for row in relation_paragraphs[hit["hash"]]:
@@ -127,6 +132,15 @@ class MemorySearchHitProcessingService(KernelServiceBase):
                 if not supported:
                     continue
             result.append(hit)
+        return result
+
+    @staticmethod
+    def _preserve_retrieval_evidence(metadata: Any, hit: Dict[str, Any]) -> Dict[str, Any]:
+        """回表刷新事实时保留本次检索的阈值判定，不从存储推断相关性。"""
+        result = coerce_metadata_dict(metadata)
+        evidence = coerce_metadata_dict(hit.get("metadata")).get("retrieval_evidence")
+        if isinstance(evidence, dict):
+            result["retrieval_evidence"] = dict(evidence)
         return result
 
     def _filter_current_effective_hits(self, hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -161,7 +175,7 @@ class MemorySearchHitProcessingService(KernelServiceBase):
                 elif item_type == "relation":
                     stored = relation_map.get(hash_value)
                 if stored is not None:
-                    metadata = coerce_metadata_dict(stored.get("metadata"))
+                    metadata = self._preserve_retrieval_evidence(stored.get("metadata"), item)
             memory_change = metadata.get("memory_change") if isinstance(metadata.get("memory_change"), dict) else {}
             if metadata.get("dedup_phase") == "pending":
                 continue
@@ -837,13 +851,15 @@ class MemorySearchHitProcessingService(KernelServiceBase):
             return hits
         filtered = []
         for item in hits:
-            metadata = item.get("metadata", {}) or {}
-            if person_id in (metadata.get("person_ids", []) or []):
+            metadata = coerce_metadata_dict(item.get("metadata"))
+            if person_id in tokens(metadata.get("person_ids")) or person_id in tokens(metadata.get("participants")):
                 filtered.append(item)
                 continue
-            if person_id and person_id in str(item.get("content", "") or ""):
+            # 兼容旧正文内的人物 ID，但不能把 person-1 匹配到 person-10。
+            if re.search(r"(?<![a-zA-Z0-9_-])" + re.escape(person_id) + r"(?![a-zA-Z0-9_-])", str(item.get("content", "") or "")):
                 filtered.append(item)
-        return filtered or hits
+        # 定向过滤无命中就是无命中；返回原候选会泄露其他人的记忆。
+        return filtered
 
     def _filter_active_relation_hits(self, hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if self.metadata_store is None:

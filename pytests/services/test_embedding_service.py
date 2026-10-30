@@ -61,7 +61,7 @@ async def test_embed_image_dispatches_binary_and_preserves_protocol() -> None:
             request_protocol_hash="protocol-test",
         )
 
-    client._orchestrator = SimpleNamespace(get_image_embedding=fake_get_image_embedding)
+    client._inference = SimpleNamespace(get_image_embedding=fake_get_image_embedding)
 
     result = await client.embed_image(
         b"image-payload",

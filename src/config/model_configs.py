@@ -233,6 +233,49 @@ class ModelPricePeriod(ConfigBase):
         super().model_post_init(context)
 
 
+class RequestAdmissionConfig(ConfigBase):
+    """最终 HTTP 请求的容量准入；audit 是兼容迁移模式，不提供不超窗保证。"""
+
+    mode: Literal["audit", "strict"] = "audit"
+    """audit 仅放行未知计量并告警；已知超额始终拒发。strict 也拒绝未知，不降模型或推理档位。"""
+
+    capability_source: str = ""
+    """当前 Provider、endpoint 和精确 model_identifier 的能力声明来源；不根据模型别名猜测。"""
+
+    transport_contract_fingerprint: str = Field(default="", pattern=r"^(?:[0-9a-f]{64})?$")
+    """可选自定义路由头/查询参数的最终 SHA256 合约；必须独立核实，不自动推断。仅权威 exact 计数器支持。"""
+
+    context_window: int | None = Field(default=None, ge=1)
+    """共享输入输出上下文窗口；缺省表示未知，不代表无限。"""
+
+    max_input_tokens: int | None = Field(default=None, ge=1)
+    """独立输入上限；无共享窗口时必须与独立输出上限同时声明。"""
+
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    """独立总生成 token 上限（包含推理）；所有已声明上限均会校验。"""
+
+    safety_margin_tokens: int = Field(default=256, ge=0)
+    """共享窗口及独立输入限额保留的安全余量；缓存命中 token 不从输入扣除。"""
+
+    output_semantics: Literal["unknown", "includes_reasoning", "separate_reasoning"] = "unknown"
+    """最终输出参数是否已包含推理；separate_reasoning 需额外声明推理上界。"""
+
+    reasoning_tokens_upper: int | None = Field(default=None, ge=0)
+    """仅 separate_reasoning 使用的可信推理硬上界；不是可通过降低 effort 改变的预算。"""
+
+    reasoning_budget_path: str = ""
+    """可选最终 JSON 推理预算字段路径（点分隔）；若设置则读取实际非负值，不用初始配置值。"""
+
+    input_counter: str = "unknown"
+    """unknown、utf8_bytes_bound 或已注册的权威计数器名称。默认不冒充精确计量。"""
+
+    tokens_per_utf8_byte_upper: int | None = Field(default=None, ge=1)
+    """仅显式 utf8_bytes_bound 使用：对全部最终 JSON 字节的 token/byte 上界声明。"""
+
+    protocol_overhead_tokens: int | None = Field(default=None, ge=0)
+    """仅显式 utf8_bytes_bound 使用：Provider 隐式模板等额外输入 token 的可信上界。"""
+
+
 class ModelInfo(ConfigBase):
     """单个模型信息配置类"""
 
@@ -328,6 +371,9 @@ class ModelInfo(ConfigBase):
         },
     )
     """模型级别最大token数（可选），会覆盖任务配置中的max_tokens"""
+
+    request_admission: RequestAdmissionConfig = Field(default_factory=RequestAdmissionConfig)
+    """按实际模型路由和最终请求检查容量；默认 audit，严格部署须声明可靠能力与计量。"""
 
     force_stream_mode: bool = Field(
         default=False,

@@ -166,6 +166,7 @@ export type GenerationAttemptSnapshot = {
 
 export type ReasoningReplayRequest = {
   source_path?: string | null
+  session_id?: string
   stage?: string
   model_name: string
   item_schema_version: number
