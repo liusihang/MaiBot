@@ -42,8 +42,8 @@ Decisions；未识别的 body 参数明确拒绝。现有 `strict` 容量策略�
 ## 请求与判断边界
 
 - 一个 `choice` 问题 `group_participation`，可选值严格为
-  `engage` / `ignore` / `uncertain`。`confidence` 和三项概率保留为诊断，不添加未校准阈值。
-- 参与策略来自中英日对齐模板；保留原政治话题等约束。近期 24 条历史、本批消息、
+  `engage` / `ignore`。语境不明但疑似相关时按 A 版规则选 `engage`。`confidence` 和两项概率保留为诊断，不添加未校准阈值。
+- 参与策略来自中英日对齐模板；保留原政治话题等约束。近期最多 50 条历史、本批消息、
   真实作者/机器人标记、源时间/接收时间、引用对象和当前判断时间都放在 user 的
   `input_json.data` 中。群友文字或 JSON 中的 `role`/`instructions` 不是控制指令。
 - 保留原有单消息 1600 字符的首尾节选；不是摘要写回，不替代源消息。本批不按条数
@@ -51,7 +51,7 @@ Decisions；未识别的 body 参数明确拒绝。现有 `strict` 容量策略�
   交给主 Agent；不会为了通过 API 验证而丢消息。
 - 明确 @、提及、引用机器人、已有任务、焦点模式等仍直接进入主 Agent；普通批次
   保持每群最多每 30 秒启动一次判断。
-- 只有合法 `ignore` 阻止本次主 Agent 执行；`engage` 和 `uncertain` 均允许主 Agent
+- 只有合法 `ignore` 阻止本次主 Agent 执行；`engage` 允许主 Agent
   再决定，包括主动 stop。拒答 `type: refusal`、响应畸形、网络/HTTP 错误和超时
   是**失败**而非 ignore，也不切回 chat。日志/阶段显示安全错误码和 HTTP 状态，
   不记录上游错误正文、URL 查询串或密钥。主动取消继续向上传播。
@@ -89,7 +89,7 @@ uv run pytest -q pytests/maisaka/test_participation.py pytests/services/test_pi_
 ```
 
 Node 测试使用真实 Pi SDK 和 localhost HTTP，断言 `/v1/decisions`、请求结构、
-数据注入边界、三态/拒答、严格响应、缓存记账、401/403/404/429/5xx、无重试、
+数据注入边界、二分类/拒答、严格响应、缓存记账、401/403/404/429/5xx、无重试、
 超时/取消、群隔离、请求前校验和密钥清洗；Python 验证业务路由、持久输入和
 判断期间新消息的保留。它们不证明真实账户开通、代理支持或分类质量。
 

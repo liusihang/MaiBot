@@ -941,13 +941,13 @@ class ChatConfig(ConfigBase):
     """最终请求可见文本与工具定义的字符高水位；触发完整已结束工具轮归档，不是 token 硬上限。"""
 
     context_prompt_token_high_watermark: int = Field(
-        default=48000, ge=1000,
+        default=51200, ge=1000,
         json_schema_extra={"label": {
             "zh_CN": "实际输入 Token 高水位", "en_US": "Reported input token high watermark",
             "ja_JP": "報告された入力トークン高水位",
         }, "advanced": True},
     )
-    """服务端实际报告的输入 token 高水位；下一轮整理已结束工具轮，活动轮的原生状态保持完整。"""
+    """Pi 上下文 token 高水位；本轮完成后压缩已结束轮次，待处理消息保持原样。"""
 
     reply_timing: ChatReplyTimingConfig = Field(default_factory=ChatReplyTimingConfig)
     """什么时候回复、回复频率与等待退避配置。"""

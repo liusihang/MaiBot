@@ -505,3 +505,19 @@ test('simultaneous strict admissions are isolated per selected model and do not 
   assert.equal(small.stopReason, 'error'); assert.equal(audit.stopReason, 'stop', audit.errorMessage);
   assert.equal(wires.length, 1); assert.equal(wires[0].model, 'exact-luna-route');
 });
+
+test('an explicit response deadline takes precedence over the provider fallback timeout', async () => {
+  const cfg = config(); cfg.api_providers[0].timeout = 0.01;
+  const runtime = await createHostModelRuntime(cfg, { fetch: async (_, init) => {
+    await new Promise((yes, no) => {
+      const timer = setTimeout(yes, 40);
+      const abort = () => { clearTimeout(timer); no(new DOMException('aborted', 'AbortError')); };
+      if (init.signal.aborted) abort();
+      else init.signal.addEventListener('abort', abort, { once: true });
+    });
+    return response();
+  } });
+  const route = resolveTaskModel(runtime, 'main');
+  const result = await runtime.completeSimple(route.model, smallContext, { timeoutMs: 500 });
+  assert.equal(result.stopReason, 'stop', result.errorMessage);
+});

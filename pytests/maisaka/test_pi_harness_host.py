@@ -502,6 +502,8 @@ async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads
             assert requests[1]["model"] == requests[0]["model"] == "mock-model"
             assert requests[1]["tools"] == requests[0]["tools"]
             assert "child-only research task" in json.dumps(requests[1]["messages"])
+            assert "职责是在本线程直接完成工具步骤" in json.dumps(requests[1]["messages"], ensure_ascii=False)
+            assert "主 Agent 负责发送最终群聊正文" in json.dumps(requests[1]["messages"], ensure_ascii=False)
             assert "child preview only" not in json.dumps(requests[3]["messages"])
             assert "child preview only" in json.dumps(requests[4]["messages"])
             receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
@@ -709,60 +711,80 @@ async def test_host_explicit_sdk_compaction_and_archive_remain_reachable(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_high_watermark_uses_real_sdk_summary_and_failed_batch_is_not_retried(monkeypatch, tmp_path):
+async def test_high_watermark_compacts_after_reply_and_durable_completion(monkeypatch, tmp_path):
     from src.config.config import global_config
 
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
-    monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 2500)
-    with wire_server([{"text": ""}, {"text": "real summary"}, {"text": ""}], prompt_tokens=3000) as (
-        config,
-        requests,
-    ):
+    monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 51200)
+    host, effects = engine()
+
+    def summary_after_delivery(request, requests):
+        assert len(effects) == 1 and effects[0].tool_name == "reply"
+        assert runner.ledger.pending_turn(runner.session_id) is None
+        assert "Summarize this group conversation faithfully" in json.dumps(request)
+        return {"text": "real summary"}
+
+    with wire_server([("reply", {"text": "already delivered"}), None, summary_after_delivery], prompt_tokens=52000) as (config, requests):
+        config["model_task_config"]["memory"] = {"model_list": ["mock"], "max_tokens": 1000}
         monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
-        host, _ = engine()
-        host._runtime._chat_history.append(history("unique-source-" + "x" * 11000, "source-long"))
+        host._runtime._chat_history.append(history("original source for post-reply summary" + "x" * 250000, "source-long"))
         runner = PiGroupRunner(host, data_dir=tmp_path)
         try:
             await runner.run([])
-            assert len(requests) == 1  # First unprocessed batch must never be summarized away.
-            host._runtime._chat_history.append(history("new request preserved verbatim", "new-tail"))
-            await runner.run([])
             assert len(requests) == 3
-            assert "unique-source-" in json.dumps(requests[1])
-            assert "real summary" in json.dumps(requests[2])
-            assert "new request preserved verbatim" in json.dumps(requests[2])
-            assert "unique-source-" not in json.dumps(requests[2])
-            host._runtime._chat_history.append(history("z" * 11000, "next-long"))
-            await runner.ingest()
-            before = await runner.bridge.request("state", sessionId=runner.session_id)
-            original = runner.bridge.request
-            failed_calls = []
-
-            async def request(method, **params):
-                if method == "compact":
-                    failed_calls.append(params)
-                    raise RuntimeError("summary unavailable")
-                return await original(method, **params)
-
-            monkeypatch.setattr(runner.bridge, "request", request)
-            with pytest.raises(RuntimeError, match="summary unavailable"):
-                await runner.run([])
-            with pytest.raises(RuntimeError, match="unchanged history"):
-                await runner.run([])
-            assert len(failed_calls) == 1
-            after = await original("state", sessionId=runner.session_id)
-            assert after["archive"] == before["archive"]
-            assert len(requests) == 3
+            state = await runner.bridge.request("state", sessionId=runner.session_id)
+            assert state["contextTokens"] < 51200
+            assert state["unresolvedToolCalls"] == []
         finally:
             await runner.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tokens,should_compact", [(47999, False), (48000, True)])
+async def test_post_reply_summary_failure_keeps_the_delivered_turn_complete(monkeypatch, tmp_path):
+    from src.config.config import global_config
+    from src.maisaka.pi_runtime.bridge import PiBridgeError
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 51200)
+    with wire_server([("reply", {"text": "visible answer"}), None], prompt_tokens=52000) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, effects = engine()
+        host._runtime._chat_history.append(history("question", "source"))
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.ensure_initialized()
+            original = runner.bridge.request
+            failed_calls = []
+
+            async def request(method, **params):
+                if method == "compact":
+                    assert len(effects) == 1
+                    assert runner.ledger.pending_turn(runner.session_id) is None
+                    failed_calls.append(params)
+                    raise PiBridgeError("Pi summary request did not complete", code="SUMMARY_FAILED")
+                return await original(method, **params)
+
+            monkeypatch.setattr(runner.bridge, "request", request)
+            await runner.run([])
+            assert len(requests) == 2
+            assert len(effects) == 1 and effects[0].arguments["text"] == "visible answer"
+            assert runner.ledger.pending_turn(runner.session_id) is None
+            before = await original("state", sessionId=runner.session_id)
+            await runner._maintain_context()
+            assert len(failed_calls) == 1
+            after = await original("state", sessionId=runner.session_id)
+            assert after["archive"] == before["archive"]
+            assert after["unresolvedToolCalls"] == []
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tokens,should_compact", [(51199, False), (51200, True)])
 async def test_maintenance_uses_sdk_token_pressure_not_serialized_bytes(monkeypatch, tmp_path, tokens, should_compact):
     from src.config.config import global_config
 
-    monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 48000)
+    monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 51200)
     host, _ = engine()
     runner = PiGroupRunner(host, data_dir=tmp_path)
     runner.bridge.request = AsyncMock(
@@ -772,6 +794,8 @@ async def test_maintenance_uses_sdk_token_pressure_not_serialized_bytes(monkeypa
     assert runner.bridge.request.await_count == (2 if should_compact else 1)
     if should_compact:
         assert runner.bridge.request.await_args.kwargs["preserveUnprocessed"] is True
+        assert runner.bridge.request.await_args.kwargs["summaryTaskName"] == "memory"
+        assert runner.bridge.request.await_args.kwargs["summaryTimeoutMs"] == 300000
 
 
 @pytest.mark.asyncio
@@ -991,3 +1015,43 @@ async def test_native_completion_survives_lost_python_turn_ack(monkeypatch, tmp_
             host._runtime._tool_registry.invoke.assert_awaited_once()
         finally:
             await restored.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["gpt_web_search", "gpt_read_search_result"])
+async def test_local_search_timeout_is_failed_receipt_and_allows_reply(monkeypatch, tmp_path, name):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([(name, {}), ("reply", {"text": "search timed out"})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        host._runtime._tool_registry.list_tools.return_value.append(
+            ToolSpec(
+                name=name,
+                description=name,
+                parameters_schema={"type": "object"},
+                provider_name="local.gpt-web-search",
+                provider_type="plugin",
+                metadata={"plugin_id": "local.gpt-web-search", "registry_original_name": name},
+            )
+        )
+
+        async def invoke(invocation, context, **kwargs):
+            invoked.append(invocation)
+            return ToolExecutionResult(
+                invocation.tool_name,
+                invocation.tool_name == "reply",
+                content="Search timed out" if invocation.tool_name == name else "reply sent",
+                metadata={"plugin_id": "local.gpt-web-search"} if invocation.tool_name == name else {},
+            )
+
+        host._runtime._tool_registry.invoke = invoke
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            assert receipt.status == "failed"
+            assert receipt.result["isError"] is True
+            await runner._db("assert_no_unresolved_executions", runner.session_id)
+            assert [item.tool_name for item in invoked] == [name, "reply"]
+        finally:
+            await runner.close()

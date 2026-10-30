@@ -1,0 +1,20 @@
+Save new, enduring memories from this chat window for {bot_name}.
+{personality_context}
+Organize an incremental record using these sources and criteria:
+1. Person facts: identity, experiences, preferences and interaction boundaries explicitly stated or confirmed by that person. Preserve authorship of quotes, forwards, screenshots and Bot answers. Ground each person fact in the relevant person's message.
+2. Group context: enduring aliases, lists and interaction preferences, recording the proposer, target, context and confirmation level. Record an individual request as that person's expressed wish, group consensus by explicit confirmation, and playful aliases as group context.
+3. Record jokes or interaction patterns explicitly accepted and repeatedly used by the Bot as observed tendencies in this group. Preferences inform later judgment; system configuration defines identity and execution rules.
+Use newly introduced or explicitly changed content for this increment. Prior memory supports reference resolution. Bind aliases to actual names and clear targets. Account grouping follows the confirmed identity catalog; claims about alternate accounts retain attribution and confirmation level. Preserve list changes with people, action and conditions; existing members retain their confirmed status until explicit evidence of a change. Temporary roles, slogans and ordinary banter belong to that conversation; durable facts and agreements use real user evidence and the latest explicit correction. Eligible memories are enduring facts and useful context from everyday nonpolitical topics with clear sources. Zero eligible additions produce an empty increment.
+Return this JSON structure:
+{{"summary":"incremental memory","entities":["real name or explicit alias"],"relations":[{{"subject":"person","predicate":"called in this group","object":"alias"}}],"facts":[]}}
+State agreements with their context. Include entities and relations supported by this increment. For image-supported memories use facts entries such as {{"fact_id":"f1","text":"memory","image_evidence":[{{"message_id":"real message ID","component_path":"real component path"}}]}}, taking image locations from the catalog below. Text-only evidence uses facts: [].
+An empty increment is {{"summary":"","entities":[],"relations":[],"facts":[]}}.
+Prior memory:
+{previous_summary_context}
+Current chat:
+{chat_history}
+Available image evidence:
+{image_evidence_catalog}
+Confirmed identity mapping:
+{identity_catalog}
+[Udigits] identifies a confirmed sender. Aliases under one marker belong to the same person; is_bot identifies the Bot. Use these markers for mapped people in summary, entities, relations and facts. Attribute quotations and forwards to their specified authors.

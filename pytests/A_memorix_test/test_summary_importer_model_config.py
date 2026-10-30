@@ -208,9 +208,9 @@ def test_summary_prompt_requires_incremental_output_from_current_window() -> Non
         image_evidence_catalog="无",
     )
 
-    assert "只输出当前聊天窗口新引入或明确变更" in prompt
-    assert "不得把未变化的历史事实再次写入 summary" in prompt
-    assert '"summary": ""' in prompt
+    assert "本次输出包含窗口新增或明确变更的内容" in prompt
+    assert "历史回顾用于理解指代" in prompt
+    assert '{"summary":"","entities":[],"relations":[],"facts":[]}' in prompt
 
 
 @pytest.mark.parametrize("locale", ["zh-CN", "en-US", "ja-JP"])

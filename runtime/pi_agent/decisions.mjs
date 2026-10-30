@@ -7,7 +7,7 @@ import { selectAuxiliaryRoute } from './auxiliary.mjs';
 import { createProviderFetch } from './provider.mjs';
 
 const NAME = 'group_participation';
-const CHOICES = ['engage', 'ignore', 'uncertain'];
+const CHOICES = ['engage', 'ignore'];
 const record = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const fail = (code, message, details) => Object.assign(new Error(message), { code,
   ...(details ? { safeDiagnostics: details } : {}) });

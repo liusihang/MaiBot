@@ -53,7 +53,7 @@ class PiInputCapabilities:
 class PiParticipationDecision:
     """Typed classification receipt, never assistant text or a reply plan."""
 
-    decision: Literal["engage", "ignore", "uncertain"]
+    decision: Literal["engage", "ignore"]
     confidence: float
     probabilities: Dict[str, float]
     model_name: str
@@ -209,7 +209,7 @@ class PiInferenceClient:
             session_id=session_id,
         )
         decision = payload["decision"]
-        if decision not in {"engage", "ignore", "uncertain"}:
+        if decision not in {"engage", "ignore"}:
             raise PiBridgeError("Pi returned an invalid participation decision", code="INVALID_DECISION_RESPONSE")
         return PiParticipationDecision(
             decision=decision,

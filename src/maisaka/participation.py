@@ -25,14 +25,14 @@ if TYPE_CHECKING:
 
 logger = get_logger("maisaka_participation")
 PARTICIPATION_INTERVAL_SECONDS = 30.0
-RECENT_MESSAGES = 24
+RECENT_MESSAGES = 50
 TEXT_LIMIT = 1600
 DECISION_SCHEMA = {
     "name": "group_participation",
     "strict": True,
     "schema": {
         "type": "object",
-        "properties": {"decision": {"type": "string", "enum": ["engage", "ignore", "uncertain"]}},
+        "properties": {"decision": {"type": "string", "enum": ["engage", "ignore"]}},
         "required": ["decision"],
         "additionalProperties": False,
     },
@@ -118,14 +118,13 @@ def build_context(payload: dict, now: datetime | None = None):
 
 
 def parse_decision(text: str) -> str:
-    try:
-        obj = json.loads(text)
-    except (TypeError, ValueError):
-        return "uncertain"
+    obj = json.loads(text)
     if not isinstance(obj, dict) or set(obj) != {"decision"}:
-        return "uncertain"
+        raise ValueError("Participation response must contain only decision")
     value = obj.get("decision")
-    return value if isinstance(value, str) and value in {"engage", "ignore", "uncertain"} else "uncertain"
+    if not isinstance(value, str) or value not in {"engage", "ignore"}:
+        raise ValueError("Participation response must be engage or ignore")
+    return value
 
 
 def quotes_bot(runtime, messages) -> bool:
@@ -217,7 +216,7 @@ class ParticipationJudge:
                 )
                 decision = result.decision
                 # Confidence is diagnostic only; no uncalibrated threshold changes
-                # the API's explicit engage / ignore / uncertain choice.
+                # the API's explicit engage / ignore choice.
                 diagnostic = f" confidence={result.confidence:.4f}"
             elif mode == "chat":
                 if self._client is None:

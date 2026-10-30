@@ -64,14 +64,28 @@ class MessageDebouncer:
             arrival = max(arrival, self._last_arrival)
         self._last_arrival = arrival
         self._last_author = author
+        # Cooldown or an earlier task can leave a long-expired batch unconsumed.
+        # A fresh textual burst after silence gets its own bounded continuation
+        # window; retain the old messages in the caller's inbox. Existing urgent
+        # mentions and emoji-only arrivals keep their earlier admission time.
+        reopened = (
+            self._deadline is not None
+            and arrival >= self._deadline
+            and previous_arrival is not None
+            and arrival - previous_arrival > QUIET_THRESHOLD
+            and self._urgent is None
+            and not is_pure_emoji
+        )
+        if reopened:
+            self._first = self._deadline = None
         new_batch = self._first is None
         if new_batch:
             self._first = arrival
         if at_bot:
             urgent = now - max(0.0, wall_time - received_at) + MENTION_LIMIT
             self._urgent = min(self._urgent, urgent) if self._urgent is not None else urgent
-        # 已到期但因模型/工具忙碌尚未消费的批次，不允许被新消息重新延长。
-        # 这些消息仍进入原有上下文缓存，一起消费，不为补偿模型忙碌再排一遍队。
+        # 同一段活跃连发仍服从原批次上限；长时间安静后的新话头按新窗口收齐。
+        # 原批次消息仍在上下文缓存里，消费时一同接入。
         if self._deadline is None or self._deadline > now:
             reasons = []
             limit = self._first + BATCH_LIMIT
@@ -81,6 +95,9 @@ class MessageDebouncer:
                 active = previous_arrival is not None and arrival - previous_arrival <= QUIET_THRESHOLD
                 wait = waits.active if active else waits.quiet
                 reasons.append(f"{'活跃' if active else '安静'}开批 {wait:g} 秒")
+                if reopened:
+                    wait = max(wait, waits.active)
+                    reasons.append(f"到期批次收到新话头，收齐补充 {wait:g} 秒")
                 if is_bare_image:
                     reasons.append("裸图开批至少 4 秒")
                     wait = max(wait, BARE_IMAGE_MIN_WAIT)

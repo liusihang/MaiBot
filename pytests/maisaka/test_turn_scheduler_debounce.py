@@ -116,6 +116,44 @@ def test_dynamic_gate_evaluates_after_debounce_deadline(monkeypatch) -> None:
     runtime._enqueue_message_turn.assert_called_once()
 
 
+def test_expired_idle_batch_gives_new_speaker_time_to_finish(monkeypatch) -> None:
+    debouncer = MessageDebouncer()
+
+    def receive(author: str, when: float, *, emoji: bool = False, mention: bool = False) -> str:
+        return debouncer.observe(
+            author=author, is_bare_image=False, is_pure_emoji=emoji,
+            at_bot=mention, received_at=when, wall_time=when, now=when,
+        )
+
+    receive("earlier-speaker", 0)
+    # The earlier batch remained pending through cooldown/other scheduling.
+    reason = receive("sorry", 535)
+    assert "到期批次" in reason
+    assert debouncer.deadline == 540
+
+    scheduler, runtime = _build_scheduler(monkeypatch, quiet_seconds=5)
+    scheduler.schedule_message_turn()
+    runtime._enqueue_message_turn.assert_not_called()
+    runtime._defer_message_turn_check.assert_called_once_with(5)
+
+    receive("sorry", 539.9)
+    assert debouncer.deadline == pytest.approx(541.9)
+    # Subsequent fragments still share the fresh burst's eight-second cap.
+    receive("sorry", 541.8)
+    assert debouncer.deadline == 543
+
+
+def test_expired_idle_batch_does_not_restart_for_emoji_or_delay_an_existing_mention() -> None:
+    for emoji, mention in [(True, False), (False, True)]:
+        debouncer = MessageDebouncer()
+        debouncer.observe(author="a", is_bare_image=False, is_pure_emoji=False,
+                          at_bot=mention, received_at=0, wall_time=0, now=0)
+        deadline = debouncer.deadline
+        debouncer.observe(author="b", is_bare_image=False, is_pure_emoji=emoji,
+                          at_bot=False, received_at=100, wall_time=100, now=100)
+        assert debouncer.deadline == deadline
+
+
 def test_forced_turn_bypasses_idle_backoff(monkeypatch) -> None:
     scheduler, runtime = _build_scheduler(monkeypatch, backoff_seconds=30.0, forced=True)
 

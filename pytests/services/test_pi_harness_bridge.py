@@ -73,7 +73,7 @@ for await (const line of readline.createInterface({input:process.stdin})) {
    if(p.requestType==='fixture.decision.refusal') {
      process.stdout.write(JSON.stringify({id,error:{code:'DECISION_REFUSED',message:'question refused',details:{route,usage:decisionUsage,providerUsage,durationMs:3}}})+'\n');continue;
    }
-   send(id,{route,usage:decisionUsage,providerUsage,decision:'ignore',confidence:0.8,probabilities:{engage:0.1,ignore:0.8,uncertain:0.1}});continue;
+   send(id,{route,usage:decisionUsage,providerUsage,decision:'ignore',confidence:0.8,probabilities:{engage:0.2,ignore:0.8}});continue;
  }
  if(method!=='model.generate')throw new Error('unrecognized fixture method');
  if(p.requestType==='fixture.error') {
@@ -853,7 +853,7 @@ async def test_decision_receipt_and_refusal_usage_are_accounted_once(autonomous_
     result = await client.decide_participation({"new_messages": []}, "policy", model_name="group-helper")
     assert result.decision == "ignore"
     assert result.confidence == 0.8
-    assert result.probabilities == {"engage": 0.1, "ignore": 0.8, "uncertain": 0.1}
+    assert result.probabilities == {"engage": 0.2, "ignore": 0.8}
     assert result.usage == {
         "input": 7,
         "output": 0,

@@ -34,7 +34,7 @@ SUBAGENT_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "subagent",
-            "description": "Delegate multi-step research or complex actions to an independent Pi thread with the same tools. Supply a self-contained task, relevant message IDs, and the desired deliverable. wait=true (default) returns its conclusion and evidence handle; wait=false returns a handle immediately and delivers completion to this chat later. Ordinary chat and one-step tasks can be handled directly.",
+            "description": "Delegate internet search, external verification, cross-source research, complex execution and image tasks to an independent Pi thread with the same tools, including a single web search. The main Agent directly handles memory lookups, document reading and existing results, keeps conversational judgment and writes final replies. Supply the question, essential context, real message IDs and deliverable. Keep full research in the child and request compact findings, key sources and evidence handles. wait=true returns the result; wait=false returns a handle and delivers completion later. Ordinary chat and context-supported answers stay in the parent.",
             "parameters": {
                 "type": "object",
                 "properties": {

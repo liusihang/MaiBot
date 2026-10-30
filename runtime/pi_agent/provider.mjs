@@ -284,11 +284,14 @@ export async function createHostModelRuntime(config, { fetch: fetchImpl } = {}) 
           checkRequestAdmission(JSON.parse(serialized), capability, api, serialized);
           return dispatch(input, init);
         };
+        const timeoutMs = options.timeoutMs ?? (provider.timeout ? provider.timeout * 1000 : undefined);
         const effective = { ...options, ...taskOptions,
           // Automatic moving cache breakpoints rewrite old Anthropic blocks.
           // Stable native histories take precedence over implicit prompt caching.
           cacheRetention: 'none', maxRetries: 0,
-          signal: provider.timeout ? AbortSignal.any([...(options.signal ? [options.signal] : []), AbortSignal.timeout(provider.timeout * 1000)]) : options.signal };
+          signal: Number.isFinite(timeoutMs) && timeoutMs > 0
+            ? AbortSignal.any([...(options.signal ? [options.signal] : []), AbortSignal.timeout(Math.ceil(timeoutMs))])
+            : options.signal };
         const outputBudget = taskOptions.maxTokens ?? options.maxTokens ?? maxTokens;
         const hostHook = options.onPayload;
         effective.onPayload = async (payload, activeModel) => {

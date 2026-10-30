@@ -77,10 +77,17 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
         self.pi_patch.stop()
         self.mode_patch.stop()
 
-    async def test_parse_rejects_extra_guidance_and_fails_open(self):
+    async def test_parse_rejects_extra_guidance_and_nonbinary_answers(self):
         self.assertEqual(part.parse_decision('{"decision":"engage"}'), "engage")
-        for value in ["bad", "[]", '{"decision":false}', '{"decision":"ignore","reply_reference":"别理他"}']:
-            self.assertEqual(part.parse_decision(value), "uncertain")
+        for value in [
+            "bad",
+            "[]",
+            '{"decision":false}',
+            '{"decision":"uncertain"}',
+            '{"decision":"ignore","reply_reference":"别理他"}',
+        ]:
+            with self.assertRaises(ValueError):
+                part.parse_decision(value)
 
     async def test_payload_preserves_speakers_and_only_real_chat(self):
         r = runtime()
@@ -95,6 +102,18 @@ class ParticipationTests(unittest.IsolatedAsyncioTestCase):
     async def test_long_text_keeps_question_at_end(self):
         text = "x" * 2000 + "这个报错怎么修"
         self.assertTrue(part.shorten(text).endswith("这个报错怎么修"))
+
+    async def test_payload_uses_latest_fifty_history_messages_and_whole_new_batch(self):
+        r = runtime()
+        old = [message(f"history-{i}", mid=f"old-{i}") for i in range(60)]
+        new = [message("昂子真被不及格了吗", mid="question"), message("不说话了", mid="continuation")]
+        r._chat_history = [history(m) for m in [*old, *new]]
+        payload = part.build_payload(r, new)
+        self.assertEqual(len(payload["recent_messages"]), 50)
+        self.assertEqual(payload["recent_messages"][0]["msg_id"], "old-10")
+        self.assertEqual(payload["recent_messages"][-1]["msg_id"], "old-59")
+        self.assertEqual([m["msg_id"] for m in payload["new_messages"]], ["question", "continuation"])
+        self.assertEqual(len(r._chat_history), 62)
 
     async def test_direct_at_does_not_call_luna(self):
         judge = part.ParticipationJudge(runtime())
@@ -432,8 +451,21 @@ class DecisionsParticipationTests(unittest.IsolatedAsyncioTestCase):
         judge._client = NS(generate_response_with_context=AsyncMock(side_effect=AssertionError("chat fallback")))
         return r, judge, call
 
-    async def test_three_states_preserve_messages_and_never_apply_confidence_threshold(self):
-        for value in ("engage", "ignore", "uncertain"):
+    async def test_decisions_receives_fifty_history_messages_and_complete_continuation(self):
+        r, judge, call = self.make_judge("engage")
+        old = [message(f"history-{i}", mid=f"old-{i}") for i in range(60)]
+        new = [message("昂子真被不及格了吗", mid="question"), message("不说话了", mid="continuation")]
+        r._chat_history = [history(m) for m in [*old, *new]]
+        batch = engine_mod.TurnStartContext(new, new[-1], False, False, False, None)
+        self.assertTrue(await judge.should_enter(batch))
+        evidence, _ = call.call_args.args
+        self.assertEqual(len(evidence["recent_messages"]), 50)
+        self.assertEqual(evidence["recent_messages"][0]["msg_id"], "old-10")
+        self.assertEqual([m["msg_id"] for m in evidence["new_messages"]], ["question", "continuation"])
+        judge._client.generate_response_with_context.assert_not_called()
+
+    async def test_binary_states_preserve_messages_and_never_apply_confidence_threshold(self):
+        for value in ("engage", "ignore"):
             with self.subTest(value=value):
                 r, judge, call = self.make_judge(value)
                 original_history, original_pending = list(r._chat_history), list(r.message_cache)
@@ -469,8 +501,7 @@ class DecisionsParticipationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence["new_messages"][0]["time"], "2026-01-01T00:00:00")
         self.assertEqual(evidence["new_messages"][0]["received_at"], "2026-01-01T12:00:01")
         self.assertEqual(evidence["new_messages"][0]["reply_to"][0]["msg_id"], "someone-else")
-        ignore_policy = instructions.split("# ignore", 1)[1].split("# uncertain", 1)[0]
-        self.assertIn("政治", ignore_policy)
+        self.assertIn("政治", instructions)
         self.assertEqual(instructions, part.load_prompt_template("participation_judge", locale="zh-CN").template)
         self.assertTrue(evidence["recent_messages"][0]["is_bot"])
 

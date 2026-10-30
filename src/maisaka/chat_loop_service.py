@@ -898,9 +898,9 @@ class MaisakaChatLoopService:
         if self._is_group_chat:
             return self._localized_text(
                 {
-                    "en-US": "- query_memory(): Use it only when the reply clearly depends on past group conversation, shared experiences, public agreements, task progress, or recent clues. Do not retrieve memory for greetings, immediate emotional responses, light banter, or content that can be answered from recent messages alone. Do not bring private-chat or personal-privacy memories into a group chat.",
-                    "ja-JP": "- query_memory()：返信がグループ内の過去会話、共有した経験、公開された約束、タスクの進捗、最近の手がかりに明確に依存する場合だけ使ってください。挨拶、その場の感情への反応、軽いやり取り、最近のメッセージだけで答えられる内容では検索しないでください。個人チャットや私的な記憶をグループチャットに持ち込まないでください。",
-                    "zh-CN": "- query_memory()：只有回复明显依赖群内过去对话、共同经历、公开约定、任务进展或近期线索时使用；不要为了寒暄、即时情绪回应、轻松接话、只看最近消息就能回答的内容而检索。不要把私聊或个人隐私记忆带到群聊里。",
+                    "en-US": "- query_memory(): Retrieve past group conversations, shared experiences, public agreements, task progress and recent clues when the reply depends on them. Use recent messages directly for greetings, immediate reactions and light banter. Group replies use memories shared within the current group and appropriate public context.",
+                    "ja-JP": "- query_memory()：返信が群の過去会話、共有経験、公開の約束、進捗、最近の手掛かりに依存する時に検索する。挨拶、その場の反応、軽いやり取りは直近の会話から直接答える。群への返信にはこの群で共有された記憶と適切な公開文脈を使う。",
+                    "zh-CN": "- query_memory()：回复依赖群内过去对话、共同经历、公开约定、任务进展或近期线索时检索；寒暄、即时反应和轻松接话直接使用近期消息。群聊回复使用本群已共享的记忆与适当的公开语境。",
                 }
             )
 
@@ -913,15 +913,15 @@ class MaisakaChatLoopService:
         )
 
     def _build_subagent_rule(self) -> str:
-        """开启子代理时说明何时该把任务交给 subagent；未开启时为空，不占提示词。"""
+        """Describe the parent/child responsibilities and evidence handoff."""
 
         if not global_config.capabilities.planner_subagent:
             return ""
         rule = self._localized_text(
             {
-                "en-US": "- subagent(task, wait): Prefer an independent child for multi-step research or complex actions; it has the same tools. Include relevant context and message IDs in the task. wait=true returns its result before continuing; wait=false returns immediately and delivers completion later. read_subagent(handle, wait=true) joins a running task. Ordinary chat and one-step work can be handled directly. Do not resend completed actions.",
-                "ja-JP": "- subagent(task, wait)：複数段階の調査や複雑な操作は独立した子 Agent に任せることを優先する。同じツールを使える。タスクに必要な文脈とメッセージ ID を含める。wait=true は結果を待ち、wait=false はすぐ戻って完了後に結果を受け取る。read_subagent(handle, wait=true) で実行中のタスクを待てる。普通の会話や一手で終わることは自分で行ってよい。実行済みの操作を繰り返さない。",
-                "zh-CN": "- subagent(task, wait)：多步查询和复杂操作优先交给独立子 Agent，它有相同的工具。任务写清必要前情和相关消息 ID。wait=true 等结果后继续；wait=false 立即返回，完成后会收到结果。read_subagent(handle, wait=true) 可以等待已派发任务。普通接话和一步操作可直接处理，已完成的动作不用重复。",
+                "en-US": "- Main Agent: understand the conversation, directly query memory/profiles and read material, keep your own judgment, and write final replies. Delegate internet searches, external verification, cross-source research, complex execution and image tasks through subagent(task, wait), including a single web search. Supply the question, essential context, real message IDs and desired result. Keep conversation history in the parent and original research in the child. Normally wait=true; use wait=false for longer work and read_subagent(handle, wait=true) to await an existing task. Children execute tools and return compact findings, key evidence, real sources, evidence handles, open points and completed actions. Use new clues for further research and sufficient or repeated evidence as a cue to conclude. The parent writes the group reply and continues from actual delivery receipts.",
+                "ja-JP": "- 主 Agent は会話を理解し、記憶・人物情報を直接照会して資料を読み、自分の判断と最終返信を持つ。ネット検索、外部確認、複数出典の調査、複雑な実行や画像作業は一回の検索でも subagent(task, wait) に任せる。質問、必要な前提、実在のメッセージ ID、求める成果を渡す。会話履歴は主に、調査の原文は子に残す。通常 wait=true、長い作業は wait=false、既存作業は read_subagent(handle, wait=true) で待つ。子は直接ツールを使い、簡潔な結論、主要根拠、実在の出典、証拠ハンドル、確認事項と実行結果を返す。新しい手掛かりで調査を進め、十分な証拠や重複結果でまとめる。主が群への本文を書き、実際の送信回执に沿って続ける。",
+                "zh-CN": "- 主 Agent 理解群聊、直接查记忆与人物资料、阅读材料，保持自己的判断并写最终回复。联网搜索、外部核实、跨来源研究、复杂执行和图片任务交给 subagent(task, wait)，单次联网搜索也委派。任务写明问题、必要前情、真实消息 ID 与交付要求。群聊历史留在主线程，研究原文留在子线程。一般 wait=true，长任务用 wait=false，等待已有任务用 read_subagent(handle, wait=true)。子 Agent 直接执行工具，返回精简结论、关键依据、真实来源、证据句柄、待确认项和已执行动作。根据新线索继续查询，依据充分或结果重复时汇总返回。主 Agent 写群聊正文，按实际发送回执接续已交付的结果。",
             }
         )
         return f"\n{rule}"

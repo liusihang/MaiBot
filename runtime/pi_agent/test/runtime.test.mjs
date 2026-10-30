@@ -702,3 +702,47 @@ test('completed business request survives restart without repeating delivery', a
   assert.equal(restored.wires.length, 0);
   assert.equal(restored.calls.length, 0);
 });
+
+
+test('summary deadline failure reports its task and reason and retains the original history', async (t) => {
+  const config = fixtureConfig();
+  config.model_task_config.planner.hard_timeout = 0.03;
+  const h = harness(t, { response: async (number, _wire, signal) => {
+    if (number === 1) return [answer('completed original reply')];
+    await new Promise((_yes, no) => {
+      if (signal.aborted) no(new DOMException('aborted', 'AbortError'));
+      else signal.addEventListener('abort', () => no(new DOMException('aborted', 'AbortError')), { once: true });
+    });
+  } });
+  await h.initialize('group-a', [], { config });
+  await h.prompt('source retained after summary timeout');
+  const before = await h.state();
+  await assert.rejects(h.handle('compact', { sessionId: 'group-a' }), /stopReason=aborted; task=planner; timeoutMs=30/);
+  assert.deepEqual((await h.state()).messages, before.messages);
+  assert.equal(rows(h.runtime.sessions.get('group-a')).some(entry => entry.type === 'compaction'), false);
+  assert.equal(h.wires.length, 2);
+});
+
+test('compaction has its own deadline while the main route remains unchanged', async (t) => {
+  const config = fixtureConfig();
+  config.api_providers[0].timeout = 0.01;
+  config.model_task_config.planner.hard_timeout = 0.03;
+  const h = harness(t, { response: async (number, _wire, signal) => {
+    if (number === 1) return [answer('completed original reply')];
+    await new Promise((yes, no) => {
+      const timer = setTimeout(yes, 60);
+      const abort = () => { clearTimeout(timer); no(new DOMException('aborted', 'AbortError')); };
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, { once: true });
+    });
+    return [answer('compact continuity notes')];
+  } });
+  await h.initialize('group-a', [], { config });
+  await h.prompt('source for explicit summary deadline');
+  const route = h.runtime.sessions.get('group-a').resolved;
+  const fingerprint = route.routeFingerprint;
+  const compacted = await h.handle('compact', { sessionId: 'group-a', summaryTimeoutMs: 500 });
+  assert.equal(compacted.compacted, true);
+  assert.equal(route.timeoutMs, 30);
+  assert.equal(route.routeFingerprint, fingerprint);
+});
