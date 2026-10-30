@@ -816,7 +816,11 @@ async def test_background_child_allows_new_parent_turn_and_delivers_completion_o
         outputs = [m for m in request["messages"] if m["role"] == "tool"]
         if is_child:
             return {"text": "CHILD_FINISHED"} if outputs else ("web_fetch", {})
-        return ("reply", {"text": "PARENT_CONTINUES"}) if outputs else ("subagent", {"task": "BACKGROUND_TASK", "wait": False})
+        return (
+            ("reply", {"text": "PARENT_CONTINUES"})
+            if outputs
+            else ("subagent", {"task": "BACKGROUND_TASK", "wait": False})
+        )
 
     with wire_server([route] * 12) as (config, requests):
         monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
@@ -927,9 +931,14 @@ async def test_selected_turn_before_reference_failure_wakes_on_restart(monkeypat
         references.side_effect = None
         references.return_value = []
         restored_host, _ = engine()
-        restored_host._runtime._tool_registry.invoke = AsyncMock(return_value=ToolExecutionResult(
-            "reply", True, content="sent", metadata={"pause_execution": True},
-        ))
+        restored_host._runtime._tool_registry.invoke = AsyncMock(
+            return_value=ToolExecutionResult(
+                "reply",
+                True,
+                content="sent",
+                metadata={"pause_execution": True},
+            )
+        )
         restored = PiGroupRunner(restored_host, data_dir=tmp_path)
         try:
             await restored.ensure_initialized()
@@ -950,9 +959,14 @@ async def test_native_completion_survives_lost_python_turn_ack(monkeypatch, tmp_
     with wire_server([("reply", {"text": "already sent"})]) as (config, requests):
         monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
         host, _ = engine()
-        host._runtime._tool_registry.invoke = AsyncMock(return_value=ToolExecutionResult(
-            "reply", True, content="sent receipt", metadata={"pause_execution": True},
-        ))
+        host._runtime._tool_registry.invoke = AsyncMock(
+            return_value=ToolExecutionResult(
+                "reply",
+                True,
+                content="sent receipt",
+                metadata={"pause_execution": True},
+            )
+        )
         first = PiGroupRunner(host, data_dir=tmp_path)
         original = first._db
 

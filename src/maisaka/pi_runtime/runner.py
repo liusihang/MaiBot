@@ -406,7 +406,9 @@ class PiGroupRunner:
         async with self._orchestration_lock:
             await self.ensure_initialized()
             await self._db("assert_no_unresolved_executions", self.session_id)
-            turn = await self._db("begin_turn", self.session_id, [str(message.message_id) for message in source_messages])
+            turn = await self._db(
+                "begin_turn", self.session_id, [str(message.message_id) for message in source_messages]
+            )
             focus_group = getattr(self.runtime, "_focus_group", None)
             await self.ingest(
                 source_message_ids={message.message_id for message in source_messages}

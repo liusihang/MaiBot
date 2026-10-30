@@ -208,10 +208,13 @@ class BusinessStore:
     def recovery_streams(self) -> List[str]:
         """Only selected unfinished work or undelivered inbox rows need startup."""
         with self._transaction() as connection:
-            return [row[0] for row in connection.execute(
-                "SELECT stream_id FROM business_turns WHERE completed=0 UNION "
-                "SELECT stream_id FROM business_inbox WHERE acknowledged=0 ORDER BY stream_id"
-            )]
+            return [
+                row[0]
+                for row in connection.execute(
+                    "SELECT stream_id FROM business_turns WHERE completed=0 UNION "
+                    "SELECT stream_id FROM business_inbox WHERE acknowledged=0 ORDER BY stream_id"
+                )
+            ]
 
     def acknowledge_input(self, stream_id: str, event_id: str) -> None:
         """Call only after Pi has durably recorded this exact source ID.
