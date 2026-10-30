@@ -2,6 +2,7 @@
  * No assistant transcript, tools, reply plan, alternate provider, or retry.
  */
 import { createHash } from 'node:crypto';
+import { fetch as proxyFetch, ProxyAgent } from 'undici';
 import { selectAuxiliaryRoute } from './auxiliary.mjs';
 import { createProviderFetch } from './provider.mjs';
 
@@ -18,6 +19,17 @@ const CHAT_ONLY = new Set(['reasoning', 'reasoning_effort', 'temperature', 'top_
   'max_output_tokens', 'max_completion_tokens', 'stream', 'store', 'tool_choice', 'response_format']);
 const CACHE_FIELDS = new Set(['prompt_cache_key', 'prompt_cache_options', 'safety_identifier']);
 const OPTION_FIELDS = new Set(['promptCacheKey', 'promptCacheOptions', 'safetyIdentifier', 'timeoutMs']);
+
+function decisionProxy(extra) {
+  const address = extra.pi.decisionsProxyUrl;
+  if (address == null) return undefined;
+  let url;
+  try { url = new URL(address); } catch { /* Report only a safe code below. */ }
+  if (!url || !['http:', 'https:'].includes(url.protocol)) {
+    throw fail('INVALID_DECISION_PROXY', 'Decisions proxy must be an HTTP or HTTPS URL');
+  }
+  return new ProxyAgent({ uri: url.href, proxyTunnel: true });
+}
 
 function validateInput(input) {
   if (!record(input)) throw fail('INVALID_DECISION_INPUT', 'Participation evidence must be a JSON object');
@@ -126,7 +138,13 @@ export async function decideParticipation(runtime, payload, { signal } = {}) {
   const started = performance.now();
   const details = { route };
   let wireError;
-  const fetcher = createProviderFetch(provider, extra, fetchImpl);
+  let proxy;
+  // Only this classification uses the configured egress. Other model tasks
+  // and process-wide HTTP settings keep their existing routes.
+  const transport = (url, init) => (fetchImpl ?? (proxy ? proxyFetch : globalThis.fetch))(url, {
+    ...init, ...(proxy ? { dispatcher: proxy } : {}),
+  });
+  const fetcher = createProviderFetch(provider, extra, transport);
   const guardedFetch = async (url, init) => {
     try {
       const response = await fetcher(url, init);
@@ -161,16 +179,24 @@ export async function decideParticipation(runtime, payload, { signal } = {}) {
     }
   };
   const model = runtime.getModelOfType('classifier', selected.classifierProviderId, info.model_identifier);
-  const result = await runtime.classify(model, {
-    state: input,
-    questions: { [NAME]: { type: 'choice', instructions: payload.instructions,
-      criteria: Object.fromEntries(CHOICES.map((choice) => [choice, ''])) } },
-  }, {
-    signal: effectiveSignal, maxRetries: 0, timeoutMs, fetch: guardedFetch,
-    // Pi 1.4 native Decisions predates GA input_json/cache support. Use its
-    // official payload hook, keeping all participant-supplied keys as DATA.
-    onPayload: (body) => ({ ...body, ...fields, input: [{ role: 'user', content: [{ type: 'input_json', data: input }] }] }),
-  });
+  let result;
+  proxy = decisionProxy(extra);
+  try {
+    result = await runtime.classify(model, {
+      state: input,
+      questions: { [NAME]: { type: 'choice', instructions: payload.instructions,
+        criteria: Object.fromEntries(CHOICES.map((choice) => [choice, ''])) } },
+    }, {
+      signal: effectiveSignal, maxRetries: 0, timeoutMs, fetch: guardedFetch,
+      // Pi 1.4 native Decisions predates GA input_json/cache support. Use its
+      // official payload hook, keeping all participant-supplied keys as DATA.
+      onPayload: (body) => ({ ...body, ...fields, input: [{ role: 'user', content: [{ type: 'input_json', data: input }] }] }),
+    });
+  } finally {
+    // Classification has consumed the response, or was cancelled. Never keep
+    // request-scoped CONNECT sockets alive after the operation ends.
+    await proxy?.destroy();
+  }
   details.durationMs = performance.now() - started;
   if (signal?.aborted) throw fail('DECISION_CANCELLED', 'Decisions participation request was cancelled', details);
   if (effectiveSignal.aborted) throw fail('DECISION_TIMEOUT', 'Decisions participation request timed out', details);

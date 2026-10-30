@@ -26,6 +26,10 @@ participation_timeout_seconds = 30
 **模型名正确不代表网关支持 Decisions。** 配置的 base URL 必须实际提供
 `/decisions`，一般为 `https://api.openai.com/v1` 或明确支持该协议的现有代理。
 官方端点需要 OpenAI API key；ChatGPT 登录凭据不等于 Decisions API 权限。
+需要固定出口时，可在参与判断的专属模型中设置
+`extra_params.pi.decisionsProxyUrl="http://proxy-host:port"`。它只代理该模型的
+Decisions 请求，不改进程环境变量、其他模型或工具的网络路由。每次请求结束或
+取消后关闭代理连接；API 密钥仍通过到官方端点的 TLS 隧道发送。
 404、401/403 等会明确记录错误并把本批交给主 Agent，不冒充判断成功。
 仓库改动不替换实际凭据、不部署、不进行收费模型调用；启用前需在自己的账户/网关
 确认可用性。缺少配置字段的旧配置也将采用 `decisions` 默认值；需要保留原行为应

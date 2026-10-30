@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { createConnection } from 'node:net';
 import test from 'node:test';
 import { createInferenceDispatcher } from '../inference.mjs';
 import { createHostModelRuntime, resolveTaskModel } from '../provider.mjs';
@@ -62,6 +63,47 @@ test('real HTTP: native Pi classifier posts Decisions schema, not chat, and pres
   assert(!JSON.stringify(result).includes(secret));
   const runtime = await createHostModelRuntime(config);
   assert.equal(resolveTaskModel(runtime, 'fast_model').model.api, 'openai-responses', 'chat/memory retain their original API');
+});
+
+test('configured Decisions proxy carries CONNECT traffic without global proxy settings or auth leakage', async (t) => {
+  const { run, config, wires } = await fixture(t);
+  const tunnels = [];
+  const sockets = new Set();
+  const proxy = createServer();
+  proxy.on('connect', (req, client, head) => {
+    tunnels.push({ target: req.url, auth: req.headers.authorization });
+    const target = new URL(`http://${req.url}`);
+    const upstream = createConnection({ host: target.hostname, port: Number(target.port) });
+    for (const socket of [client, upstream]) {
+      sockets.add(socket); socket.on('close', () => sockets.delete(socket));
+      socket.on('error', () => { client.destroy(); upstream.destroy(); });
+    }
+    upstream.on('connect', () => {
+      client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length) upstream.write(head);
+      client.pipe(upstream); upstream.pipe(client);
+    });
+  });
+  await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => proxy.close(resolve));
+  });
+  const changed = structuredClone(config);
+  changed.models[0].extra_params.pi = { decisionsProxyUrl: `http://127.0.0.1:${proxy.address().port}` };
+  assert.equal((await run({ config: changed })).decision, 'engage');
+  assert.equal(tunnels.length, 1);
+  assert.equal(tunnels[0].target, new URL(config.api_providers[0].base_url).host);
+  assert.equal(tunnels[0].auth, undefined, 'API credential belongs inside the tunnel');
+  assert.equal(wires[0].headers.authorization, `Bearer ${secret}`);
+  await run();
+  assert.equal(tunnels.length, 1, 'unconfigured route stays direct');
+  for (const decisionsProxyUrl of ['secret-not-a-url', 'file:///secret']) {
+    changed.models[0].extra_params.pi.decisionsProxyUrl = decisionsProxyUrl;
+    await assert.rejects(run({ config: changed }), (error) => error.code === 'INVALID_DECISION_PROXY'
+      && !String(error).includes(decisionsProxyUrl));
+  }
+  assert.equal(wires.length, 2);
 });
 
 test('all three choices survive; participant instructions and JSON role keys remain inert data', async (t) => {
