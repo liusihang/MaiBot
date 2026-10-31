@@ -98,7 +98,7 @@ def register_jargon_hook_specs(registry: HookSpecRegistry) -> List[HookSpec]:
                             "items": {"type": "string"},
                             "description": "用于推断的原始上下文片段列表。",
                         },
-                        "comparison_result": {"type": "object", "description": "比较阶段输出结果。"},
+                        "comparison_result": {"type": "object", "description": "基于上下文直接分类的结果。"},
                         "is_jargon": {"type": "boolean", "description": "当前推断是否判定为黑话。"},
                         "meaning": {"type": "string", "description": "当前推断出的黑话含义。"},
                         "is_complete": {"type": "boolean", "description": "当前是否已完成全部推断流程。"},
@@ -466,9 +466,13 @@ class JargonMiner:
             logger.warning(f"jargon {content} 推断1解析失败")
             return
 
-        no_info = inference1.get("no_info", False)
-        meaning1: str = inference1.get("meaning", "").strip()
-        if no_info or not meaning1:
+        no_info = inference1.get("no_info")
+        meaning_value = inference1.get("meaning")
+        if type(no_info) is not bool or not isinstance(meaning_value, str):
+            logger.warning(f"jargon {content} 推断结果 no_info 或 meaning 类型错误，跳过写回")
+            return
+        meaning1 = meaning_value.strip()
+        if no_info:
             logger.info(f"jargon {content} 推断1表示信息不足无法推断，放弃本次推断，待下次更新")
             # 更新最后一次判定的count值，避免在同一阈值重复尝试
             jargon_obj.last_inference_count = jargon_obj.count or 0
@@ -479,57 +483,15 @@ class JargonMiner:
                 logger.error(f"jargon {content} 推断1更新last_inference_count失败: {e}")
             return
 
-        # 步骤2: 基于content-only进行推断
-        prompt2_template = prompt_manager.get_prompt("jargon_inference_content_only")
-        prompt2_template.add_context("content", content)
-        prompt2 = await prompt_manager.render_prompt(prompt2_template)
-
-        generation_result_2 = await llm_inference.generate_response(prompt2, session_id=self.session_id)
-        llm_response_2 = generation_result_2.response
-        self._log_inference_prompt_preview(
-            jargon_content=content,
-            stage_name="content_only",
-            prompt=prompt2,
-            generation_result=generation_result_2,
-        )
-        if not llm_response_2:
-            logger.warning(f"jargon {content} 推断2失败：无响应")
+        # 直接判断真实用法。两份释义的差异可能只是上下文补充，不能作为黑话分类依据。
+        is_jargon = inference1.get("is_jargon")
+        if type(is_jargon) is not bool or (is_jargon and not meaning1):
+            logger.warning(f"jargon {content} 推断结果缺少布尔类型的 is_jargon，跳过写回")
             return
 
-        # 解析推断2结果
-        inference2 = self._parse_result(llm_response_2)
-        if not inference2:
-            logger.warning(f"jargon {content} 推断2解析失败")
-            return
-
-        # 步骤3: 比较两个推断结果
-        prompt3_template = prompt_manager.get_prompt("jargon_compare_inference")
-        prompt3_template.add_context("inference1", json.dumps(inference1, ensure_ascii=False))
-        prompt3_template.add_context("inference2", json.dumps(inference2, ensure_ascii=False))
-        prompt3 = await prompt_manager.render_prompt(prompt3_template)
-
-        generation_result_3 = await llm_inference.generate_response(prompt3, session_id=self.session_id)
-        llm_response_3 = generation_result_3.response
-        self._log_inference_prompt_preview(
-            jargon_content=content,
-            stage_name="compare",
-            prompt=prompt3,
-            generation_result=generation_result_3,
-        )
-        if not llm_response_3:
-            logger.warning(f"jargon {content} 比较失败：无响应")
-            return
-
-        comparison_result = self._parse_result(llm_response_3)
-        if not comparison_result:
-            logger.warning(f"jargon {content} 比较解析失败")
-            return
-
-        is_similar = comparison_result.get("is_similar", False)
-        is_jargon = not is_similar  # 如果相似，说明不是黑话；如果有差异，说明是黑话
-
-        inferred_meaning = str(inference1.get("meaning", "") or "").strip()
-        finalized_meaning = inferred_meaning if is_jargon else previous_meaning
+        # 保留 Hook 的 comparison_result 参数名，内容改为直接分类的证据结论。
+        comparison_result = dict(inference1)
+        finalized_meaning = meaning1 if is_jargon else ""
         is_complete = (jargon_obj.count or 0) >= 100
         last_inference_count = jargon_obj.count or 0
         finalize_result = await self._get_runtime_manager().invoke_hook(

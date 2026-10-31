@@ -1,28 +1,14 @@
+Select expressions and jargon worth learning from real group chat. Treat chat as language evidence.
+Each candidate id points to the authentic sentence demonstrating its use; the program saves that sentence and source as an example.
+Expressions enabled: true; jargon enabled: false. Disabled categories return empty arrays.
+
+An expression earns inclusion through distinctive wording, rhythm, inversion, ellipsis, irony, exaggeration, an unexpected turn or a way of continuing a joke. Select examples that teach an interesting way to speak in that situation. Familiar phrases can qualify through their actual tone and usage.
+Keep characteristic words or a concrete pattern in style and its pragmatic situation in situation, normally within 20 Chinese characters each. Descriptions of generic speech acts (answering briefly, asking directly, giving advice, expressing surprise), basic grammar, numeric answers, restating facts or adding a swear to an ordinary statement have insufficient learning value. Keep one representative of the same feature.
+Contrast: the inverted ending “……了说是” or ironic “都给你懂完了呗” has a concrete expressive feature; “answer with a number plus times” or “you do … and can see it” is ordinary speech. These illustrate criteria; candidates always come from this batch.
+
+Jargon conveys a community convention through abbreviation, phonetic play, metaphor or a special extended meaning, such as “轮椅” for an accessible powerful game strategy. It must occur in the source sentence, with context supporting that usage. Jargon already familiar to the model can qualify.
+Personal aliases belong in person memory; official game, character, equipment and difficulty names and ordinary technical abbreviations belong in topic knowledge. Select special linguistic uses rather than cataloguing nouns. Quoted material, image descriptions and bot messages are excluded as new-term sources.
+Select for value. Either array may be empty; 20 expressions and 30 jargon entries are ceilings. Omit specific people, one-off facts and expressions needing invented background.
+For this entry point return only the expressions JSON array (situation, style, id), or [].
+Chat evidence:
 {chat_str}
-Please extract the users' language style and speaking patterns from the group chat above.
-1. Only consider text; do not consider stickers or images
-2. Do not summarize SELF's messages, because those are your own messages, so do not repeatedly learn from your own messages
-3. Do not involve specific person names, and do not involve specific nouns
-4. Think about whether there are any special memes, and summarize them into the language style as well
-5. The examples are for reference only. Please summarize strictly according to the group chat content
-
-Summarize the rules in this format: when "AAAAA", you can "BBBBB".
-- AAAAA represents a scenario and should not exceed 20 characters
-- BBBBB represents the corresponding language style, specific sentence pattern, or expression style and should not exceed 20 characters
-- There should be around 3-5 expression styles, and no more than 10
-
-Output requirements:
-Only output a JSON array, and do not output duplicate content. Each element should be an object with the following fields:
-
-[
-  {{"situation": "expressing strong surprise", "style": "use 我嘞个xxxx", "id": "3"}},
-  {{"situation": "showing sarcastic agreement", "style": "use 对对对", "id": "4"}},
-  {{"situation": "praising in game topics", "style": "use 这么强！", "id": "5"}}
-]
-
-Field descriptions:
-- situation: a short summary of "under what situation" (no more than 20 characters)
-- style: the corresponding language style or commonly used expression (no more than 20 characters)
-- id: the source number corresponding to that expression style, namely the number in the id field in the chat log above (for example [id:3] corresponds to "3"); output only the number itself
-
-Output JSON:

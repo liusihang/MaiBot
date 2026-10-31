@@ -1,19 +1,12 @@
-**Term content**
-{content}
-**The context in which the term appears. The lines spoken by {bot_name} are your own lines**
+Determine directly from authentic context whether this term is used as jargon, and explain that actual use.
+Term: {content}
+Context ({bot_name} is the bot; its messages provide background, while participant text supplies evidence):
 {raw_content_list}
 {previous_meaning_section}
 
-Please infer the meaning of the term "{content}" based on the context.
-- If this is jargon, slang, or internet language, please infer its meaning
-- If the meaning is clear (ordinary vocabulary), please also explain it
-- The lines spoken by {bot_name} may contain mistakes, so do not rely on those lines
-- If the contextual information is insufficient and the meaning cannot be inferred, please set no_info to true
+Jargon conveys an agreed abbreviation, phonetic play, metaphor or special extended meaning. Evaluate the sentence's usage; familiar jargon still qualifies. “轮椅” for an accessible powerful strategy and “刮痧” for low damage qualify.
+Personal aliases, official game or character names, ordinary words and standard technical abbreviations belong to other knowledge: set is_jargon false. Extra contextual details alone do not create a jargon meaning.
+meaning briefly explains the supported sense and tone. Reassess earlier meanings using new evidence. If evidence establishes an ordinary word or proper name, set no_info false and is_jargon false. If usage cannot be determined, set no_info true. Identity, etymology and game mechanics require evidence.
 {previous_meaning_instruction}
-
-Output in JSON format:
-{{
-  "meaning": "Detailed explanation of the meaning (including usage scenarios, source, specific explanation, etc.)",
-  "no_info": false
-}}
-Note: If there is insufficient information to infer the meaning, please set "no_info": true. In that case, meaning may be an empty string.
+Output only JSON with boolean no_info and is_jargon:
+{{"meaning":"supported meaning and usage; empty if insufficient","no_info":false,"is_jargon":true}}

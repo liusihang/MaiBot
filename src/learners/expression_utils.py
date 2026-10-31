@@ -146,6 +146,7 @@ async def check_expression_suitability(
         (suitable, reason, error) 元组，如果出错则 suitable 为 False，error 包含错误信息
     """
     base_criteria = [
+        "有值得借鉴的具体措辞、节奏或语用特点，而非普通交流动作、语法或事实陈述",
         "表达方式或言语风格是否与使用条件或使用情景匹配",
         "允许部分语法错误或口语化或缺省出现",
         "表达方式不能太过特指，需要具有泛用性",

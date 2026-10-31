@@ -573,6 +573,10 @@ class JargonLearner:
                 skipped_entries.append({"content": content, "source_id": source_id, "reason": "excluded_source"})
                 continue
 
+            if content not in extract_learning_text(original_message.raw_message):
+                skipped_entries.append({"content": content, "source_id": source_id, "reason": "absent_from_source"})
+                continue
+
             start_idx = max(0, line_index - 3)
             end_idx = min(len(messages), line_index + 4)
             context_items = messages[start_idx:end_idx]

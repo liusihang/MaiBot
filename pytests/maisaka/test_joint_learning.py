@@ -365,6 +365,81 @@ async def test_jargon_inference_keeps_valid_evidence_for_replay(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "expected"),
+    [
+        ({"no_info": False, "is_jargon": True, "meaning": "游戏中低门槛的强势打法"}, True),
+        ({"no_info": False, "is_jargon": False, "meaning": "游戏角色正式名称"}, False),
+    ],
+)
+async def test_jargon_classification_uses_context_directly_once(monkeypatch, response, expected):
+    from src.learners import jargon_miner as module
+    from src.common.database.database_model import JargonCreatedBy
+
+    miner = module.JargonMiner.__new__(module.JargonMiner)
+    miner.session_id, miner.session_name = "chat", "群聊"
+    item = NS(
+        content="词条",
+        created_by=JargonCreatedBy.AI,
+        count=4,
+        meaning="旧的错误释义",
+        is_jargon=True,
+        is_global=False,
+        last_inference_count=0,
+    )
+    monkeypatch.setattr(miner, "_load_evidence_contexts", lambda item: (["真实上下文"], "[]", False))
+    monkeypatch.setattr(miner, "_modify_jargon_entry", lambda item: None)
+    monkeypatch.setattr(miner, "_log_inference_prompt_preview", lambda **kw: None)
+    monkeypatch.setattr(module.prompt_manager, "get_prompt", lambda name: NS(add_context=lambda *args: None))
+    monkeypatch.setattr(module.prompt_manager, "render_prompt", AsyncMock(return_value="prompt"))
+    generate = AsyncMock(return_value=NS(response=json.dumps(response)))
+    monkeypatch.setattr(module.llm_inference, "generate_response", generate)
+
+    async def hook(name, **kwargs):
+        return NS(aborted=False, kwargs=kwargs)
+
+    monkeypatch.setattr(miner, "_get_runtime_manager", lambda: NS(invoke_hook=hook))
+    await miner.infer_meaning(item)
+    assert item.is_jargon is expected
+    assert item.meaning == (response["meaning"] if expected else "")
+    assert item.last_inference_count == 4
+    assert generate.await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("classification", [None, "false", 0])
+async def test_jargon_invalid_classification_does_not_finalize(monkeypatch, classification):
+    from src.learners import jargon_miner as module
+    from src.common.database.database_model import JargonCreatedBy
+
+    miner = module.JargonMiner.__new__(module.JargonMiner)
+    miner.session_id = "chat"
+    item = NS(content="term", created_by=JargonCreatedBy.AI, count=4, meaning="", last_inference_count=0)
+    monkeypatch.setattr(miner, "_load_evidence_contexts", lambda item: (["real context"], "[]", False))
+    writes = []
+    monkeypatch.setattr(miner, "_modify_jargon_entry", lambda item: writes.append(item))
+    monkeypatch.setattr(miner, "_log_inference_prompt_preview", lambda **kw: None)
+    monkeypatch.setattr(module.prompt_manager, "get_prompt", lambda name: NS(add_context=lambda *args: None))
+    monkeypatch.setattr(module.prompt_manager, "render_prompt", AsyncMock(return_value="prompt"))
+    generate = AsyncMock(
+        return_value=NS(
+            response=json.dumps(
+                {
+                    "no_info": False,
+                    "is_jargon": classification,
+                    "meaning": "some meaning",
+                }
+            )
+        )
+    )
+    monkeypatch.setattr(module.llm_inference, "generate_response", generate)
+    await miner.infer_meaning(item)
+    assert writes == []
+    assert item.last_inference_count == 0
+    assert generate.await_count == 1
+
+
+@pytest.mark.asyncio
 async def test_old_expression_can_gain_its_first_authentic_example_without_new_record(tmp_path, monkeypatch):
     from datetime import datetime
     from src.learners.expression_provenance import ExpressionProvenance
@@ -421,3 +496,22 @@ async def test_jargon_learning_captures_original_example_and_cache_preserves_it(
     reference = round_trip[0]["evidence_messages"][0][0]
     assert reference["example"] == "这把起飞了"
     assert reference["text_hash"] == joint.text_digest("这把起飞了")
+
+
+@pytest.mark.asyncio
+async def test_jargon_learning_requires_term_in_its_own_source(monkeypatch):
+    from src.learners import jargon_learner as module
+
+    learner = module.JargonLearner.__new__(module.JargonLearner)
+    monkeypatch.setattr(learner, "_log_jargon_update_process", lambda **kwargs: None)
+    monkeypatch.setattr(module, "_is_learnable_session_message", lambda message: True)
+    monkeypatch.setattr(module, "extract_learning_text", lambda raw: raw)
+    source = NS(
+        original_message=NS(
+            platform="qq", message_id="m", raw_message="普通回答", message_info=NS(user_info=NS(user_id="u"))
+        ),
+        content="普通回答",
+    )
+    miner = NS(process_extracted_entries=AsyncMock())
+    assert not await learner._process_jargon_entries([("不存在的词", "1")], [source], miner)
+    miner.process_extracted_entries.assert_not_called()

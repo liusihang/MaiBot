@@ -104,3 +104,24 @@ There is no extra LLM to invent examples and no schema migration. Retrieval chec
 the same-chat source and fingerprint before using the saved example. Deleted or
 edited sources do not expose stale snapshots. An old expression without provenance
 can acquire an example when it is observed and approved again, reusing its ID.
+
+## Learning quality
+
+Joint extraction and evidence review select concrete expressive features worth
+borrowing, rather than generic speech acts, grammar, numeric replies or facts.
+Characteristic wording, rhythm, inversion, ellipsis, irony and joke continuations
+can qualify, including familiar phrases. There is no minimum yield: a batch may
+produce no expressions. Alternate extraction, single-item review and text-import
+prompts use the same criteria in Chinese, English and Japanese.
+
+Jargon classification now uses one context-grounded model call returning boolean
+`is_jargon` and `no_info`, plus `meaning`. It recognizes special conventional senses
+even when the model already knows them, and separates them from personal aliases,
+official names and ordinary technical abbreviations. Different context-free and
+contextual explanations are no longer treated as proof of jargon. A definite
+non-jargon decision clears an obsolete meaning. Invalid classification types do
+not finalize a record; insufficient evidence waits for the next observation
+threshold. Existing 4/8/25/100 scheduling and hook names remain; the hook's
+`comparison_result` argument now carries the direct classification result.
+Candidates must occur in the top-level human source text, not merely a nearby
+message or quote. Learning examples remain original sentences, never generated.
