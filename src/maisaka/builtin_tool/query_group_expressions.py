@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Optional
 
-from src.core.tooling import ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
+from src.core.tooling import ToolAnnotation, ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
 
 from .context import BuiltinToolRuntimeContext
 
@@ -36,6 +36,7 @@ def get_tool_spec() -> ToolSpec:
         },
         provider_name="maisaka_builtin",
         provider_type="builtin",
+        annotation=ToolAnnotation(read_only=True, destructive=False),
     )
 
 

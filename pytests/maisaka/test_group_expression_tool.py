@@ -37,6 +37,8 @@ async def test_registered_tool_uses_host_scope_and_preserves_grounded_results(mo
     monkeypatch.setattr(query_group_expressions, "_search", search)
     specs = {spec.name: spec for spec in get_all_builtin_tool_specs()}
     assert specs["query_group_expressions"].metadata["visibility"] == "visible"
+    safety = specs["query_group_expressions"].execution_contract()["safety"]
+    assert safety["read_only"] is True and safety["destructive"] is False
     assert "session_id" not in specs["query_group_expressions"].parameters_schema["properties"]
     handler = build_builtin_tool_handlers(runtime())["query_group_expressions"]
     result = await handler(
