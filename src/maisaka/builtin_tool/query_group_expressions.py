@@ -1,6 +1,6 @@
 """Pre-utterance, host-scoped language search; the main Agent writes the reply."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.core.tooling import ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
 
@@ -46,7 +46,7 @@ async def _search(session_id: str, intent: str, context: str, limit: int) -> Dic
     return await search_group_expressions(session_id=session_id, intent=intent, context=context, limit=limit)
 
 
-def _render_candidates(candidates: list[Dict[str, Any]]) -> str:
+def _render_candidates(candidates: List[Dict[str, Any]]) -> str:
     """Show language references only; diagnostics remain in structured_content."""
     blocks = []
     for item in candidates:
