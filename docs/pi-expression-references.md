@@ -1,6 +1,6 @@
 # Pi 主 Agent 的群表达检索
 
-表达与黑话通过 `query_group_expressions(intent, context?, limit?)` 统一使用。主 Agent 先决定自己想表达的意思，必要时搜索，再自己组织最终回复；不是每轮强制调用，不恢复 Planner → Replyer，也不增加表达选择或改写 LLM。
+表达与黑话通过 `query_group_expressions(intent, context?, limit?)` 统一使用。主 Agent 每次发言前先决定自己想表达的意思，再调用查询工具，阅读候选的含义、场景和真实例句，最后自己组织回复。查询是每次发言前的固定步骤，是否借鉴候选由主 Agent 判断；没有合适的、结果为空或查询失败时，按原有想法表达。继续使用 Pi 单 Agent，不增加表达选择或改写 LLM。
 
 - `intent` 为 1–1,000 字符；可选 `context` 最多 2,000 字符，`limit` 为 1–5（默认 5）。真实会话来自宿主 runtime，模型不能指定其他群。共享范围及可用状态在检索层过滤，不允许用外群原始聊天充当例句。
 - 统一检索表达与黑话，关键词 BM25 和 embedding 各自排序，再以 RRF 融合。结果包含含义、适用场景、可验证的历史例句及检索覆盖信息；不完整索引或 embedding 故障须看 `coverage`，不是完整语义搜索的保证。

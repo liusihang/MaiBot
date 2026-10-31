@@ -2,8 +2,11 @@
 
 `src.services.group_expression_search.search_group_expressions(session_id, intent,
 context="", limit=5)` retrieves optional language references, not a generated reply.
-The main Agent describes its intended meaning, checks the returned meaning/situation
-and real evidence, and can adapt a fitting expression **or use none**. This is not a
+Before every utterance, the main Agent calls this tool with its intended meaning,
+checks the returned meaning/situation and real evidence, and can adapt a fitting
+expression **or use none**. The lookup is required before each utterance; using a
+candidate remains optional. Empty results, unsuitable candidates, or query failure
+leave the Agent free to express its original thought in its own words. This is not a
 fact-memory search: references never authorize treating a joke as a personal fact.
 
 ## Sources and ranking

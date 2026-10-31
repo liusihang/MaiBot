@@ -1,4 +1,4 @@
-"""Optional, host-scoped language search; the main Agent writes the reply."""
+"""Pre-utterance, host-scoped language search; the main Agent writes the reply."""
 
 from typing import Any, Dict, Optional
 
@@ -13,8 +13,9 @@ def get_tool_spec() -> ToolSpec:
     return ToolSpec(
         name="query_group_expressions",
         description=(
-            "按你想表达的意思和当前语境，融合检索当前会话可用的表达、黑话和群梗。"
-            "返回含义、适用场景和真实例句供你自行组织最终回复。不是每轮必用；不合适就不用，勿硬套。"
+            "每次发言前调用：按你想表达的意思和当前语境，融合检索当前会话可用的表达、黑话和群梗。"
+            "返回含义、适用场景和真实例句。有合适的就选择借鉴，再自行组织最终回复；"
+            "没有合适的、结果为空或查询失败时，按自己的想法说。"
         ),
         parameters_schema={
             "type": "object",
