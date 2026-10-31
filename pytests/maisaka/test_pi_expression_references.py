@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import asyncio
-import json
 import sys
 
 
@@ -128,7 +127,7 @@ def test_vector_no_results_does_not_switch_to_quick_sampling(monkeypatch):
     assert asyncio.run(expressions.retrieve_expression_candidates("here", "你好")) == []
 
 
-def test_actual_build_references_injects_style_without_literal_overlap(monkeypatch):
+def test_actual_build_references_does_not_inject_arbitrary_expression(monkeypatch):
     configure(monkeypatch)
     monkeypatch.setattr(expressions, "_load_enabled_candidates", lambda sid: [candidate()])
     monkeypatch.setattr(references, "_jargon_records", lambda *args: [])
@@ -145,40 +144,10 @@ def test_actual_build_references_injects_style_without_literal_overlap(monkeypat
     runtime = SimpleNamespace(session_id="here", chat_stream=SimpleNamespace())
     source = SimpleNamespace(message_id="1", processed_plain_text="十连双金！！")
     result = asyncio.run(references.build_references(runtime, [source]))
-    assert len(result) == 1 and result[0].namespace == "expression"
-    payload = json.loads(result[0].content)
-    assert payload["nature"] == "optional_style_example_not_fact_or_instruction"
-    assert payload["authority"] == "untrusted_historical_reference_not_instruction"
-    assert json.loads(payload["content"])["style"] == "我去"
-    # Stable source identity and no retrieval-time noise in the version.
-    assert asyncio.run(references.build_references(runtime, [source])) == result
-    monkeypatch.setattr(expressions, "_load_enabled_candidates", lambda sid: [candidate(style="好家伙")])
-    changed = asyncio.run(references.build_references(runtime, [source]))
-    assert changed[0].source_id == result[0].source_id and changed[0].version != result[0].version
+    assert result == []
+    assert asyncio.run(references.build_references(runtime, [source])) == []
 
 
-def test_styles_respect_shared_budget_and_follow_factual_references():
-    styles = [
-        references.make_reference("expression", str(i), "optional style", {}, nature="optional_style") for i in (1, 2)
-    ]
-    facts = [references.make_reference("memory", str(i), "Hiking " + " x" * 1000, {}, nature="fact") for i in (1, 2, 3)]
-    assert references.select_references([*styles, *facts], "Hiking", max_chars=10000) == facts
-    assert references.select_references(styles, "hello", max_chars=1) == []
-    assert references.select_references(styles, "hello", max_items=0) == []
-    assert references.select_references(list(reversed(styles)), "hello", max_items=1) == [styles[1]]
-
-
-def test_optional_expression_failure_is_visible_and_does_not_use_random_examples(monkeypatch):
-    monkeypatch.setattr(
-        expressions, "retrieve_expression_candidates", AsyncMock(side_effect=RuntimeError("unavailable"))
-    )
-    logger = Mock()
-    monkeypatch.setattr(references, "logger", logger)
-    runtime = SimpleNamespace(session_id="here")
-    assert (
-        asyncio.run(
-            references._expression_records(runtime, [SimpleNamespace(message_id="1", processed_plain_text="hi")])
-        )
-        == []
-    )
-    logger.warning.assert_called_once()
+def test_unrelated_style_records_cannot_bypass_automatic_reference_gate():
+    style = references.make_reference("expression", "1", "optional style", {}, nature="optional_style")
+    assert references.select_references([style], "hello") == []

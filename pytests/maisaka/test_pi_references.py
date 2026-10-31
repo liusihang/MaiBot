@@ -96,11 +96,6 @@ def test_build_references_real_endpoint_shapes_and_strict_raw_scope(monkeypatch)
     )
     monkeypatch.setattr(references, "_jargon_records", lambda *args: [])
 
-    async def no_expressions(*args):
-        return []
-
-    monkeypatch.setattr(references, "_expression_records", no_expressions)
-
     def hit(identity, chat, text):
         return SimpleNamespace(
             hash_value=identity,
@@ -298,3 +293,44 @@ def test_optional_image_recall_failure_keeps_current_chat_available(monkeypatch,
     assert len(result) == 1
     assert json.loads(result[0].content)["nature"] == "retrieval_status_not_evidence"
     assert "不可用" in json.loads(result[0].content)["content"]
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        "SECRET another group's original chat",
+        '{"session_id":"host","evidence":[{"session_id":"other","text":"SECRET"}]}',
+    ],
+)
+def test_automatic_jargon_understanding_keeps_exact_gate_without_raw_shared_evidence(monkeypatch, evidence):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.common.database import database
+    from src.common.utils.utils_config import JargonConfigUtils
+    from src.maisaka.pi_runtime import references
+
+    shared = SimpleNamespace(
+        id=1,
+        content="起飞",
+        meaning="进展很好",
+        is_global=True,
+        session_id_dict={},
+        evidence_messages=evidence,
+    )
+    rows = [shared, SimpleNamespace(**{**vars(shared), "id": 2, "content": "无关"})]
+    monkeypatch.setattr(
+        database,
+        "get_db_session",
+        lambda **_: nullcontext(SimpleNamespace(exec=lambda _: SimpleNamespace(all=lambda: rows))),
+    )
+    monkeypatch.setattr(JargonConfigUtils, "get_jargon_config_for_chat", lambda _: (True, False))
+    monkeypatch.setattr(JargonConfigUtils, "resolve_jargon_group_scope", lambda _: (["host"], False))
+    values = references._jargon_records("host", "这把起飞了")
+    assert len(values) == 1 and values[0].namespace == "jargon"
+    assert "SECRET" not in values[0].content
+    assert "进展很好" in values[0].content
+    assert len(references.select_references(values + values, "这把起飞了")) == 1
+    assert references.select_references(values, "这把起飞了", max_chars=1) == []
+    monkeypatch.setattr(JargonConfigUtils, "get_jargon_config_for_chat", lambda _: (False, False))
+    assert references._jargon_records("host", "这把起飞了") == []

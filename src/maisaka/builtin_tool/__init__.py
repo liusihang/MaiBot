@@ -14,6 +14,8 @@ from .remember_memory import get_tool_spec as get_remember_memory_tool_spec
 from .remember_memory import handle_tool as handle_remember_memory_tool
 from .query_memory import get_tool_spec as get_query_memory_tool_spec
 from .query_memory import handle_tool as handle_query_memory_tool
+from .query_group_expressions import get_tool_spec as get_query_group_expressions_tool_spec
+from .query_group_expressions import handle_tool as handle_query_group_expressions_tool
 from .query_emoji import get_tool_spec as get_query_emoji_tool_spec
 from .query_emoji import handle_tool as handle_query_emoji_tool
 from .query_image_memory import get_tool_spec as get_query_image_memory_tool_spec
@@ -115,6 +117,9 @@ BUILTIN_TOOL_ENTRIES: List[BuiltinToolEntry] = [
         _get_query_person_profile_tool_spec,
         handle_query_person_profile_tool,
         stage="action",
+    ),
+    BuiltinToolEntry(
+        "query_group_expressions", get_query_group_expressions_tool_spec, handle_query_group_expressions_tool, stage="action"
     ),
     BuiltinToolEntry("query_emoji", get_query_emoji_tool_spec, handle_query_emoji_tool, stage="both"),
     BuiltinToolEntry("send_emoji", get_send_emoji_tool_spec, handle_send_emoji_tool, stage="action"),

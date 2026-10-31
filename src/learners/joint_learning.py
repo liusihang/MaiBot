@@ -21,6 +21,7 @@ from src.config.config import global_config
 from src.services.llm_service import LLMServiceClient
 
 from .expression_learner import expression_learning_batch_gate
+from .expression_provenance import ExpressionProvenance, expression_identity, text_digest
 from .expression_style_utils import normalize_expression_style_for_learning
 from .jargon_learner import JargonLearner
 from .joint_learning_journal import JointLearningJournal
@@ -277,7 +278,18 @@ class JointLearningCoordinator:
                 )
                 if existing:
                     continue
-                filtered.append({**candidate, "style": style})
+                source = messages[int(candidate["id"]) - 1]
+                filtered.append(
+                    {
+                        **candidate,
+                        "style": style,
+                        "source_ref": {
+                            "message_id": source.message_id,
+                            "platform": source.platform,
+                            "text_hash": text_digest(extract_learning_text(source.raw_message)),
+                        },
+                    }
+                )
             accepted = filtered
             if filtered and global_config.expression.expression_self_reflect:
                 evidence = [
@@ -315,8 +327,43 @@ class JointLearningCoordinator:
                 )
                 approved = parse_review(result.response, len(filtered))
                 accepted = [filtered[i] for i in approved]
+                for i in approved:
+                    # Keep compact, attributed context references, not another copy of chat text.
+                    window_ids = evidence[i]["context"]["message_ids"]
+                    source_id = evidence[i]["context"]["source_message_id"]
+                    position = window_ids.index(source_id)
+                    filtered[i]["context_refs"] = [
+                        {"message_id": mid, "text_hash": text_digest(shared_messages[mid]["text"])}
+                        for mid in window_ids[max(0, position - 1) : position + 2]
+                        if mid != source_id
+                    ]
             # Checkpoint approved source-bound candidates before any database write.
             await asyncio.to_thread(self.journal.save, batch["id"], review=json.dumps(accepted, ensure_ascii=False))
+
+        async def preserve_source(expression: Any) -> None:
+            matched = [
+                item
+                for item in accepted
+                if (item["situation"], item["style"]) == (expression.situation, expression.style)
+            ]
+            refs = []
+            for item in matched:
+                if "source_ref" in item:
+                    refs.append({**item["source_ref"], "context_refs": item.get("context_refs", [])})
+            # Old checkpoints did not retain a reviewed text fingerprint: do not retrofit evidence.
+            if not refs:
+                return
+            if expression.item_id is None:
+                raise ValueError("Expression receipt lacks a persisted record ID")
+            identity = expression_identity(expression.situation, expression.style, expression.create_time.isoformat())
+            await asyncio.to_thread(
+                ExpressionProvenance(self.journal.path).save,
+                expression.item_id,
+                identity,
+                runtime.session_id,
+                refs,
+            )
+
         # Preserve extraction and write hooks; evidence review already happened once.
         await learner._run_learning_batch(
             messages,
@@ -324,4 +371,5 @@ class JointLearningCoordinator:
             learned_contents=[],
             extracted_response=json.dumps(accepted, ensure_ascii=False),
             already_reviewed=True,
+            on_written=preserve_source,
         )

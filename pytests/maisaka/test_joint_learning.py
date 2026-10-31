@@ -157,6 +157,7 @@ async def test_review_dedup_and_shared_evidence_checkpoint(tmp_path, monkeypatch
         return "prompt"
 
     monkeypatch.setattr(joint, "load_prompt", prompt)
+    monkeypatch.setattr(joint, "extract_learning_text", lambda raw: raw)
     monkeypatch.setattr(joint.global_config.expression, "expression_self_reflect", True)
     monkeypatch.setattr(
         service,
@@ -175,13 +176,13 @@ async def test_review_dedup_and_shared_evidence_checkpoint(tmp_path, monkeypatch
         {"situation": "s", "style": "x", "id": "1"},
         {"situation": "s2", "style": "y", "id": "1"},
     ]
-    await service.process_expressions(batch, [NS(message_id="m")], candidates)
+    await service.process_expressions(batch, [NS(message_id="m", platform="qq", raw_message="x")], candidates)
     assert len(captured["messages"]) == 1
     assert len(captured["candidates"]) == 2
     assert captured["candidates"][0]["context"]["after_count"] == 0
     batch = service.journal.next_batch("chat", 1800)
     assert len(json.loads(batch["review"])) == 1
-    await service.process_expressions(batch, [NS(message_id="m")], candidates)
+    await service.process_expressions(batch, [NS(message_id="m", platform="qq", raw_message="x")], candidates)
     assert service.review_client.generate_response.await_count == 1
     assert learner._run_learning_batch.call_args.kwargs["already_reviewed"] is True
 

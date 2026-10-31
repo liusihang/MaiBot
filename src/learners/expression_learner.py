@@ -1,7 +1,7 @@
 from copy import copy
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, List, Optional, Sequence, Tuple
 
 import asyncio
 import json
@@ -402,6 +402,7 @@ class ExpressionLearner:
         learned_contents: Optional[List[str]] = None,
         extracted_response: Optional[str] = None,
         already_reviewed: bool = False,
+        on_written: Optional[Callable[[MaiExpression], Awaitable[None]]] = None,
     ) -> bool:
         """执行已经获得并发闸门的表达学习批次。"""
 
@@ -540,6 +541,8 @@ class ExpressionLearner:
             if already_reviewed and expression is None:
                 raise RuntimeError("Evidence-reviewed expression did not receive a database write receipt")
             if expression is not None:
+                if on_written is not None:
+                    await on_written(expression)
                 written_expressions.append(expression)
                 if learned_contents is not None:
                     learned_contents.append(f"{situation} → {style}")

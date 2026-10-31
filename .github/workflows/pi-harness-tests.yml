@@ -15,6 +15,8 @@ on:
       - "src/learners/**"
       - "src/chat/replyer/expression_vector_index.py"
       - "src/services/emoji_retrieval.py"
+      - "src/services/group_expression_*.py"
+      - "src/maisaka/builtin_tool/query_group_expressions.py"
       - "src/emoji_system/maisaka_tool.py"
       - "src/services/pi_harness/**"
       - "src/services/daily_topics/**"
@@ -27,6 +29,7 @@ on:
       - "pytests/maisaka/test_single_agent_reply.py"
       - "pytests/maisaka/test_participation.py"
       - "pytests/maisaka/test_joint_learning.py"
+      - "pytests/maisaka/test_group_expression_*.py"
       - "pytests/maisaka/test_emoji*.py"
       - "pytests/plugin_runtime/test_emoji_reply_target.py"
       - "pytests/services/test_pi_harness_bridge.py"
@@ -76,3 +79,6 @@ jobs:
           pytests/maisaka/test_emoji_store.py
           pytests/maisaka/test_show_emoji_persistence.py
           pytests/plugin_runtime/test_emoji_reply_target.py
+          pytests/maisaka/test_group_expression_catalog.py
+          pytests/maisaka/test_group_expression_search.py
+          pytests/maisaka/test_group_expression_tool.py
