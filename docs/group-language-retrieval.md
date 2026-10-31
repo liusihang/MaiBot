@@ -33,12 +33,18 @@ The embedder uses these descriptions to retrieve an intention without literal ov
 3. Reciprocal-rank fusion: `sum(1 / (60 + rank))`, ranks begin at 1. Raw BM25 and cosine
    scores are diagnostic only, never added together. Missing routes contribute nothing.
 
-Zero-overlap lexical documents do not enter lexical ranking. Semantic ranking uses
-finite cosine scores without a model-dependent hard threshold; each route contributes
-at most its top 50. Even a low/negative absolute cosine is a relative rank, **not**
-confidence or permission to use the phrase. Main Agent applicability checks and abstention
-are required. No eligible catalog entries, or an unavailable semantic route with no
-lexical hits, return an empty candidate list. Result limit is 1–6 (default 6).
+Candidates must pass relevance filtering before either route enters RRF. With
+an available vector, cosine similarity must be at least 0.58. Keyword overlap,
+even a large BM25 score or a literal occurrence, cannot override a measured score
+below this floor. The initial floor is calibrated for the deployed Qwen3-VL text
+embedding space; changing the embedding model requires new quality evaluation.
+Without a candidate vector (including embedding failure), only an explicit phrase
+match in the query is eligible. Quoted concrete expression phrases are supported;
+ASCII terms require word boundaries. Broad meaning/example keyword overlap alone
+is insufficient. Results therefore contain zero to six records, never padding
+with low-relevance entries. Each ranking route contributes at most its top 50
+eligible records. A passing score still requires the main Agent to check actual
+usage. Result limit is 1–6 (default 6).
 Returned phrase/meaning/situation are capped at 400/1,000/1,000 characters,
 source/related IDs at 20, and examples at three 600-character authentic prefixes.
 Truncation is explicitly marked, never paraphrased. The serialized candidate list
@@ -61,7 +67,7 @@ skip successful content and advance the index. These are individual embedding re
 not a claimed provider-side batch. There is no extra selector/generator LLM.
 
 `coverage` reports records indexed/total, completeness, actual vector-space fingerprint,
-RRF constant, null semantic threshold and mode:
+RRF constant, semantic similarity floor and mode:
 - `hybrid`: all currently eligible records have vectors and both routes were evaluated;
 - `partial_hybrid`: full-catalog lexical ranking plus semantic ranking of an indexed subset;
 - `lexical_only`: no usable semantic route; `embedding_error` identifies failures by class
@@ -75,8 +81,12 @@ or null. Partial coverage must not be presented as full-library semantic top-k.
 For predictable full-catalog retrieval, an operator can explicitly run
 `warm_group_expression_index(session_id, max_items=100, max_seconds=60)` until `complete`.
 Each invocation is bounded (maximum 1,000 items/300 seconds), reuses durable progress and
-cross-process leases, and performs one route probe. This API is not automatically run
-as an unbounded hidden paid background job. New/edited records temporarily make coverage
+cross-process leases, and performs one route probe. The active chat runtime starts a background maintainer that checks catalog IDs and
+content versions every 30 seconds. Startup and changed catalogs trigger bounded
+warmup (100 documents / 60 seconds per pass); incomplete passes resume from persisted
+vectors on subsequent checks. Unchanged catalogs make no embedding calls. Runtime
+shutdown cancels the maintainer. This also detects manual additions, edits, deletions
+and review changes through the live catalog, independent of the learning timer. New/edited records temporarily make coverage
 partial again. Database and ranking work run off the asyncio event loop. Cancellation
 propagates, and the reused lease helper releases in-flight claims safely.
 
@@ -84,7 +94,8 @@ propagates, and the reused lease helper releases in-flight claims safely.
 
 `PYTHONPATH=. python -m pytest pytests/maisaka/test_group_expression_search.py -q`
 uses simulated vectors only: Chinese BM25, genuine completed full-index hybrid,
-zero-literal-overlap retrieval including cosine 0.2, RRF vs raw-score addition, homonyms, live catalog removal,
+zero-literal-overlap retrieval above the relevance floor, weak-match rejection across both routes,
+explicit lexical fallback, RRF vs raw-score addition, homonyms, live catalog removal,
 cache/content/model identities, bounded cold fill, explicit warmup, unavailable/mismatched
 routes, empty results, cancellation/lease recovery and bounded inputs/output. No live-model quality/cost claim is implied.
 

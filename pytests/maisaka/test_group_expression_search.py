@@ -52,7 +52,7 @@ def test_chinese_bigrams_and_bm25():
 def test_rrf_uses_independent_ranks_not_raw_scores():
     records = [record("expression:1", "a"), record("jargon:2", "b"), record("jargon:3", "c")]
     ranked = search._rank(
-        records, ["a", "b", "c"], [1000000, 1, 0], {"a": [0.5, 0.866], "b": [1, 0], "c": [0.8, 0.6]}, [1, 0], 3
+        records, ["a", "b", "c"], [1000000, 1, 0], {"a": [0.6, 0.8], "b": [1, 0], "c": [0.8, 0.6]}, [1, 0], 3
     )
     # b: lexical rank2 + semantic rank1 beats a: lexical rank1 + semantic rank3.
     assert ranked[0]["id"] == "jargon:2"
@@ -129,7 +129,7 @@ async def test_homonyms_kept_and_scope_loaded_afresh(setup):
 async def test_route_mismatch_is_explicit_lexical_only_never_mixed(setup):
     client, index, _ = setup([record("expression:1", "nb", "佩服")])
     client.embed_text = AsyncMock(side_effect=[embedding([1, 0]), embedding([1, 0], "different")])
-    result = await search.search_group_expressions("s", "佩服", client=client, index=index)
+    result = await search.search_group_expressions("s", "nb", client=client, index=index)
     assert result["coverage"]["mode"] == "lexical_only"
     assert result["coverage"]["embedding_error"] == "ValueError"
     assert result["candidates"][0]["ranking"]["semantic_rank"] is None
@@ -150,14 +150,13 @@ async def test_unavailable_embedding_and_empty_catalog_are_honest(setup):
 
 
 @pytest.mark.asyncio
-async def test_low_cosine_semantic_only_hit_survives_for_agent_applicability_check(setup):
+async def test_low_cosine_semantic_only_hit_returns_empty(setup):
     item = record("jargon:1", "提前庆祝")
     client, index, _ = setup([item], {"sympathy": [1, 0], search.semantic_document(item): [0.2, 0.9797958971132712]})
     result = await search.search_group_expressions("s", "sympathy", client=client, index=index)
     assert result["coverage"]["complete"]
-    assert result["candidates"][0]["ranking"]["cosine_score"] == pytest.approx(0.2)
-    assert result["candidates"][0]["ranking"]["bm25_rank"] is None
-    assert result["candidates"][0]["ranking"]["semantic_rank"] == 1
+    assert result["candidates"] == []
+    assert result["coverage"]["semantic_similarity_floor"] == search.MIN_SEMANTIC_SIMILARITY
 
 
 @pytest.mark.asyncio

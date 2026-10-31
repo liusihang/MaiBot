@@ -27,6 +27,9 @@ MAX_RESULT_CHARS = 12000
 MAX_DOCUMENT_CHARS = 2400
 MAX_INDEX_ITEMS_PER_QUERY = 8
 INDEX_SECONDS_PER_QUERY = 8.0
+# Calibrated on the deployed Qwen3-VL text embedding space; re-evaluate on model changes.
+MIN_SEMANTIC_SIMILARITY = 0.58
+INDEX_REFRESH_SECONDS = 30.0
 
 
 async def load_group_expression_catalog(session_id: str) -> List[Dict[str, Any]]:
@@ -133,6 +136,21 @@ def _bounded_candidate(record: Dict[str, Any]) -> Dict[str, Any]:
     return candidate
 
 
+def _literal_match(record: Dict[str, Any], query: str) -> bool:
+    """Allow explicit source phrases when a semantic comparison is unavailable."""
+    phrase = record["phrase"].strip(' “”—「」"')
+    phrases = [phrase, *re.findall(r'[“「"]([^”」"]+)[”」"]', phrase)]
+    for value in phrases:
+        if len(value) < 2 or "…" in value or "..." in value:
+            continue
+        pattern = re.escape(value)
+        if value.isascii():
+            pattern = r"(?<![a-z0-9_])" + pattern + r"(?![a-z0-9_])"
+        if re.search(pattern, query, re.IGNORECASE):
+            return True
+    return False
+
+
 def _rank(
     records: List[Dict[str, Any]],
     documents: List[str],
@@ -140,10 +158,9 @@ def _rank(
     vectors: Dict[str, List[float]],
     query_vector: Optional[List[float]],
     limit: int,
+    *,
+    query: str = "",
 ) -> List[Dict[str, Any]]:
-    lexical_order = sorted(
-        (i for i, score in enumerate(lexical) if score > 0), key=lambda i: (-lexical[i], records[i]["id"])
-    )
     cosine = {}
     if query_vector is not None:
         for index, document in enumerate(documents):
@@ -155,8 +172,20 @@ def _rank(
             score = sum(a * b for a, b in zip(vector, query_vector, strict=True))
             if math.isfinite(score):
                 cosine[index] = score
-    semantic_order = sorted(cosine, key=lambda i: (-cosine[i], records[i]["id"]))[:MAX_ROUTE_CANDIDATES]
-    lexical_order = lexical_order[:MAX_ROUTE_CANDIDATES]
+    # Apply eligibility to both routes: keyword overlap cannot rescue a measured
+    # weak semantic match. Missing vectors permit only explicit phrase matches.
+    eligible = {
+        index
+        for index, record in enumerate(records)
+        if (cosine[index] >= MIN_SEMANTIC_SIMILARITY if index in cosine else _literal_match(record, query))
+    }
+    lexical_order = sorted(
+        (i for i, score in enumerate(lexical) if score > 0 and i in eligible),
+        key=lambda i: (-lexical[i], records[i]["id"]),
+    )[:MAX_ROUTE_CANDIDATES]
+    semantic_order = sorted((i for i in cosine if i in eligible), key=lambda i: (-cosine[i], records[i]["id"]))[
+        :MAX_ROUTE_CANDIDATES
+    ]
     lexical_ranks = {index: rank for rank, index in enumerate(lexical_order, 1)}
     semantic_ranks = {index: rank for rank, index in enumerate(semantic_order, 1)}
     fused = {
@@ -206,7 +235,7 @@ def _coverage(total: int, indexed: int, *, space: Optional[str] = None, error: O
         "embedding_space": space,
         "embedding_error": error,
         "rrf_k": RRF_K,
-        "semantic_similarity_floor": None,
+        "semantic_similarity_floor": MIN_SEMANTIC_SIMILARITY,
     }
 
 
@@ -271,7 +300,7 @@ async def search_group_expressions(
     if catalog_changed:
         records = unchanged
         documents, lexical, _ = await asyncio.to_thread(_prepare, records, query)
-    ranked = await asyncio.to_thread(_rank, records, documents, lexical, vectors, query_vector, limit)
+    ranked = await asyncio.to_thread(_rank, records, documents, lexical, vectors, query_vector, limit, query=query)
     indexed = sum(document in vectors for document in documents)
     # Cap serialized model-visible evidence as well as per-field text. Keep a
     # ranked prefix, never silently substitute lower-ranked smaller records.
@@ -327,3 +356,55 @@ async def warm_group_expression_index(
         max_seconds=max(0.0, max_seconds - (time.monotonic() - started)),
     )
     return _coverage(len(records), sum(document in vectors for document in documents), space=space)
+
+
+class GroupLanguageIndexMaintainer:
+    """Warm changed catalogs off the chat path; unchanged checks make no model calls."""
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self.version: Optional[str] = None
+        self.task: Optional[asyncio.Task] = None
+
+    @staticmethod
+    def signature(records: List[Dict[str, Any]]) -> str:
+        return sha256(json.dumps(sorted((r["id"], r["version"]) for r in records)).encode()).hexdigest()
+
+    async def sync_once(self) -> Optional[Dict[str, Any]]:
+        records = await load_group_expression_catalog(self.session_id)
+        version = self.signature(records)
+        if version == self.version:
+            return None
+        if not records:
+            self.version = version
+            return _coverage(0, 0)
+        progress = await warm_group_expression_index(self.session_id, max_items=100, max_seconds=60)
+        # An incomplete batch retries using persisted vectors. Edits during a
+        # warmup remain pending, even if the old snapshot reported completion.
+        if progress["complete"] and version == self.signature(await load_group_expression_catalog(self.session_id)):
+            self.version = version
+            logger.info("Group language index synchronized: session=%s records=%d", self.session_id, len(records))
+        return progress
+
+    def start(self) -> None:
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self.run(), name=f"group-language-index:{self.session_id}")
+
+    async def stop(self) -> None:
+        if self.task is not None:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+            self.task = None
+
+    async def run(self) -> None:
+        while True:
+            try:
+                await self.sync_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Group language index refresh failed (%s); retrying later", type(exc).__name__)
+            await asyncio.sleep(INDEX_REFRESH_SECONDS)
