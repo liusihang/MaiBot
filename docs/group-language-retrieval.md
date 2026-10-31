@@ -1,7 +1,7 @@
 # Group expression and jargon retrieval
 
 `src.services.group_expression_search.search_group_expressions(session_id, intent,
-context="", limit=5)` retrieves optional language references, not a generated reply.
+context="", limit=6)` retrieves optional language references, not a generated reply.
 Before every utterance, the main Agent calls this tool with its intended meaning,
 checks the returned meaning/situation and real evidence, and can adapt a fitting
 expression **or use none**. The lookup is required before each utterance; using a
@@ -38,7 +38,7 @@ finite cosine scores without a model-dependent hard threshold; each route contri
 at most its top 50. Even a low/negative absolute cosine is a relative rank, **not**
 confidence or permission to use the phrase. Main Agent applicability checks and abstention
 are required. No eligible catalog entries, or an unavailable semantic route with no
-lexical hits, return an empty candidate list. Result limit is 1–5 (default 5).
+lexical hits, return an empty candidate list. Result limit is 1–6 (default 6).
 Returned phrase/meaning/situation are capped at 400/1,000/1,000 characters,
 source/related IDs at 20, and examples at three 600-character authentic prefixes.
 Truncation is explicitly marked, never paraphrased. The serialized candidate list
@@ -87,3 +87,20 @@ uses simulated vectors only: Chinese BM25, genuine completed full-index hybrid,
 zero-literal-overlap retrieval including cosine 0.2, RRF vs raw-score addition, homonyms, live catalog removal,
 cache/content/model identities, bounded cold fill, explicit warmup, unavailable/mismatched
 routes, empty results, cancellation/lease recovery and bounded inputs/output. No live-model quality/cost claim is implied.
+
+## Model-visible result and learning examples
+
+The tool text contains only `表达风格 / 情景 / 例句` blocks for expressions and
+`黑话 / 含义 / 例句` blocks for jargon, with a combined maximum of six records.
+No fixed reminder or diagnostic JSON is appended. IDs, versions, ranking scores,
+linked-definition metadata and coverage remain in the structured backend receipt.
+Source examples are authentic source messages; neighbour context is used for
+review/retrieval but is not presented as a usage example. Missing examples are
+labelled `暂无例句`.
+
+New learning saves a 600-character prefix and full-text hash alongside the source
+reference, using existing expression provenance and jargon evidence JSON storage.
+There is no extra LLM to invent examples and no schema migration. Retrieval checks
+the same-chat source and fingerprint before using the saved example. Deleted or
+edited sources do not expose stale snapshots. An old expression without provenance
+can acquire an example when it is observed and approved again, reusing its ID.

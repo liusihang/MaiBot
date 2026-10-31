@@ -362,3 +362,62 @@ async def test_jargon_inference_keeps_valid_evidence_for_replay(monkeypatch):
     cleanup.assert_not_called()
     miner._update_jargon(item, [[{"platform": "qq", "message_id": "m"}]], strict_persistence=True)
     assert item.count == 4
+
+
+@pytest.mark.asyncio
+async def test_old_expression_can_gain_its_first_authentic_example_without_new_record(tmp_path, monkeypatch):
+    from datetime import datetime
+    from src.learners.expression_provenance import ExpressionProvenance
+
+    service = coordinator(tmp_path)
+    existing = NS(item_id=7, situation="惊讶", style="离谱", create_time=datetime(2026, 1, 1))
+    receipts = []
+
+    async def write(messages, **kwargs):
+        if json.loads(kwargs["extracted_response"]):
+            receipts.append(existing.item_id)
+            await kwargs["on_written"](existing)
+
+    service.runtime._expression_learner = NS(
+        _prepare_learning_messages=lambda messages: messages,
+        _filter_expressions=lambda values, messages: values,
+        _find_similar_expression=lambda *a, **kw: (existing, 1.0),
+        _run_learning_batch=write,
+    )
+    monkeypatch.setattr(joint, "extract_learning_text", lambda raw: raw)
+    monkeypatch.setattr(joint.global_config.expression, "expression_self_reflect", False)
+    service.journal.enqueue("chat", ["m"], 0)
+    batch = service.journal.next_batch("chat", 1800)
+    await service.process_expressions(
+        batch,
+        [NS(message_id="m", platform="qq", raw_message="这价格真离谱")],
+        [{"situation": "惊讶", "style": "离谱", "id": "1"}],
+    )
+    assert receipts == [7]
+    saved = ExpressionProvenance(service.journal.path).load("chat")[7]
+    assert saved["sources"][0]["example"] == "这价格真离谱"
+    assert saved["sources"][0]["text_hash"] == joint.text_digest("这价格真离谱")
+
+
+@pytest.mark.asyncio
+async def test_jargon_learning_captures_original_example_and_cache_preserves_it(monkeypatch):
+    from src.learners import jargon_learner as learner_module
+    from src.learners.jargon_miner import JargonMiner
+
+    learner = learner_module.JargonLearner.__new__(learner_module.JargonLearner)
+    monkeypatch.setattr(learner, "_log_jargon_update_process", lambda **kwargs: None)
+    monkeypatch.setattr(learner_module, "_is_learnable_session_message", lambda message: True)
+    monkeypatch.setattr(learner_module, "extract_learning_text", lambda raw: raw)
+    source = NS(
+        original_message=NS(
+            platform="qq", message_id="m", raw_message="这把起飞了", message_info=NS(user_info=NS(user_id="u"))
+        ),
+        content="这把起飞了",
+    )
+    miner = NS(process_extracted_entries=AsyncMock(return_value=(1, 0)))
+    assert await learner._process_jargon_entries([("起飞", "1")], [source], miner)
+    entry = miner.process_extracted_entries.call_args.args[0][0]
+    round_trip = JargonMiner._deserialize_jargon_entries(JargonMiner._serialize_jargon_entries([entry]))
+    reference = round_trip[0]["evidence_messages"][0][0]
+    assert reference["example"] == "这把起飞了"
+    assert reference["text_hash"] == joint.text_digest("这把起飞了")

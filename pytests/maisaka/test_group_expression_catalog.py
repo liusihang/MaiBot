@@ -26,6 +26,8 @@ def storage(tmp_path, monkeypatch):
     def session(**kwargs):
         with Session(engine) as db:
             yield db
+            if kwargs.get("auto_commit", True):
+                db.commit()
 
     monkeypatch.setattr(catalog, "get_db_session", session)
     monkeypatch.setattr(selector, "get_db_session", session)
@@ -222,8 +224,8 @@ async def test_unambiguous_matching_jargon_enriches_without_losing_identity(stor
     )  # linked spelling, not confirmed sense equivalence
     assert fused["related_versions"] == {"jargon:1": records[1]["version"]}
     assert fused["situation"] == "无奈认同"
-    assert fused["source_ids"] == ["local"]
-    assert fused["examples"][0]["text"] == "啊对对，你说得都对"
+    assert fused["source_ids"] == []
+    assert fused["examples"] == []  # spelling association cannot establish usage in this situation
     with Session(engine) as db:
         conflicting = jargon(2)
         conflicting.content, conflicting.meaning = "啊对对", "真诚表示肯定"
@@ -304,6 +306,38 @@ async def test_actual_write_receipt_persists_before_index_failure(storage, tmp_p
         with pytest.raises(RuntimeError, match="index down"):
             await operation
         assert ExpressionProvenance(store.path).load("chat")[1]["sources"][0]["message_id"] == "source"
+        assert ExpressionProvenance(store.path).load("chat")[1]["sources"][0]["example"] == "啊对对"
         records = await catalog.load_group_expression_catalog("chat")
         assert records[0]["examples"][0]["text"] == "啊对对"
         assert records[0]["source_ids"] == ["source"]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_must_match_live_source_and_metadata_upgrade_is_not_new_evidence(storage, monkeypatch):
+    from src.learners import jargon_miner as module
+
+    engine, _ = storage
+    original = ref("m")
+    snapshot = ref("m", example="群梗真有意思", text_hash=text_digest("群梗真有意思"))
+    with Session(engine) as db:
+        term = jargon(refs=[[original]], count=4)
+        term.session_id_dict = json.dumps({"chat": 4})
+        db.add_all([term, message("m", "群梗真有意思")])
+        db.commit()
+        term = db.get(Jargon, 1)
+        miner = module.JargonMiner.__new__(module.JargonMiner)
+        miner.session_id = "chat"
+        monkeypatch.setattr(module, "get_db_session", catalog.get_db_session)
+        miner._update_jargon(term, [[snapshot]], strict_persistence=True)
+    with Session(engine) as db:
+        term = db.get(Jargon, 1)
+        assert term.count == 4 and json.loads(term.session_id_dict) == {"chat": 4}
+        assert json.loads(term.evidence_messages)[0][0]["example"] == "群梗真有意思"
+    assert (await catalog.load_group_expression_catalog("chat"))[0]["examples"][0]["text"] == "群梗真有意思"
+    with Session(engine) as db:
+        term = db.get(Jargon, 1)
+        bad = {**snapshot, "example": "invented"}
+        term.evidence_messages = json.dumps([[bad]])
+        db.add(term)
+        db.commit()
+    assert (await catalog.load_group_expression_catalog("chat"))[0]["examples"] == []

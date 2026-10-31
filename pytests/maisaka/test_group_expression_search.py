@@ -239,7 +239,7 @@ async def test_total_serialized_result_budget_disclosed(setup):
 @pytest.mark.asyncio
 async def test_service_result_limit_matches_tool_limit():
     with pytest.raises(ValueError):
-        await search.search_group_expressions("s", "hello", limit=6)
+        await search.search_group_expressions("s", "hello", limit=7)
 
 
 @pytest.mark.asyncio
@@ -255,3 +255,12 @@ async def test_catalog_revalidated_after_embedding_drops_removed_or_changed_evid
     assert result["coverage"]["stale_records_removed"] == 1
     if change == "edit":
         assert not result["coverage"]["complete"] and not result["coverage"]["lexical_complete"]
+
+
+@pytest.mark.asyncio
+async def test_default_limit_returns_six_combined_expression_and_jargon_records(setup):
+    records = [record(("expression:" if i % 2 else "jargon:") + str(i), "庆祝" + str(i)) for i in range(8)]
+    client, index, _ = setup(records)
+    result = await search.search_group_expressions("s", "庆祝", client=client, index=index)
+    assert len(result["candidates"]) == 6
+    assert {item["kind"] for item in result["candidates"]} == {"expression", "jargon"}

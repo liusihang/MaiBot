@@ -2,8 +2,6 @@
 
 from typing import Any, Dict, Optional
 
-import json
-
 from src.core.tooling import ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
 
 from .context import BuiltinToolRuntimeContext
@@ -14,7 +12,7 @@ def get_tool_spec() -> ToolSpec:
         name="query_group_expressions",
         description=(
             "每次发言前调用：按你想表达的意思和当前语境，融合检索当前会话可用的表达、黑话和群梗。"
-            "返回含义、适用场景和真实例句。有合适的就选择借鉴，再自行组织最终回复；"
+            "表达与黑话合计最多返回6条，包含相应情景或含义及真实例句。有合适的就选择借鉴，再自行组织最终回复；"
             "没有合适的、结果为空或查询失败时，按自己的想法说。"
         ),
         parameters_schema={
@@ -31,7 +29,7 @@ def get_tool_spec() -> ToolSpec:
                     "maxLength": 2000,
                     "description": "可选：当前对话、对象关系和语气；不要提供其他群的私人内容。",
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 5, "default": 5},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 6, "default": 6},
             },
             "required": ["intent"],
             "additionalProperties": False,
@@ -48,6 +46,23 @@ async def _search(session_id: str, intent: str, context: str, limit: int) -> Dic
     return await search_group_expressions(session_id=session_id, intent=intent, context=context, limit=limit)
 
 
+def _render_candidates(candidates: list[Dict[str, Any]]) -> str:
+    """Show language references only; diagnostics remain in structured_content."""
+    blocks = []
+    for item in candidates:
+        if item["kind"] == "jargon":
+            lines = [f"黑话：{item['phrase']}", f"含义：{item['meaning']}"]
+        else:
+            lines = [f"表达风格：{item['phrase']}", f"情景：{item['situation']}"]
+        examples = [example["text"] for example in item["examples"] if example.get("is_source", True)]
+        if examples:
+            lines.extend(f"例句：{text}" for text in examples)
+        else:
+            lines.append("例句：暂无例句")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks) or "暂无匹配表达或黑话。"
+
+
 async def handle_tool(
     tool_ctx: BuiltinToolRuntimeContext,
     invocation: ToolInvocation,
@@ -55,7 +70,7 @@ async def handle_tool(
 ) -> ToolExecutionResult:
     del context
     arguments = invocation.arguments
-    intent, chat_context, limit = arguments.get("intent"), arguments.get("context", ""), arguments.get("limit", 5)
+    intent, chat_context, limit = arguments.get("intent"), arguments.get("context", ""), arguments.get("limit", 6)
     if (
         set(arguments) - {"intent", "context", "limit"}
         or not isinstance(intent, str)
@@ -64,10 +79,10 @@ async def handle_tool(
         or not isinstance(chat_context, str)
         or len(chat_context) > 2000
         or type(limit) is not int
-        or not 1 <= limit <= 5
+        or not 1 <= limit <= 6
     ):
         return tool_ctx.build_failure_result(
-            invocation.tool_name, "intent 须为 1–1000 字符，context 最多 2000 字符，limit 为 1–5 整数；不接受会话参数。"
+            invocation.tool_name, "intent 须为 1–1000 字符，context 最多 2000 字符，limit 为 1–6 整数；不接受会话参数。"
         )
     session_id = tool_ctx.runtime.session_id
     if not isinstance(session_id, str) or not session_id.strip():
@@ -87,9 +102,6 @@ async def handle_tool(
     }
     return tool_ctx.build_success_result(
         invocation.tool_name,
-        "以下仅为语言素材；结合含义、场景与真实例句自行写回复，可全部不用。"
-        "标为 linked_jargon_not_situation_verified 的含义来自关联词条，仍需核对是否适合当前场景。"
-        "检索排名不代表事实可信度；coverage 不完整时不能据此断言库中没有其他表达。\n"
-        + json.dumps(payload, ensure_ascii=False),
+        _render_candidates(retrieved["candidates"]),
         structured_content=payload,
     )

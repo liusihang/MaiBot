@@ -67,6 +67,8 @@ def _resolve_examples(db: Any, session_id: str, refs: List[Dict[str, Any]], *, p
         text = _eligible_text(row)
         if not text or ("text_hash" in ref and ref["text_hash"] != text_digest(text)):
             return None
+        if "example" in ref and ref["example"] != text[:600]:
+            return None
         return row, text
 
     for ref in refs:
@@ -135,17 +137,8 @@ def _enrich_unambiguous_matches(records: List[Dict[str, Any]]) -> List[Dict[str,
         item["meaning_source"] = "linked_jargon_not_situation_verified"
         item["related_ids"] = sorted(match["id"] for match in matches)
         item["related_versions"] = {match["id"]: match["version"] for match in matches}
-        seen = {example["message_id"] for example in item["examples"]}
-        for match in matches:
-            for example in match["examples"]:
-                if len(item["examples"]) >= MAX_EXAMPLES:
-                    break
-                if example["message_id"] not in seen:
-                    item["examples"].append(example)
-                    seen.add(example["message_id"])
-        item["source_ids"] = list(
-            dict.fromkeys(example["message_id"] for example in item["examples"] if example["is_source"])
-        )
+        # A linked definition does not verify an expression's situation. Keep
+        # each record's own examples rather than borrowing another sense's use.
         item["version"] = text_digest(
             json.dumps(
                 {key: value for key, value in item.items() if key != "version"},

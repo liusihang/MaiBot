@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TypedDict
+from typing import Any, Callable, Dict, List, NotRequired, Optional, Set, Tuple, TypedDict
 
 from json_repair import repair_json
 from sqlmodel import col, select
@@ -35,6 +35,8 @@ JARGON_INFERENCE_THRESHOLDS = [4, 8, 25, 100]
 class JargonEvidenceMessageRef(TypedDict):
     platform: str
     message_id: str
+    example: NotRequired[str]
+    text_hash: NotRequired[str]
 
 
 JargonEvidenceMessageGroup = List[JargonEvidenceMessageRef]
@@ -250,7 +252,11 @@ class JargonMiner:
                 if ref_key in seen_refs:
                     continue
                 seen_refs.add(ref_key)
-                group.append({"platform": platform, "message_id": message_id})
+                reference: JargonEvidenceMessageRef = {"platform": platform, "message_id": message_id}
+                for field in ("example", "text_hash"):
+                    if isinstance(raw_ref.get(field), str):
+                        reference[field] = raw_ref[field]
+                group.append(reference)
             if not group:
                 continue
             group_key = tuple((ref["platform"], ref["message_id"]) for ref in group)
@@ -749,12 +755,17 @@ class JargonMiner:
         """合并证据消息引用组并保持顺序去重。"""
 
         merged_groups = cls._normalize_evidence_message_groups(current_groups)
-        seen_groups = {tuple((ref["platform"], ref["message_id"]) for ref in group) for group in merged_groups}
+        positions = {
+            tuple((ref["platform"], ref["message_id"]) for ref in group): index
+            for index, group in enumerate(merged_groups)
+        }
         for group in cls._normalize_evidence_message_groups(new_groups):
             group_key = tuple((ref["platform"], ref["message_id"]) for ref in group)
-            if group_key in seen_groups:
+            if group_key in positions:
+                index = positions[group_key]
+                merged_groups[index] = [{**old, **new} for old, new in zip(merged_groups[index], group, strict=True)]
                 continue
-            seen_groups.add(group_key)
+            positions[group_key] = len(merged_groups)
             merged_groups.append(group)
         return merged_groups
 
@@ -782,7 +793,10 @@ class JargonMiner:
         # Replayed extraction results are not new independent evidence.
         if merged_evidence_groups == existing_evidence_groups:
             return
-        db_jargon.count += 1
+        # Adding example snapshots to the same source IDs is not new evidence.
+        has_new_evidence = len(merged_evidence_groups) > len(existing_evidence_groups)
+        if has_new_evidence:
+            db_jargon.count += 1
         db_jargon.updated_timestamp = datetime.now()
         db_jargon.evidence_messages = (
             json.dumps(merged_evidence_groups, ensure_ascii=False)
@@ -790,7 +804,8 @@ class JargonMiner:
             else db_jargon.evidence_messages
         )
         session_id_dict: Dict[str, int] = json.loads(db_jargon.session_id_dict)
-        session_id_dict[self.session_id] = session_id_dict.get(self.session_id, 0) + 1
+        if has_new_evidence:
+            session_id_dict[self.session_id] = session_id_dict.get(self.session_id, 0) + 1
         db_jargon.session_id_dict = json.dumps(session_id_dict)
 
         try:

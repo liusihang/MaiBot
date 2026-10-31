@@ -266,6 +266,7 @@ class JointLearningCoordinator:
             accepted = json.loads(batch["review"])
         else:
             filtered, seen = [], set()
+            provenance = await asyncio.to_thread(ExpressionProvenance(self.journal.path).load, runtime.session_id)
             prepared = learner._prepare_learning_messages(messages)
             for candidate in candidates:
                 style = normalize_expression_style_for_learning(candidate["style"])
@@ -277,7 +278,17 @@ class JointLearningCoordinator:
                     learner._find_similar_expression, *key, session_id=runtime.session_id, strict_errors=True
                 )
                 if existing:
-                    continue
+                    expression = existing[0]
+                    saved = provenance.get(expression.item_id, {})
+                    identity = expression_identity(
+                        expression.situation, expression.style, expression.create_time.isoformat()
+                    )
+                    if saved.get("identity") == identity and saved.get("sources"):
+                        continue
+                    # An old expression can acquire a real example when observed
+                    # again. It still passes evidence review and reuses its ID.
+                    if (expression.situation, expression.style) != key:
+                        continue
                 source = messages[int(candidate["id"]) - 1]
                 filtered.append(
                     {
@@ -287,6 +298,7 @@ class JointLearningCoordinator:
                             "message_id": source.message_id,
                             "platform": source.platform,
                             "text_hash": text_digest(extract_learning_text(source.raw_message)),
+                            "example": extract_learning_text(source.raw_message)[:600],
                         },
                     }
                 )

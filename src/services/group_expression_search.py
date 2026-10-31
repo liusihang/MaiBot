@@ -21,7 +21,7 @@ from src.services import emoji_retrieval as vector_cache
 logger = get_logger("group_expression_search")
 
 RRF_K = 60
-MAX_RESULTS = 5
+MAX_RESULTS = 6
 MAX_ROUTE_CANDIDATES = 50
 MAX_RESULT_CHARS = 12000
 MAX_DOCUMENT_CHARS = 2400
@@ -214,7 +214,7 @@ async def search_group_expressions(
     session_id: str,
     intent: str,
     context: str = "",
-    limit: int = 5,
+    limit: int = 6,
     *,
     client: Any = None,
     index: Optional[vector_cache.EmojiDescriptionIndex] = None,
@@ -227,7 +227,7 @@ async def search_group_expressions(
     if not session_id or not intent.strip() or len(intent) > 1000 or len(context) > 2000:
         raise ValueError("Require session_id, intent of 1–1000 characters, context at most 2000")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_RESULTS:
-        raise ValueError("limit must be an integer from 1 to 5")
+        raise ValueError("limit must be an integer from 1 to 6")
     records = await load_group_expression_catalog(session_id)
     if not records:
         return {"candidates": [], "coverage": _coverage(0, 0)}

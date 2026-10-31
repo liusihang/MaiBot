@@ -16,6 +16,7 @@ from src.maisaka.jargon_context_matcher import is_jargon_reference_text
 from src.prompt.prompt_manager import prompt_manager
 from src.services.llm_service import LLMServiceClient
 
+from .expression_provenance import text_digest
 from .expression_utils import parse_jargon_response
 from .learning_text import extract_learning_text
 from .pending_learning_buffer import PendingLearningBuffer
@@ -588,7 +589,12 @@ class JargonLearner:
                 continue
 
             evidence_messages: JargonEvidenceMessageGroup = [
-                {"platform": item.original_message.platform, "message_id": item.original_message.message_id}
+                {
+                    "platform": item.original_message.platform,
+                    "message_id": item.original_message.message_id,
+                    "example": extract_learning_text(item.original_message.raw_message)[:600],
+                    "text_hash": text_digest(extract_learning_text(item.original_message.raw_message)),
+                }
                 for item in context_items
             ]
 
