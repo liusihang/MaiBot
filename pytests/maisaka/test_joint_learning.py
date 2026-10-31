@@ -200,7 +200,9 @@ async def test_timer_drains_due_persisted_batch_without_new_message(tmp_path, mo
     monkeypatch.setattr(joint.expression_learning_batch_gate, "acquire", AsyncMock(return_value=NS(acquired=True)))
     monkeypatch.setattr(joint.expression_learning_batch_gate, "release", AsyncMock())
     await service.start()
-    await asyncio.wait_for(called.wait(), 1)
+    # Verify the persisted scheduler wakes without another message, rather than
+    # requiring thread-pool dispatch and SQLite I/O to finish in one second.
+    await asyncio.wait_for(called.wait(), 10)
     await service.stop()
     assert service.task is None
 

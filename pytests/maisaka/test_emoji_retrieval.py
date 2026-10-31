@@ -293,6 +293,7 @@ async def test_query_failure_never_exposes_provider_error_body(monkeypatch):
 async def test_cold_timeout_is_partial_not_failure_and_can_resume(monkeypatch, tmp_path):
     import asyncio
 
+    normal_budget = retrieval.INDEX_SECONDS_PER_QUERY
     monkeypatch.setattr(retrieval, "_space", lambda value: value.model_name)
     monkeypatch.setattr(retrieval, "INDEX_SECONDS_PER_QUERY", 0.01)
 
@@ -307,6 +308,9 @@ async def test_cold_timeout_is_partial_not_failure_and_can_resume(monkeypatch, t
         "q", items, session_id="s", client=SimpleNamespace(embed_text=embed), index=index
     )
     assert not value.complete and value.indexed == 0
+    # The forced 10ms timeout applies to the first attempt. Resume under the
+    # normal budget so the test measures lease recovery, not filesystem speed.
+    monkeypatch.setattr(retrieval, "INDEX_SECONDS_PER_QUERY", normal_budget)
     client = SimpleNamespace(embed_text=AsyncMock(return_value=result([1, 0])))
     value = await retrieval.query_registered_emojis("q", items, session_id="s", client=client, index=index)
     assert value.complete
