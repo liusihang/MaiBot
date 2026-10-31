@@ -192,6 +192,8 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._last_expression_extraction_time = 0.0
         self._trimmed_history_learning_task: Optional[asyncio.Task[None]] = None
         self._pi_learning_source_ids: set[str] = set()
+        from src.learners.joint_learning import JointLearningCoordinator
+        self._joint_learning = JointLearningCoordinator(self)
         self._queued_trimmed_learning_progress: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self._expression_learner = ExpressionLearner(session_id)
         self._jargon_learner = JargonLearner(session_id)
@@ -285,6 +287,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         await self._restore_recent_context_from_db()
         await self._reasoning_engine.restore_pi_pending()
         self._running = True
+        await self._joint_learning.start()
         if self._is_focus_mode_active_for_current_chat():
             await focus_mode_manager.attach(self)
         self._ensure_background_tasks_running()
@@ -548,6 +551,7 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._mark_message_turn_unscheduled()
         self._cancel_deferred_message_turn_task()
         self._cancel_wait_timeout_task()
+        await self._joint_learning.stop()
         await self._cancel_trimmed_history_learning_task()
         await self._stop_background_subagents()
         while not self._internal_turn_queue.empty():
@@ -1830,20 +1834,19 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         return {self._pending_wait_tool_call_id}
 
     async def _trigger_pi_source_learning(self, context_messages: Sequence[LLMContextMessage]) -> None:
-        """Collect actual source batches independently of Pi context compaction.
+        """Collect real sources for a durable 30-minute / 100-message joint batch.
 
-        This is the existing bounded business learner buffer, not model history.
-        Its extraction thresholds, concurrency gates and failure retention remain
-        unchanged. Restored source material may be collected again after restart;
-        no durable learned receipt is claimed for an in-memory pending buffer.
+        This path is independent of context compaction and participation decisions.
+        The journal, rather than process-local IDs, owns restart deduplication.
         """
-        sources = [message for message in context_messages
-                   if isinstance(message, SessionBackedMessage)
-                   and message.message_id not in self._pi_learning_source_ids]
-        if not sources:
-            return
-        await self._trigger_trimmed_history_learning(sources)
-        self._pi_learning_source_ids.update(message.message_id for message in sources)
+        sources = [message for message in context_messages if isinstance(message, SessionBackedMessage)]
+        if sources:
+            added_ids = set(await self._joint_learning.collect(sources))
+            if added_ids:
+                await asyncio.to_thread(
+                    update_high_frequency_terms_from_context_messages,
+                    [message for message in sources if message.message_id in added_ids],
+                )
 
     async def _trigger_trimmed_history_learning(
         self,
@@ -1851,94 +1854,17 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         *,
         on_progress: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> None:
-        """提交对 Maisaka 裁切历史的后台学习任务。"""
+        """兼容旧裁切和 Focus 入口，统一进入相同的持久化联合学习队列。
 
-        async def report_skip(reason: str) -> None:
-            if on_progress is not None:
-                await on_progress({"status": "skipped", "detail": reason, "learners": []})
-
-        if not context_messages:
-            await report_skip("没有可用于学习的裁切消息")
-            return
-        enable_expression_learning = self._enable_expression_learning
-        enable_jargon_learning = self._enable_jargon_learning
-        enable_high_frequency_learning = enable_expression_learning or enable_jargon_learning
-        # 必须在检查后台任务/触发间隔之前收集，否则等待期间裁切的素材会永久漏学。
-        for enabled, learner in (
-            (enable_expression_learning, self._expression_learner),
-            (enable_jargon_learning, self._jargon_learner),
-        ):
-            if enabled:
-                learner.collect_context_messages(context_messages)
-            else:
-                learner.pending_messages.clear()
-        if not enable_high_frequency_learning:
-            await report_skip("表达与黑话学习未启用")
-            return
-
-        if self._trimmed_history_learning_task is not None and not self._trimmed_history_learning_task.done():
-            if on_progress is not None:
-                async def report_queued_result(progress: Dict[str, Any]) -> None:
-                    # 后续批次复用后台任务；新卡片也要收到结果，不能永久停在“等待”。
-                    await on_progress({
-                        **progress,
-                        "learners": [
-                            {**item, "status": "skipped", "detail": "本轮与上一批合并学习，未单独统计高频词", "contents": []}
-                            if item["name"] == "高频词学习" else item
-                            for item in progress["learners"]
-                        ],
-                    })
-
-                previous_progress = self._queued_trimmed_learning_progress
-                self._queued_trimmed_learning_progress = report_queued_result
-                if previous_progress is not None:
-                    await previous_progress({
-                        "status": "skipped", "detail": "素材已合并到后续裁切批次，结果请查看最新的学习卡片", "learners": [],
-                    })
-                await on_progress({
-                    "status": "waiting",
-                    "detail": "上一批学习仍在运行，已收集本轮素材；达到门槛后自动继续学习",
-                    "learners": [
-                        {
-                            "name": name,
-                            "status": "waiting" if enabled else "disabled",
-                            "contents": [],
-                            "detail": (
-                                learner.pending_messages.waiting_detail(learner.min_messages_for_extraction)
-                                if enabled else "学习未启用"
-                            ),
-                        }
-                        for name, enabled, learner in (
-                            ("表达学习", enable_expression_learning, self._expression_learner),
-                            ("黑话学习", enable_jargon_learning, self._jargon_learner),
-                        )
-                    ] + [{
-                        "name": "高频词学习", "status": "skipped", "contents": [],
-                        "detail": "上一批学习仍在运行，本轮未执行高频词统计",
-                    }],
-                })
-            return
-
-        pending_context_count = len(context_messages)
-        logger.info(
-            f"{self.log_prefix} 提交裁切历史后台学习: "
-            f"裁切上下文消息数量={pending_context_count} "
-            f"是否启用表达学习={enable_expression_learning} "
-            f"是否启用黑话学习={enable_jargon_learning} "
-            f"是否启用高频词学习={enable_high_frequency_learning}"
-        )
-
-        self._queued_trimmed_learning_progress = None
-        self._trimmed_history_learning_task = asyncio.create_task(
-            self._run_trimmed_history_learning(
-                list(context_messages),
-                enable_expression_learning=enable_expression_learning,
-                enable_jargon_learning=enable_jargon_learning,
-                enable_high_frequency_learning=enable_high_frequency_learning,
-                on_progress=on_progress,
-            )
-        )
-        self._trimmed_history_learning_task.add_done_callback(self._handle_trimmed_history_learning_done)
+        保留进度回调契约；来源去重与 30 分钟 / 100 条调度均由联合学习器管理，
+        此入口不再独立启动旧的高频表达和黑话提取。
+        """
+        await self._trigger_pi_source_learning(context_messages)
+        if on_progress is not None:
+            await on_progress({
+                "status": "waiting", "detail": "已进入联合学习队列：30 分钟或 100 条新消息先到触发",
+                "learners": [],
+            })
 
     async def _run_trimmed_history_learning(
         self,

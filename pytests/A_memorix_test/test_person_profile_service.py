@@ -557,3 +557,41 @@ async def test_model_classification_can_write_stable_profile() -> None:
 
     assert "旧金山" in "\n".join(sections["稳定了解"])
     assert "旧金山" not in "\n".join(sections["不确定信息"])
+
+
+@pytest.mark.asyncio
+async def test_classified_source_evidence_skips_model_and_preserves_summary_boundary():
+    service = PersonProfileService(metadata_store=FakeMetadataStore(), retriever=FakeRetriever())
+    service._resolve_profile_classification_model = lambda: (_ for _ in ()).throw(AssertionError("already classified"))
+    buckets = await service._classify_profile_evidence(
+        person_id="p", primary_name="Alice", aliases=[], relation_edges=[], memory_traits=[],
+        vector_evidence=[
+            {"content": "Alice likes tea.", "metadata": {"source_type": "person_fact", "profile_section": "interaction_preferences"}},
+            {"content": "Someone joked Alice is a pilot.", "metadata": {"source_type": "chat_summary", "profile_section": "identity_settings"}},
+        ],
+    )
+    assert buckets["interaction_preferences"] == ["Alice likes tea."]
+    assert buckets["recent_interactions"] == ["Someone joked Alice is a pilot."]
+    assert not buckets["identity_settings"]
+
+
+@pytest.mark.asyncio
+async def test_only_unclassified_evidence_is_sent_to_model(monkeypatch):
+    service = PersonProfileService(metadata_store=FakeMetadataStore(), retriever=FakeRetriever())
+    service._resolve_profile_classification_model = lambda: SimpleNamespace(task_name="memory")
+
+    async def generate(*args, **kwargs):
+        assert "Known classified fact" not in args[2]
+        assert "Unclassified evidence" in args[2]
+        return SimpleNamespace(success=True, completion=SimpleNamespace(response=json.dumps({"recent_interactions": ["evidence-2"]})))
+
+    monkeypatch.setattr(profile_service_module, "generate_with_resolved_model", generate)
+    buckets = await service._classify_profile_evidence(
+        person_id="p", primary_name="Alice", aliases=[], relation_edges=[], memory_traits=[],
+        vector_evidence=[
+            {"content": "Known classified fact", "metadata": {"source_type": "person_fact", "profile_section": "stable_facts"}},
+            {"content": "Unclassified evidence", "metadata": {"source_type": "person_fact"}},
+        ],
+    )
+    assert buckets["stable_facts"] == ["Known classified fact"]
+    assert buckets["recent_interactions"] == ["Unclassified evidence"]

@@ -23,6 +23,7 @@ from src.config.config import global_config
 
 from .episode_segmentation_service import EpisodeSegmentationService
 from .hash import compute_hash
+from .metadata import coerce_metadata_dict
 from .runtime_payloads import argument_tokens
 
 logger = get_logger("A_Memorix.EpisodeService")
@@ -190,6 +191,10 @@ class EpisodeService:
                     "time_granularity": str(paragraph.get("time_granularity", "") or "").strip(),
                     "time_confidence": self._clamp_score(paragraph.get("time_confidence"), default=1.0),
                     "participants": participant_names,
+                    "summary_event_evidence": {
+                        key: coerce_metadata_dict(paragraph.get("metadata")).get(key)
+                        for key in ("summary_event_spans", "source_window_id", "chat_id")
+                    },
                 }
             )
         segmentation_generation = group.get("_segmentation_generation")

@@ -96,6 +96,11 @@ def test_build_references_real_endpoint_shapes_and_strict_raw_scope(monkeypatch)
     )
     monkeypatch.setattr(references, "_jargon_records", lambda *args: [])
 
+    async def no_expressions(*args):
+        return []
+
+    monkeypatch.setattr(references, "_expression_records", no_expressions)
+
     def hit(identity, chat, text):
         return SimpleNamespace(
             hash_value=identity,

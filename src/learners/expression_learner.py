@@ -400,6 +400,8 @@ class ExpressionLearner:
         *,
         learning_session_id: str,
         learned_contents: Optional[List[str]] = None,
+        extracted_response: Optional[str] = None,
+        already_reviewed: bool = False,
     ) -> bool:
         """执行已经获得并发闸门的表达学习批次。"""
 
@@ -410,32 +412,37 @@ class ExpressionLearner:
         prompt_template.add_context("chat_str", readable_message)
         prompt = await prompt_manager.render_prompt(prompt_template)
 
-        try:
-            learning_messages = await self._build_multi_learning_messages(pending_messages, prompt)
-            if len(learning_messages) == 2:
-                self.learning_status, self.learning_detail = "no_results", "没有可学习的文字正文"
+        if extracted_response is None:
+            try:
+                learning_messages = await self._build_multi_learning_messages(pending_messages, prompt)
+                if len(learning_messages) == 2:
+                    self.learning_status, self.learning_detail = "no_results", "没有可学习的文字正文"
+                    return False
+                generation_result = await express_learn_model.generate_response_with_context(
+                    lambda _client: learning_messages,
+                    options=LLMGenerationOptions(retain_replay=False),
+                    session_id=learning_session_id,
+                )
+                self._log_learning_context_preview(
+                    learning_messages,
+                    session_id=learning_session_id,
+                    source_message_count=len(pending_messages),
+                    source_type="trimmed_history",
+                    generation_result=generation_result,
+                )
+                response = generation_result.response
+            except Exception as e:
+                logger.error(f"学习表达方式失败: {e}")
+                if learned_contents is not None:
+                    raise
                 return False
-            generation_result = await express_learn_model.generate_response_with_context(
-                lambda _client: learning_messages,
-                options=LLMGenerationOptions(retain_replay=False),
-                session_id=learning_session_id,
-            )
-            self._log_learning_context_preview(
-                learning_messages,
-                session_id=learning_session_id,
-                source_message_count=len(pending_messages),
-                source_type="trimmed_history",
-                generation_result=generation_result,
-            )
-            response = generation_result.response
-        except Exception as e:
-            logger.error(f"学习表达方式失败: {e}")
-            if learned_contents is not None:
-                raise
-            return False
+        else:
+            response = extracted_response
 
         expressions: List[Tuple[str, str, str]]
         expressions, _ = parse_expression_response(response)
+        reviewed_keys = {(situation, normalize_expression_style_for_learning(style), source_id)
+                         for situation, style, source_id in expressions} if already_reviewed else set()
 
         if len(expressions) > 20:
             logger.info(f"表达方式数量超过20: {len(expressions)}")
@@ -467,6 +474,9 @@ class ExpressionLearner:
 
         # logger.info(f"可学习的表达方式: {expressions}")
 
+        if already_reviewed:
+            # A hook may reject approved content, but cannot introduce unreviewed content.
+            expressions = [item for item in expressions if item in reviewed_keys]
         learnt_expressions = self._filter_expressions(expressions, pending_messages)
         if not learnt_expressions:
             logger.info("没有可学习的表达方式通过过滤")
@@ -492,28 +502,43 @@ class ExpressionLearner:
                 logger.info(f"{self.session_id} 表达方式写入 Hook 中止: situation={situation!r}")
                 continue
 
+            reviewed_pair = (situation, style)
             upsert_kwargs = before_upsert_result.kwargs
             situation = str(upsert_kwargs.get("situation", situation) or "").strip()
             style = normalize_expression_style_for_learning(str(upsert_kwargs.get("style", style) or "").strip())
+            if already_reviewed and (situation, style) != reviewed_pair:
+                raise ValueError("Expression hook changed an evidence-reviewed candidate; review required")
             if not situation or not style:
                 logger.info(f"{self.session_id} 表达方式写入 Hook 中止: situation={situation!r}")
                 continue
 
             expression_self_reflect = global_config.expression.expression_self_reflect
-            if expression_self_reflect and not await self._check_expression_before_upsert(
+            if expression_self_reflect and not already_reviewed and not await self._check_expression_before_upsert(
                 situation,
                 style,
                 session_id=learning_session_id,
             ):
                 continue
 
-            expression = await self._upsert_expression_to_db(
-                situation,
-                style,
-                session_id=learning_session_id,
-                checked=False,
-                modified_by=ModifiedBy.AI if expression_self_reflect else None,
-            )
+            existing_reviewed = None
+            if already_reviewed:
+                existing_reviewed = await asyncio.to_thread(
+                    self._find_similar_expression, situation, style, session_id=learning_session_id, strict_errors=True
+                )
+            if existing_reviewed:
+                # Reusing a checkpoint must not count a partially committed candidate twice.
+                # Keep the item in vector syncing so a previous index failure can recover.
+                expression = existing_reviewed[0]
+            else:
+                expression = await self._upsert_expression_to_db(
+                    situation,
+                    style,
+                    session_id=learning_session_id,
+                    checked=False,
+                    modified_by=ModifiedBy.AI if expression_self_reflect else None,
+                )
+            if already_reviewed and expression is None:
+                raise RuntimeError("Evidence-reviewed expression did not receive a database write receipt")
             if expression is not None:
                 written_expressions.append(expression)
                 if learned_contents is not None:
@@ -938,6 +963,7 @@ class ExpressionLearner:
         style: str,
         *,
         session_id: str,
+        strict_errors: bool = False,
     ) -> Optional[Tuple[MaiExpression, float]]:
         """在数据库中查找完全一致的表达方式。
 
@@ -974,4 +1000,6 @@ class ExpressionLearner:
 
         except Exception as e:
             logger.error(f"查找相似表达方式失败: {e}")
+            if strict_errors:
+                raise
         return None

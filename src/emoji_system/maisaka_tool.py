@@ -128,6 +128,7 @@ async def send_emoji_for_maisaka(
     reasoning: str = "",
     context_texts: Sequence[str] | None = None,
     reply_message: Optional["SessionMessage"] = None,
+    expected_emoji_hash: str = "",
 ) -> MaisakaEmojiSendResult:
     """为 Maisaka 选择并发送一个表情。"""
 
@@ -207,6 +208,9 @@ async def send_emoji_for_maisaka(
             requested_emotion=normalized_requested_emotion,
             matched_emotion=matched_emotion,
         )
+
+    if expected_emoji_hash and selected_emoji.file_hash != expected_emoji_hash:
+        return MaisakaEmojiSendResult(False, "所选表情被 Hook 改写，已取消发送；请重新选择。")
 
     try:
         emoji_base64 = ImageUtils.image_path_to_base64(str(resolve_stored_image_path(selected_emoji.full_path)))

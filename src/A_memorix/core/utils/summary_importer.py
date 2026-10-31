@@ -42,6 +42,7 @@ from .fact_deduplication import FactDeduplicator, fact_scope_lock, observation_i
 from .relation_write_service import RelationWriteService
 from .runtime_payloads import optional_float
 from .summary_identity import SummaryIdentityContext
+from .summary_event_evidence import validated_event_spans
 from .runtime_self_check import ensure_runtime_self_check, run_embedding_runtime_self_check
 
 logger = get_logger("A_Memorix.SummaryImporter")
@@ -801,6 +802,15 @@ class SummaryImporter:
             if not messages:
                 return SummaryImportResult(False, "未找到有效的聊天记录进行总结")
 
+            expected_ids = (metadata or {}).get("source_message_ids")
+            if expected_ids is not None:
+                actual_ids = [str(message.message_id) for message in messages]
+                if (not isinstance(expected_ids, list)
+                        or any(not isinstance(mid, str) or not mid for mid in expected_ids)
+                        or len(set(expected_ids)) != len(expected_ids)
+                        or len(actual_ids) != len(expected_ids) or set(actual_ids) != set(expected_ids)):
+                    return SummaryImportResult(False, "聊天摘要来源窗口已变化，拒绝将其他消息标为原始证据")
+
             # 转换为可读文本
             identity_context = SummaryIdentityContext(self.metadata_store, messages)
             chat_history_text, identity_catalog = await asyncio.to_thread(identity_context.render)
@@ -902,7 +912,13 @@ class SummaryImporter:
                          for relation in relations]
             facts = [{**fact, "person_ids": identity_context.metadata([fact["text"]])["person_ids"],
                       "text": identity_context.restore_text(fact["text"])} for fact in facts]
-            metadata = {**(metadata or {}), **identity_metadata}
+            raw_event_spans = data.get("event_spans", [])
+            event_spans = validated_event_spans(
+                [identity_context.restore_text(span) for span in raw_event_spans]
+                if isinstance(raw_event_spans, list) and all(isinstance(span, str) for span in raw_event_spans) else [],
+                summary_text,
+            )
+            metadata = {**(metadata or {}), **identity_metadata, "summary_event_spans": event_spans}
             msg_times = [timestamp for msg in messages if (timestamp := _message_timestamp(msg)) is not None]
             time_meta = {}
             if msg_times:
@@ -1044,6 +1060,10 @@ class SummaryImporter:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """将数据写入存储"""
+        metadata = dict(metadata or {})
+        # Fact deduplication can rewrite the paragraph after initial extraction.
+        # Boundaries are reusable only if they still partition the stored text.
+        metadata["summary_event_spans"] = validated_event_spans(metadata.get("summary_event_spans"), summary)
         external_id = str((metadata or {}).get("external_id", "") or "").strip()
         plugin_instance = self._plugin_instance()
         common_ingest = getattr(plugin_instance, "ingest_text", None)

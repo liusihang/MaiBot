@@ -14,6 +14,8 @@ from .remember_memory import get_tool_spec as get_remember_memory_tool_spec
 from .remember_memory import handle_tool as handle_remember_memory_tool
 from .query_memory import get_tool_spec as get_query_memory_tool_spec
 from .query_memory import handle_tool as handle_query_memory_tool
+from .query_emoji import get_tool_spec as get_query_emoji_tool_spec
+from .query_emoji import handle_tool as handle_query_emoji_tool
 from .query_image_memory import get_tool_spec as get_query_image_memory_tool_spec
 from .query_image_memory import handle_tool as handle_query_image_memory_tool
 from .query_person_profile import get_tool_spec as get_query_person_profile_tool_spec
@@ -114,6 +116,7 @@ BUILTIN_TOOL_ENTRIES: List[BuiltinToolEntry] = [
         handle_query_person_profile_tool,
         stage="action",
     ),
+    BuiltinToolEntry("query_emoji", get_query_emoji_tool_spec, handle_query_emoji_tool, stage="both"),
     BuiltinToolEntry("send_emoji", get_send_emoji_tool_spec, handle_send_emoji_tool, stage="action"),
     BuiltinToolEntry("show_emoji_list", get_show_emoji_list_tool_spec, handle_show_emoji_list_tool, stage="action"),
     BuiltinToolEntry("tool_search", get_tool_search_tool_spec, handle_tool_search_tool, stage="action"),
@@ -152,9 +155,9 @@ def _is_builtin_tool_enabled_by_config(entry: BuiltinToolEntry) -> bool:
     """根据全局配置判断内置工具是否应暴露。"""
 
     if entry.name == "show_emoji_list":
-        return global_config.emoji.use_new_send_logic
+        return False  # Replaced by semantic query_emoji in the active tool catalog.
     if entry.name == "send_emoji":
-        return not global_config.emoji.use_new_send_logic
+        return True
     if entry.name == "subagent":
         return global_config.capabilities.planner_subagent
     if entry.name in {"subagent_status", "subagent_stop"}:

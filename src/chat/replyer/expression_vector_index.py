@@ -3118,9 +3118,9 @@ class ExpressionVectorIndex:
             return []
 
         indexed_candidates = self._filter_indexed_expressions(snapshot, scoped_candidates, current_profile)
-        if len(indexed_candidates) < 10:
+        if not indexed_candidates:
             logger.info(
-                f"表达向量召回已跳过：当前 profile 范围内可用索引候选不足 "
+                f"表达向量召回已跳过：当前 profile 范围内没有可用索引候选 "
                 f"count={len(indexed_candidates)} marker={current_profile.marker[:12]}"
             )
             return []

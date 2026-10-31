@@ -24,7 +24,15 @@ from src.common.prompt_i18n import load_prompt
 from src.config.config import global_config
 from src.person_info.person_info import Person, get_person_id
 from src.services.llm_service import LLMServiceClient
-from src.services.memory_records import direct_self_evidence, fact_key, message_identity, user_text
+from src.services.memory_records import (
+    direct_self_evidence,
+    explicit_correction,
+    fact_classification,
+    fact_key,
+    message_identity,
+    source_evidence,
+    user_text,
+)
 from src.services.memory_service import memory_service
 
 logger = get_logger("person_fact_writeback")
@@ -255,7 +263,11 @@ class PersonFactWritebackService:
             fact = item.get("fact")
             if item.get("person_id") != person_id or not isinstance(fact, str) or len(fact.strip()) < 4:
                 continue
-            if direct_self_evidence(item, [source], people[person_id]["name"]) is not None:
+            if (
+                "stability" in item
+                and fact_classification(item) is not None
+                and direct_self_evidence(item, [source], people[person_id]["name"]) is not None
+            ):
                 valid.append({**item, "fact": fact.strip(), "evidence_message_id": str(source.message_id)})
         await asyncio.to_thread(self._journal.extracted, session_id, list(selected), valid)
         logger.info(
@@ -266,14 +278,49 @@ class PersonFactWritebackService:
     async def _extract_facts(
         self, session_id: str, messages: Dict[str, Any], people: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
+        existing = []
+        context_chars = 0
+        for person_id in people:
+            if not any(
+                get_person_id(m.platform, message_identity(m)[2]) == person_id and explicit_correction(user_text(m))
+                for m in messages.values()
+            ):
+                continue  # Ordinary new facts need no repeated old-memory prompt.
+            if context_chars >= 8000:
+                break
+            result = await memory_service.fact_admin(
+                action="list",
+                scope_type="person",
+                scope_id=person_id,
+                statuses=["active"],
+                chat_id=session_id,
+                limit=50,
+            )
+            if not result.get("success"):
+                raise RuntimeError("读取同群人物证据失败，保留抽取任务")
+            for claim in result.get("items", []):
+                if claim.get("authority") != "direct_user":
+                    continue
+                size = len(str(claim.get("value_text", "")))
+                if context_chars + size > 8000:
+                    break
+                existing.append({**claim, "person_id": person_id})
+                context_chars += size
         evidence = [
-            {"message_id": mid, "person_id": get_person_id(m.platform, message_identity(m)[2]), "text": user_text(m)}
+            {**source_evidence(m), "person_id": get_person_id(m.platform, message_identity(m)[2])}
             for mid, m in messages.items()
         ]
         prompt = load_prompt(
             "person_fact_batch",
             people=json.dumps(list(people.values()), ensure_ascii=False),
             messages=json.dumps(evidence, ensure_ascii=False),
+            existing_facts=json.dumps(
+                [
+                    {"id": claim["claim_id"], "person_id": claim["person_id"], "fact": claim["value_text"]}
+                    for claim in existing
+                ],
+                ensure_ascii=False,
+            ),
         )
         if self._extractor is None:
             self._extractor = LLMServiceClient(task_name="utils", request_type="A_Memorix.person_fact_writeback")
@@ -281,6 +328,25 @@ class PersonFactWritebackService:
         payload = json.loads(repair_json(result.response))
         if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
             raise ValueError("人物事实批量抽取结果必须为 JSON 对象数组")
+        known = {claim["claim_id"]: claim for claim in existing}
+        for item in payload:
+            item.pop("_replacement", None)  # Only the host may attach a validated target/version.
+            target_id = item.get("replaces", "")
+            if not isinstance(target_id, str):
+                raise ValueError("人物事实 replaces 必须是 ID 字符串")
+            if target_id:
+                source = messages.get(str(item.get("evidence_message_id", "")))
+                if source is None or not explicit_correction(user_text(source)):
+                    raise ValueError("自动更正缺少本人明确的更正或状态变化表述")
+                target = known.get(target_id)
+                if target is None or target["person_id"] != item.get("person_id"):
+                    raise ValueError("人物事实更正引用了其他人物或输入外的旧记忆")
+                # Persist the optimistic version with the extraction receipt for safe retries.
+                item["_replacement"] = {
+                    "claim_id": target_id,
+                    "updated_at": target["updated_at"],
+                    "value_text": target["value_text"],
+                }
         return payload
 
     async def _persist_extracted(self, session_id: str) -> None:
@@ -288,7 +354,7 @@ class PersonFactWritebackService:
         sources = (
             await asyncio.to_thread(self._load_messages, session_id, [j["message_id"] for j in jobs]) if jobs else {}
         )
-        existing: Dict[str, set] = {}
+        existing: Dict[str, Dict[str, Dict[str, Any]]] = {}
         for job in jobs:
             facts = json.loads(job["facts_json"])
             source = sources.get(job["message_id"])
@@ -306,15 +372,18 @@ class PersonFactWritebackService:
                     )
                     if not result.get("success"):
                         raise RuntimeError("读取已有事实失败，保留已抽取结果")
-                    existing[person_id] = {fact_key(f["value_text"], name) for f in result.get("items", [])}
+                    existing[person_id] = {fact_key(f["value_text"], name): f for f in result.get("items", [])}
                 key = fact_key(item["fact"], name)
-                if key in existing[person_id]:
+                classification = fact_classification(item)
+                if classification is None:
+                    raise ValueError("人物事实稳定性或画像分类无效")
+                previous = existing[person_id].get(key)
+                # An identical statement is not authority to reclassify existing evidence.
+                # Explicit changed statements use the sourced correction path instead.
+                if previous and not item.get("_replacement"):
                     continue
                 _, group_id, user_id = message_identity(source)
                 digest = hashlib.md5(f"{person_id}|{session_id}|{item['fact']}".encode()).hexdigest()
-                section = item.get("profile_section", "stable_facts")
-                if section not in {"stable_facts", "identity_settings", "interaction_preferences"}:
-                    section = "stable_facts"
                 result = await memory_service.ingest_text(
                     external_id=f"person_fact:{person_id}:{digest}",
                     source_type="person_fact",
@@ -330,7 +399,11 @@ class PersonFactWritebackService:
                         "writeback_source": "memory_flow_service",
                         "evidence_source": "direct_self_statement",
                         "evidence_message_ids": [job["message_id"]],
-                        "fact_claim": {"authority": "direct_user", "stability": "stable", "profile_section": section},
+                        "fact_claim": classification,
+                        "profile_section": classification["profile_section"],
+                        "evidence_quote": item["evidence_quote"],
+                        "evidence_time": source_evidence(source).get("time"),
+                        "replaces_person_fact": item.get("_replacement"),
                     },
                     respect_filter=True,
                     group_id=group_id,
@@ -342,5 +415,5 @@ class PersonFactWritebackService:
                     or not (result.stored_ids or result.skipped_ids)
                 ):
                     raise RuntimeError(f"人物事实未获保存回执: {result.detail}")
-                existing[person_id].add(key)
+                existing[person_id][key] = {"value_text": item["fact"], **classification}
             await asyncio.to_thread(self._journal.complete, session_id, [job["message_id"]])

@@ -255,6 +255,7 @@ class JargonLearner:
         learning_session_id: str,
         jargon_miner: JargonMiner,
         learned_contents: Optional[List[str]] = None,
+        extracted_response: Optional[str] = None,
     ) -> bool:
         """执行已经获得并发闸门的黑话学习批次。"""
 
@@ -271,26 +272,29 @@ class JargonLearner:
         prompt_template.add_context("chat_str", readable_message)
         prompt = await prompt_manager.render_prompt(prompt_template)
 
-        try:
-            learning_messages = self._build_multi_learning_messages(source_items, prompt)
-            generation_result = await jargon_learn_model.generate_response_with_context(
-                lambda _client: learning_messages,
-                options=LLMGenerationOptions(retain_replay=False),
-                session_id=learning_session_id,
-            )
-            self._log_learning_context_preview(
-                learning_messages,
-                session_id=learning_session_id,
-                source_message_count=len(source_items),
-                source_type="trimmed_history",
-                generation_result=generation_result,
-            )
-            response = generation_result.response
-        except Exception as e:
-            logger.error(f"学习黑话失败: {e}")
-            if learned_contents is not None:
-                raise
-            return False
+        if extracted_response is None:
+            try:
+                learning_messages = self._build_multi_learning_messages(source_items, prompt)
+                generation_result = await jargon_learn_model.generate_response_with_context(
+                    lambda _client: learning_messages,
+                    options=LLMGenerationOptions(retain_replay=False),
+                    session_id=learning_session_id,
+                )
+                self._log_learning_context_preview(
+                    learning_messages,
+                    session_id=learning_session_id,
+                    source_message_count=len(source_items),
+                    source_type="trimmed_history",
+                    generation_result=generation_result,
+                )
+                response = generation_result.response
+            except Exception as e:
+                logger.error(f"学习黑话失败: {e}")
+                if learned_contents is not None:
+                    raise
+                return False
+        else:
+            response = extracted_response
 
         jargon_entries = parse_jargon_response(response)
         cached_jargon_entries = self._check_cached_jargons_in_messages(source_items, jargon_miner)
@@ -325,7 +329,8 @@ class JargonLearner:
             jargon_miner.session_name = self._get_session_display_name(learning_session_id)
         try:
             return await self._process_jargon_entries(
-                jargon_entries, source_items, jargon_miner, learned_contents=learned_contents
+                jargon_entries, source_items, jargon_miner, learned_contents=learned_contents,
+                strict_persistence=extracted_response is not None
             )
         finally:
             jargon_miner.session_id = original_jargon_session_id
@@ -508,6 +513,7 @@ class JargonLearner:
         jargon_miner: JargonMiner,
         *,
         learned_contents: Optional[List[str]] = None,
+        strict_persistence: bool = False,
     ) -> bool:
         """处理黑话条目，并路由到 JargonMiner。"""
 
@@ -608,7 +614,7 @@ class JargonLearner:
             )
             return False
 
-        saved, updated = await jargon_miner.process_extracted_entries(entries)
+        saved, updated = await jargon_miner.process_extracted_entries(entries, strict_persistence=strict_persistence)
         # 展示本批交给黑话矿工处理的候选，不能把候选数量当成新增词条数量。
         if learned_contents is not None:
             learned_contents.extend(str(entry["content"]) for entry in entries)

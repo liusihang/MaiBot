@@ -5,6 +5,11 @@ on:
     paths:
       - "src/A_memorix/**"
       - "src/services/memory_service.py"
+      - "src/services/person_fact_writeback.py"
+      - "src/services/memory_records.py"
+      - "src/services/memory_flow_service.py"
+      - "prompts/**/person_fact_batch.prompt"
+      - "prompts/**/a_memorix_chat_summary.prompt"
       - "src/webui/routers/memory.py"
       - "pytests/A_memorix_test/**"
       - "pyproject.toml"

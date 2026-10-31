@@ -165,12 +165,11 @@ def get_tool_spec(context: Optional[ToolAvailabilityContext] = None) -> ToolSpec
         },
         "default": [],
     }
-    if config_module.global_config.emoji.use_new_send_logic:
-        properties["attach_emoji"] = {
-            "type": "integer",
-            "minimum": 0,
-            "description": "可选。从 show_emoji_list 的拼图选择一个表情包，填写图片序号，在文字后发送；0 或不填表示不发送表情包。",
-        }
+    properties["attach_emoji"] = {
+        "type": "integer",
+        "minimum": 0,
+        "description": "可选。从 query_emoji 返回的候选中选择一个，填写 candidate_index，在文字后发送；0 或不填表示不发送表情包。",
+    }
     if config_module.global_config.chat.enable_reply_at and context is not None and context.is_group_chat:
         properties["attach_at"] = {
             "type": "array",
@@ -400,11 +399,6 @@ async def execute_reply(
     target_message_id = str(invocation_arguments.get("msg_id") or "").strip()
     if invocation_arguments.get("attach_at") and not config_module.global_config.chat.enable_reply_at:
         return _preflight_failure(tool_ctx, "reply", "回复时 @ 用户已关闭，不能使用 attach_at。")
-    if (
-        invocation_arguments.get("attach_emoji") is not None
-        and not config_module.global_config.emoji.use_new_send_logic
-    ):
-        return _preflight_failure(tool_ctx, "reply", "新表情包发送逻辑未开启，请使用 send_emoji 工具。")
     reply_tool_args = {
         key: value for key, value in invocation_arguments.items() if key not in _REPLY_TOOL_INTERNAL_ARGUMENTS
     }

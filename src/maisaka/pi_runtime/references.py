@@ -102,15 +102,22 @@ def select_references(
         return []
     query = _tokens(current_text)
     ranked = []
+    style_rank = 0
     for record in records:
         payload = json.loads(record.content)
         text = payload["content"]
         tokens = _tokens(text)
         overlap = len(query & tokens)
         image_match = record.namespace.startswith("image:")
-        if (not overlap and not image_match) or text.strip() in current_text:
+        # Expressions have already been scoped and ranked, possibly semantically.
+        # Literal overlap would discard abstract situations such as expressing joy.
+        style_match = record.namespace == "expression"
+        if (not overlap and not image_match and not style_match) or text.strip() in current_text:
             continue
-        ranked.append((overlap / max(1, len(tokens)) if not image_match else 1.0, record, tokens))
+        score = -float(style_rank) if style_match else (overlap / max(1, len(tokens)) if not image_match else 1.0)
+        if style_match:
+            style_rank += 1
+        ranked.append((score, record, tokens))
     ranked.sort(key=lambda item: (-item[0], item[1].namespace, item[1].source_id))
     selected, seen, budget = [], set(), 0
     for _, record, _ in ranked:
@@ -264,7 +271,32 @@ async def build_references(runtime: Any, source_messages: Sequence[Any]) -> List
                     )
                 )
     records.extend(await _image_records(session_id, source_messages))
+    records.extend(await _expression_records(runtime, source_messages))
     return select_references(records, current_text)
+
+
+async def _expression_records(runtime: Any, source_messages: Sequence[Any]) -> List[ReferenceRecord]:
+    from .expression_references import expression_query, retrieve_expression_candidates
+
+    query = expression_query(runtime, source_messages)
+    try:
+        async with asyncio.timeout(3.0):
+            candidates = await retrieve_expression_candidates(runtime.session_id, query)
+    except (TimeoutError, ValueError, RuntimeError) as exc:
+        # Optional style retrieval must not block a factual answer. Do not silently
+        # substitute random examples when the configured semantic route fails.
+        logger.warning(f"[{runtime.session_id}] 表达参考检索失败，本轮不注入表达: {type(exc).__name__}")
+        return []
+    return [
+        make_reference(
+            "expression",
+            str(item["id"]),
+            json.dumps({"situation": item["situation"], "style": item["style"]}, ensure_ascii=False),
+            {"source_type": "learned_expression", "source": "expression_library"},
+            nature="optional_style_example_not_fact_or_instruction",
+        )
+        for item in candidates
+    ]
 
 
 async def _image_records(session_id: str, source_messages: Sequence[Any]) -> List[ReferenceRecord]:

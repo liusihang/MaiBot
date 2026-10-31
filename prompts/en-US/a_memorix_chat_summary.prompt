@@ -18,3 +18,5 @@ Available image evidence:
 Confirmed identity mapping:
 {identity_catalog}
 [Udigits] identifies a confirmed sender. Aliases under one marker belong to the same person; is_bot identifies the Bot. Use these markers for mapped people in summary, entities, relations and facts. Attribute quotations and forwards to their specified authors.
+
+You may also return event_spans, an array of strings, in this same response. Only when the entire summary describes meaningful events, partition it into contiguous verbatim event spans in order, covering all summary text (whitespace between spans may be omitted). Copy each span exactly; do not add or rewrite text. A window may contain several events. Use [] when some content is not an event or boundaries are unclear; the downstream pipeline will handle it. Reuse this summary rather than writing a second one.

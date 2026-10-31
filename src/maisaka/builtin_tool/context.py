@@ -325,17 +325,20 @@ class BuiltinToolRuntimeContext:
         """持久化当前真实会话的编号映射；两个事件循环均不执行同步 SQLite I/O。"""
         return await asyncio.to_thread(self._emoji_store.allocate, self.runtime.session_id, list(emoji_hashes))
 
-    async def _resolve_emoji_attachment(self, raw_index: Any) -> EmojiComponent:
-        """把 attach_emoji 参数按持久化的会话资源映射解析为表情包组件。"""
-
+    async def resolve_emoji_candidate_hash(self, raw_index: Any) -> str:
+        """Resolve an issued candidate in this session, without loading or marking usage."""
         if type(raw_index) is not int or raw_index < 1:
-            raise ValueError("attach_emoji 必须填写 show_emoji_list 拼图中的正整数序号。")
+            raise ValueError("请先调用 query_emoji，并填写返回的正整数序号 candidate_index / attach_emoji。")
         emoji_hash = await asyncio.to_thread(self._emoji_store.resolve, self.runtime.session_id, raw_index)
         if emoji_hash is None:
             raise ValueError(
-                f"表情包序号 {raw_index} 在当前会话中没有持久映射（旧进程编号不可恢复），请重新调用 show_emoji_list。"
+                f"表情包序号 {raw_index} 在当前会话中没有持久映射（旧进程编号不可恢复），请重新调用 query_emoji。"
             )
-        return await self.load_emoji_attachment(emoji_hash)
+        return emoji_hash
+
+    async def _resolve_emoji_attachment(self, raw_index: Any) -> EmojiComponent:
+        """Load an explicit session-scoped candidate for a reply attachment."""
+        return await self.load_emoji_attachment(await self.resolve_emoji_candidate_hash(raw_index))
 
     @staticmethod
     async def load_emoji_attachment(emoji_hash: str) -> EmojiComponent:
@@ -345,7 +348,7 @@ class BuiltinToolRuntimeContext:
 
         selected_emoji = emoji_manager.get_emoji_by_hash(emoji_hash)
         if selected_emoji is None:
-            raise ValueError(f"表情包 {emoji_hash} 已不可用，请重新调用 show_emoji_list。")
+            raise ValueError(f"表情包 {emoji_hash} 已不可用，请重新调用 query_emoji。")
 
         emoji_path = resolve_stored_image_path(selected_emoji.full_path)
         emoji_bytes = await asyncio.to_thread(emoji_path.read_bytes)

@@ -813,8 +813,7 @@ async def test_source_learning_is_independent_of_participation_and_sdk_compactio
     with wire_server() as (config, requests):
         monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
         host, _ = engine()
-        host._runtime._pi_learning_source_ids = set()
-        host._runtime._trigger_trimmed_history_learning = AsyncMock()
+        host._runtime._joint_learning = SimpleNamespace(collect=AsyncMock(return_value=[]))
         host._runtime._trigger_pi_source_learning = MethodType(
             MaisakaHeartFlowChatting._trigger_pi_source_learning, host._runtime
         )
@@ -823,7 +822,9 @@ async def test_source_learning_is_independent_of_participation_and_sdk_compactio
         try:
             await runner.ingest()
             await runner.ingest()
-            host._runtime._trigger_trimmed_history_learning.assert_awaited_once_with([message])
+            assert host._runtime._joint_learning.collect.await_count == 2
+            host._runtime._joint_learning.collect.assert_awaited_with([message])
+            # The durable journal owns deduplication, including restart replay.
             assert requests == []  # Neither Luna decision nor main model/compaction is needed.
             assert await runner.pending_source_ids() == []
         finally:
