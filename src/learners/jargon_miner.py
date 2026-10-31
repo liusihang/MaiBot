@@ -410,10 +410,9 @@ class JargonMiner:
         raw_content_list, cleaned_evidence_messages, evidence_changed = await asyncio.to_thread(
             self._load_evidence_contexts, jargon_obj
         )
-        used_evidence_messages = bool(raw_content_list)
-        if used_evidence_messages:
-            await asyncio.to_thread(self._cleanup_jargon_evidence_messages, jargon_obj, None)
-        elif evidence_changed:
+        # Evidence remains the provenance and replay receipt after inference too.
+        # Only remove references proven missing/invalid, never clear valid sources.
+        if evidence_changed:
             await asyncio.to_thread(self._cleanup_jargon_evidence_messages, jargon_obj, cleaned_evidence_messages)
 
         if not raw_content_list:
@@ -584,7 +583,11 @@ class JargonMiner:
             logger.info(f"[{self.session_name}]{content} 不是黑话")
 
     async def process_extracted_entries(
-        self, entries: List[JargonEntry], person_name_filter: Optional[Callable[[str], bool]] = None
+        self,
+        entries: List[JargonEntry],
+        person_name_filter: Optional[Callable[[str], bool]] = None,
+        *,
+        strict_persistence: bool = False,
     ) -> Tuple[int, int]:
         """
         处理已提取的黑话条目（从 expression_learner 路由过来的）
@@ -645,6 +648,8 @@ class JargonMiner:
                     jargon_items = session.exec(select(Jargon).filter_by(content=content)).all()
             except Exception as e:
                 logger.error(f"查询黑话 '{content}' 失败: {e}")
+                if strict_persistence:
+                    raise
                 continue
             related_session_ids, _ = JargonConfigUtils.resolve_jargon_group_scope(self.session_id)
             # 找匹配项
@@ -676,7 +681,7 @@ class JargonMiner:
                     self._add_to_cache(content)
                     continue
                 # 已存在记录，更新 count 和证据消息引用
-                self._update_jargon(matched_jargon, evidence_messages)
+                self._update_jargon(matched_jargon, evidence_messages, strict_persistence=strict_persistence)
                 if self._should_infer_meaning(matched_jargon):
                     asyncio.create_task(self._infer_meaning_by_id(matched_jargon.id))  # type: ignore
                 updated += 1
@@ -704,6 +709,8 @@ class JargonMiner:
                     self._add_to_cache(content)
                 except Exception as e:
                     logger.error(f"保存新黑话 '{content}' 失败: {e}")
+                    if strict_persistence:
+                        raise
                     continue
         # 固定输出提取的jargon结果，格式化为可读形式（只要有提取结果就输出）
         if uniq_entries:
@@ -755,6 +762,8 @@ class JargonMiner:
         self,
         db_jargon: Jargon,
         evidence_message_groups: List[JargonEvidenceMessageGroup],
+        *,
+        strict_persistence: bool = False,
     ) -> None:
         """更新已有黑话记录并写回数据库。
 
@@ -766,12 +775,15 @@ class JargonMiner:
             logger.debug(f"黑话 '{db_jargon.content}' 是手动记录，跳过 AI 更新")
             return
 
-        db_jargon.count += 1
-        db_jargon.updated_timestamp = datetime.now()
         existing_evidence_groups = self._normalize_evidence_message_groups(
             self._load_json_list(db_jargon.evidence_messages, "evidence_messages")
         )
         merged_evidence_groups = self._merge_evidence_message_groups(existing_evidence_groups, evidence_message_groups)
+        # Replayed extraction results are not new independent evidence.
+        if merged_evidence_groups == existing_evidence_groups:
+            return
+        db_jargon.count += 1
+        db_jargon.updated_timestamp = datetime.now()
         db_jargon.evidence_messages = (
             json.dumps(merged_evidence_groups, ensure_ascii=False)
             if merged_evidence_groups
@@ -795,8 +807,12 @@ class JargonMiner:
                     session.add(persisted_jargon)
                 else:
                     logger.warning(f"黑话 ID {db_jargon.id} 在数据库中未找到，无法更新")
+                    if strict_persistence:
+                        raise RuntimeError("Jargon row disappeared before update receipt")
         except Exception as e:
             logger.error(f"更新黑话 '{db_jargon.content}' 失败: {e}")
+            if strict_persistence:
+                raise
 
     def _parse_result(self, response: str) -> Optional[Dict[str, str]]:
         try:

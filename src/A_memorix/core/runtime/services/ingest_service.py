@@ -317,7 +317,25 @@ class MemoryIngestService(KernelServiceBase):
             await self.initialize()
             person_id = tokens(kwargs["person_ids"])[0]
             async with fact_scope_lock(self.metadata_store, "person", person_id):
-                return await self._ingest_person_fact(kwargs, metadata, person_id)
+                previous = metadata.get("replaces_person_fact")
+                if previous:
+                    if not isinstance(previous, dict):
+                        raise ValueError("人物事实更正目标格式无效")
+                    await asyncio.to_thread(
+                        self.metadata_store.validate_person_fact_revision,
+                        previous=previous, person_id=person_id, chat_id=kwargs["chat_id"],
+                        message_ids=metadata["evidence_message_ids"],
+                    )
+                result = await self._ingest_person_fact(kwargs, metadata, person_id)
+                if previous:
+                    if not isinstance(previous, dict) or len(result.get("fact_claim_ids", [])) != 1:
+                        raise ValueError("人物事实更正缺少唯一事实回执")
+                    await asyncio.to_thread(
+                        self.metadata_store.supersede_person_fact_from_evidence,
+                        previous=previous, new_claim_id=result["fact_claim_ids"][0], person_id=person_id,
+                        chat_id=kwargs["chat_id"], message_ids=metadata["evidence_message_ids"],
+                    )
+                return result
         return await self._ingest_text_raw(**kwargs)
 
     async def _ingest_person_fact(self, kwargs: Dict[str, Any], metadata: Dict[str, Any], person_id: str) -> Dict[str, Any]:

@@ -950,6 +950,25 @@ class PersonProfileService:
         if not candidates:
             return fallback
 
+        # Reuse the classification attached to the same source evidence. A
+        # profile is a view of those facts, not another opportunity to invent or
+        # promote them. Only unclassified evidence needs a model request.
+        classified = {key: [] for key in fallback}
+        pending = []
+        for item in candidates:
+            section = item.get("profile_section", "")
+            if section not in classified:
+                pending.append(item)
+                continue
+            if item["source_type"] in {"chat_summary", "explicit_memory"} and section in {
+                "identity_settings", "stable_facts", "interaction_preferences"
+            }:
+                section = "recent_interactions"
+            self._append_profile_bucket(classified, section, item["text"])
+        candidates = pending
+        if not candidates:
+            return classified
+
         model = self._resolve_profile_classification_model()
         if model is None:
             return fallback
@@ -978,7 +997,7 @@ class PersonProfileService:
         if not parsed:
             return fallback
         by_id = {item["id"]: item for item in candidates}
-        buckets = {key: [] for key in fallback}
+        buckets = {key: list(values) for key, values in classified.items()}
         seen = set()
         for section, ids in parsed.items():
             for candidate_id in ids:
@@ -1100,8 +1119,9 @@ class PersonProfileService:
             source_type = str(metadata.get("source_type", "") or "").strip()
             if not source_type:
                 source_type = "chat_summary" if self._is_chat_summary_evidence(item) else "person_fact"
-            candidates.append({"id": f"evidence-{index}", "source_type": source_type, "text": content[:260],
-                "profile_section": str(metadata.get("profile_section", "") or "")})
+            section = str(metadata.get("profile_section", "") or "")
+            candidates.append({"id": f"evidence-{index}", "source_type": source_type,
+                "text": content if section else content[:260], "profile_section": section})
         return candidates
 
     @staticmethod

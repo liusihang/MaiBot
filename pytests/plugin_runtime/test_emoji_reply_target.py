@@ -20,15 +20,21 @@ async def test_native_emoji_tool_preserves_explicit_community_target(monkeypatch
     )
     ctx = SimpleNamespace(
         runtime=runtime,
+        resolve_emoji_candidate_hash=AsyncMock(return_value="hash"),
         build_failure_result=lambda *args, **kwargs: {"success": False},
         build_success_result=lambda *args, **kwargs: {"success": True},
+    )
+    monkeypatch.setattr(
+        send_emoji.emoji_manager,
+        "get_emoji_by_hash",
+        lambda _: SimpleNamespace(full_path=SimpleNamespace(is_file=lambda: True)),
     )
     sender = AsyncMock(return_value=MaisakaEmojiSendResult(True, "已发送"))
     monkeypatch.setattr(send_emoji, "send_emoji_for_maisaka", sender)
     result = await send_emoji.handle_tool(
         ctx,
         SimpleNamespace(
-            arguments={"msg_id": target_id},
+            arguments={"msg_id": target_id, "candidate_index": 1000000000},
             tool_name="send_emoji",
             reasoning="参与讨论",
         ),

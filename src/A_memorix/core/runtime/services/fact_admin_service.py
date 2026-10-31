@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+import asyncio
 import unicodedata
 
 from .base import KernelServiceBase
@@ -166,6 +167,26 @@ class MemoryFactAdminService(KernelServiceBase):
             )
         return {"success": True, "claim": claim, "refresh_queued": refresh_queued}
 
+    def _claim_has_chat_evidence(self, claim: Dict[str, Any], chat_id: str) -> bool:
+        """Only expose atomic, attributed evidence from the requested chat to automatic extraction."""
+        for evidence in self.metadata_store.get_fact_evidence(claim["claim_id"]):
+            if evidence.get("evidence_type") != "paragraph":
+                continue
+            paragraph = self.metadata_store.get_paragraph(evidence["evidence_id"])
+            if not paragraph or paragraph.get("is_deleted"):
+                continue
+            metadata = paragraph.get("metadata") or {}
+            if (
+                metadata.get("chat_id") == chat_id
+                and metadata.get("source_type") == "person_fact"
+                and metadata.get("evidence_message_ids")
+                and metadata.get("dedup_managed")
+                and self._normalized_identity_value(paragraph.get("content"))
+                == self._normalized_identity_value(claim.get("value_text"))
+            ):
+                return True
+        return False
+
     async def memory_fact_admin(self, *, action: str, **kwargs: Any) -> Dict[str, Any]:
         await self.initialize()
         assert self.metadata_store is not None
@@ -183,6 +204,11 @@ class MemoryFactAdminService(KernelServiceBase):
                     statuses=kwargs.get("statuses"),
                     limit=max(1, int(kwargs.get("limit", 200) or 200)),
                 )
+                chat_id = str(kwargs.get("chat_id", "") or "").strip()
+                if chat_id:
+                    claims = await asyncio.to_thread(
+                        lambda: [claim for claim in claims if self._claim_has_chat_evidence(claim, chat_id)]
+                    )
                 return {"success": True, "items": claims, "count": len(claims)}
             if act == "create":
                 return self._create_fact(dict(kwargs))

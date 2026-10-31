@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any, Dict
+
 import hashlib
 import re
 import unicodedata
@@ -77,3 +80,52 @@ def direct_self_evidence(item, messages, person_name=""):
 def memory_external_id(session_id, content, message_ids):
     key = "|".join([session_id, normalized(content), *sorted(set(message_ids))])
     return "explicit_memory:" + hashlib.sha256(key.encode()).hexdigest()
+
+
+def source_evidence(message: Any) -> Dict[str, Any]:
+    """Keep attribution and time separately from quoted context; quotes are never self evidence."""
+    record: Dict[str, Any] = {"message_id": str(message.message_id), "text": user_text(message)}
+    timestamp = getattr(message, "timestamp", None) or getattr(message, "received_at", None)
+    if isinstance(timestamp, datetime):
+        record["time"] = timestamp.isoformat()
+    elif isinstance(timestamp, (int, float)):
+        record["time"] = timestamp
+    replies = []
+    for component in getattr(getattr(message, "raw_message", None), "components", []):
+        if getattr(component, "format_name", "") == "reply":
+            replies.append(
+                {
+                    "message_id": str(component.target_message_id),
+                    "sender_id": str(component.target_message_sender_id),
+                    "text": str(component.target_message_content or "")[:2000],
+                }
+            )
+    if replies:
+        record["reply_to"] = replies
+    return record
+
+
+def fact_classification(item: Dict[str, Any]) -> Dict[str, str] | None:
+    """Reuse the existing claim schema and keep temporary evidence out of stable profiles."""
+    stability = item.get("stability", "stable")  # Durable pre-upgrade extraction receipts.
+    if stability not in {"stable", "temporal", "uncertain"}:
+        return None
+    section = item.get("profile_section", "stable_facts")
+    if stability == "temporal":
+        section = "recent_interactions"
+    elif stability == "uncertain":
+        section = "uncertain_notes"
+    elif section not in {"stable_facts", "identity_settings", "interaction_preferences", "relationship_settings"}:
+        return None
+    return {"authority": "direct_user", "stability": stability, "profile_section": section}
+
+
+def explicit_correction(text: str) -> bool:
+    """Require an explicit change/correction cue before an automatic supersession."""
+    return bool(
+        re.search(
+            r"更正|纠正|说错|不再|改成|改为|改了|搬到|搬去|转到|换成|不是|之前.{0,40}(?:现在|其实)|不是.{0,40}(?:而是|是)|no longer|correction|used to|actually|moved to|switched to|訂正|今は|ではなく",
+            text,
+            re.IGNORECASE,
+        )
+    )

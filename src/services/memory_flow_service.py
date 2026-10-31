@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Dict, List, Optional
 
 import asyncio
+import hashlib
 import json
 import time
 
@@ -140,11 +141,16 @@ class ChatSummaryWritebackService:
             batch = history[state.last_trigger_message_count:end]
             if not batch:
                 break
+            # All derived summary/event/profile views retain one original source window.
+            # This is an evidence identity, not another summary or model-generated claim.
+            source_ids = [str(item.message_id) for item in batch]
+            window_id = hashlib.sha256(json.dumps([session_id, source_ids]).encode()).hexdigest()
             result = await memory_service.ingest_summary(
                 external_id=f"chat_auto_summary:v2:{session_id}:{end}", chat_id=session_id,
                 text="", participants=[], time_end=self._extract_message_timestamp(batch[-1]),
                 metadata={"generate_from_chat": True, "writeback_version": 2, "context_length": len(batch),
                     "include_personality": False, "writeback_source": "memory_flow_service",
+                    "source_window_id": window_id, "source_message_ids": source_ids,
                     "trigger": "recovery" if flush else "message_threshold",
                     "previous_trigger_message_count": state.last_trigger_message_count,
                     "pending_message_count": pending, "trigger_message_count": end, "summary_review_count": 2},

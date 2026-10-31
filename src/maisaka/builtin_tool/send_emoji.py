@@ -54,12 +54,14 @@ def get_tool_spec() -> ToolSpec:
 
     return ToolSpec(
         name="send_emoji",
-        description="发送一个表情包来表达情绪，参与聊天。",
+        description="发送你从 query_emoji 返回候选中选定的表情包。必须提供当前会话的 candidate_index，不再调用辅助模型选图。",
         parameters_schema={
             "type": "object",
             "properties": {
                 "msg_id": {"type": "string", "description": "要回复的消息编号；小黑盒发评论时必须指定主帖或评论消息。"},
+                "candidate_index": {"type": "integer", "minimum": 1, "description": "query_emoji 返回的候选编号。"},
             },
+            "required": ["candidate_index"],
         },
         provider_name="maisaka_builtin",
         provider_type="builtin",
@@ -481,21 +483,22 @@ async def handle_tool(
         )
 
     try:
+        selected_hash = await tool_ctx.resolve_emoji_candidate_hash(invocation.arguments.get("candidate_index"))
+        selected = emoji_manager.get_emoji_by_hash(selected_hash)
+        if selected is None or not await asyncio.to_thread(selected.full_path.is_file):
+            raise ValueError("所选表情已不可用，请重新调用 query_emoji。")
+
+        async def select_explicit(*_args):
+            return selected, ""
+
         send_result = await send_emoji_for_maisaka(
             stream_id=tool_ctx.runtime.session_id,
             requested_emotion=requested_emotion,
             reasoning=invocation.reasoning,
             context_texts=context_texts,
             reply_message=target,
-            emoji_selector=lambda _requested_emotion, reasoning, context_texts, sample_size: (
-                _select_emoji_with_sub_agent(
-                    tool_ctx,
-                    reasoning,
-                    list(context_texts or []),
-                    sample_size,
-                    selection_metadata,
-                )
-            ),
+            emoji_selector=select_explicit,
+            expected_emoji_hash=selected_hash,
         )
     except Exception as exc:
         logger.exception(f"{tool_ctx.runtime.log_prefix} 发送表情包时发生异常: {exc}")

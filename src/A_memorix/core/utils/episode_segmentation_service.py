@@ -16,6 +16,8 @@ from src.common.logger import get_logger
 from src.config.model_configs import TaskConfig
 from src.services import llm_service as llm_api
 
+from .metadata import coerce_metadata_dict
+from .summary_event_evidence import validated_event_spans
 from .model_routing import (
     ResolvedLLMModel,
     generate_with_resolved_model,
@@ -30,7 +32,7 @@ logger = get_logger("A_Memorix.EpisodeSegmentationService")
 class EpisodeSegmentationService:
     """基于 LLM 的 episode 语义切分服务。"""
 
-    SEGMENTATION_VERSION = "episode_indices_v2"
+    SEGMENTATION_VERSION = "episode_indices_v3_shared_evidence"
 
     def __init__(self, plugin_config: Optional[dict] = None):
         self.plugin_config = plugin_config or {}
@@ -288,6 +290,25 @@ class EpisodeSegmentationService:
     ) -> Dict[str, Any]:
         if not paragraphs:
             raise ValueError("paragraphs_empty")
+
+        # One source window may already contain several explicitly separated
+        # events. Reuse those boundaries, never assume one paragraph = one event.
+        # Multiple windows retain the model path for cross-window reconciliation.
+        if len(paragraphs) == 1 and source.startswith("chat_summary:"):
+            paragraph = paragraphs[0]
+            metadata = coerce_metadata_dict(paragraph.get("metadata"))
+            spans = validated_event_spans(metadata.get("summary_event_spans"), str(paragraph.get("content", "")))
+            if (spans and metadata.get("source_window_id")
+                    and str(metadata.get("chat_id", "")) == source.removeprefix("chat_summary:")
+                    and paragraph.get("hash")):
+                episodes = [{"title": span[:80], "summary": span, "paragraph_indices": [1],
+                             "participants": [], "keywords": [], "time_confidence": 0.95,
+                             "llm_confidence": 0.5} for span in spans]
+                return {
+                    "episodes": self._normalize_episodes(payload={"episodes": episodes}, input_hashes=[str(paragraph["hash"])]),
+                    "segmentation_model": "reused_summary_boundaries",
+                    "segmentation_version": self.SEGMENTATION_VERSION,
+                }
 
         resolved_model, model_label = self._resolve_model_config()
         if resolved_model is None:

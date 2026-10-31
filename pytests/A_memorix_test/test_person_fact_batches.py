@@ -31,6 +31,7 @@ def fact(source, **overrides):
         "evidence_message_id": source.message_id,
         "evidence_quote": "我喜欢喝茶",
         "profile_section": "stable_facts",
+        "stability": "stable",
         **overrides,
     }
 
@@ -306,12 +307,16 @@ async def test_cross_person_and_fabricated_evidence_are_rejected(environment, ov
 
 
 @pytest.mark.asyncio
-async def test_existing_fact_is_not_written_again(environment):
+@pytest.mark.parametrize("classification", [{}, {"stability": "uncertain", "profile_section": "uncertain_notes"}])
+async def test_existing_fact_is_not_written_again(environment, classification):
     e = environment
     svc = e.service()
     source = message()
-    svc._extractor.generate_response.return_value.response = json.dumps([fact(source)])
-    e.reader.return_value = {"success": True, "items": [{"value_text": "同名用户喜欢喝茶"}]}
+    svc._extractor.generate_response.return_value.response = json.dumps([fact(source, **classification)])
+    e.reader.return_value = {
+        "success": True,
+        "items": [{"value_text": "同名用户喜欢喝茶", "authority": "direct_user", "stability": "stable"}],
+    }
     await enqueue(svc, e, source)
     e.clock[0] += 600
     await svc.run_due()
@@ -363,7 +368,13 @@ async def test_only_incoming_messages_trigger_person_fact_queue():
 
 def test_batch_prompt_locales_have_matching_placeholders():
     for locale in ["zh-CN", "en-US", "ja-JP"]:
-        prompt = load_prompt("person_fact_batch", locale=locale, people="people-data", messages="message-data")
+        prompt = load_prompt(
+            "person_fact_batch",
+            locale=locale,
+            people="people-data",
+            messages="message-data",
+            existing_facts="existing-data",
+        )
         assert "people-data" in prompt and "message-data" in prompt
         metadata = list_prompt_templates(locale=locale)["person_fact_batch"].metadata
         assert metadata.display_name and metadata.description
@@ -380,3 +391,80 @@ async def test_numeric_qq_message_id_is_normalized_before_persisting_result(envi
     await svc.run_due()
     e.writer.assert_awaited_once()
     assert e.writer.call_args.kwargs["metadata"]["evidence_message_ids"] == ["123456789"]
+
+
+@pytest.mark.asyncio
+async def test_new_temporal_fact_keeps_classification_and_source(environment):
+    e = environment
+    svc = e.service()
+    source = message(text="我这周在上海出差")
+    svc._extractor.generate_response.return_value.response = json.dumps(
+        [
+            fact(
+                source,
+                fact="同名用户这周在上海出差",
+                evidence_quote="我这周在上海出差",
+                stability="temporal",
+                profile_section="stable_facts",
+            )
+        ]
+    )
+    await enqueue(svc, e, source)
+    e.clock[0] += 600
+    await svc.run_due()
+    saved = e.writer.call_args.kwargs["metadata"]
+    assert saved["fact_claim"]["stability"] == "temporal"
+    assert saved["profile_section"] == "recent_interactions"
+    assert saved["evidence_quote"] == source.processed_plain_text
+
+
+@pytest.mark.asyncio
+async def test_replacement_target_must_be_supplied_same_author(environment):
+    e = environment
+    svc = e.service()
+    source = message(text="我不再喝茶了")
+    pid = batch.get_person_id("qq", "a")
+    e.reader.return_value = {
+        "success": True,
+        "items": [{"claim_id": "old", "value_text": "用户喜欢茶", "authority": "direct_user", "updated_at": 1}],
+    }
+    people = {pid: {"person_id": pid, "name": "用户"}}
+    svc._extractor.generate_response.return_value.response = json.dumps(
+        [fact(source, evidence_quote="我不再喝茶了", fact="用户不再喝茶", replaces="foreign")]
+    )
+    with pytest.raises(ValueError, match="输入外"):
+        await svc._extract_facts("group-one", {source.message_id: source}, people)
+    svc._extractor.generate_response.return_value.response = json.dumps(
+        [fact(source, person_id="other", evidence_quote="我不再喝茶了", fact="用户不再喝茶", replaces="old")]
+    )
+    with pytest.raises(ValueError, match="其他人物"):
+        await svc._extract_facts("group-one", {source.message_id: source}, people)
+    assert e.reader.call_args.kwargs["chat_id"] == "group-one"
+    e.writer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_correction_write_retry_reuses_extraction_receipt(environment):
+    e = environment
+    svc = e.service()
+    source = message(text="我不再喝茶了")
+    e.reader.return_value = {
+        "success": True,
+        "items": [{"claim_id": "old", "value_text": "用户喜欢茶", "authority": "direct_user", "updated_at": 1}],
+    }
+    svc._extractor.generate_response.return_value.response = json.dumps(
+        [fact(source, evidence_quote="我不再喝茶了", fact="用户不再喝茶", replaces="old", stability="stable")]
+    )
+    e.writer.side_effect = [
+        RuntimeError("after model before persistence"),
+        NS(success=True, detail="", stored_ids=["stored"], skipped_ids=[]),
+    ]
+    await enqueue(svc, e, source)
+    e.clock[0] += 600
+    await svc.run_due()
+    assert len(svc._journal.jobs("group-one", "extracted")) == 1
+    e.clock[0] += 600
+    await svc.run_due()
+    assert svc._journal.jobs("group-one", "extracted") == []
+    assert svc._extractor.generate_response.await_count == 1
+    assert e.writer.call_args.kwargs["metadata"]["replaces_person_fact"]["claim_id"] == "old"

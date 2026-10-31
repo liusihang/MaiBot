@@ -110,7 +110,8 @@ def select_references(
         image_match = record.namespace.startswith("image:")
         if (not overlap and not image_match) or text.strip() in current_text:
             continue
-        ranked.append((overlap / max(1, len(tokens)) if not image_match else 1.0, record, tokens))
+        score = overlap / max(1, len(tokens)) if not image_match else 1.0
+        ranked.append((score, record, tokens))
     ranked.sort(key=lambda item: (-item[0], item[1].namespace, item[1].source_id))
     selected, seen, budget = [], set(), 0
     for _, record, _ in ranked:
@@ -165,7 +166,10 @@ def _jargon_records(session_id: str, current_text: str) -> List[ReferenceRecord]
                 "jargon",
                 str(row.id),
                 f"{row.content}: {row.meaning}",
-                {"source_type": "learned_jargon", "evidence_refs": row.evidence_messages},
+                # Shared/global definitions may be allowed, but legacy evidence
+                # blobs have no verified current-chat provenance. Never expose
+                # their raw messages through this automatic understanding aid.
+                {"source_type": "learned_jargon"},
                 nature="tentative_group_jargon_not_fact",
             )
         )
@@ -264,6 +268,7 @@ async def build_references(runtime: Any, source_messages: Sequence[Any]) -> List
                     )
                 )
     records.extend(await _image_records(session_id, source_messages))
+    # Productive language use is an explicit intent query, never arbitrary habit injection.
     return select_references(records, current_text)
 
 

@@ -836,6 +836,87 @@ class MetadataFactMixin:
             raise RuntimeError(f"事实 claim 分类更新后丢失: {token}")
         return {**updated, "changed": changed}
 
+    def validate_person_fact_revision(
+        self, *, previous: Dict[str, Any], person_id: str, chat_id: str, message_ids: Sequence[str],
+    ) -> None:
+        """Reject a stale or foreign correction before creating its replacement paragraph."""
+        old = self.get_fact_claim(str(previous["claim_id"]))
+        if old is None or old["scope_type"] != "person" or old["scope_id"] != person_id:
+            raise ValueError("人物事实更正不能跨人物或引用不存在的事实")
+        if old["authority"] != "direct_user":
+            raise ValueError("人物事实更正不能覆盖人工或非本人证据")
+        reason = "person_correction:" + _stable_hash({"chat": chat_id, "messages": sorted(set(message_ids))})
+        cursor = self._conn.execute("SELECT 1 FROM fact_transitions WHERE old_claim_id=? AND reason=?",
+                                    (old["claim_id"], reason))
+        if cursor.fetchone():
+            return  # A completed receipt is replayed without restoring any claim.
+        if (old["status"] != "active" or old["updated_at"] != previous["updated_at"]
+                or old["value_text"] != previous["value_text"]):
+            raise ValueError("人物事实在抽取后已变化，拒绝过期更正")
+
+    def supersede_person_fact_from_evidence(
+        self, *, previous: Dict[str, Any], new_claim_id: str, person_id: str,
+        chat_id: str, message_ids: Sequence[str],
+    ) -> bool:
+        """Apply an explicit sourced correction once, without overwriting manual or newer claims.
+
+        This operates on separate atomic statements, so changing a set-valued statement
+        does not require falsely treating every fact about a person as one conflict group.
+        The old evidence remains searchable in audit history, not in active retrieval.
+        """
+        old_id = str(previous["claim_id"])
+        if old_id == new_claim_id:
+            raise ValueError("人物事实更正没有产生不同的新事实")
+        reason = "person_correction:" + _stable_hash({"chat": chat_id, "messages": sorted(set(message_ids))})
+        with self.transaction(immediate=True) as connection:
+            cursor = connection.cursor()
+            old = self.get_fact_claim(old_id)
+            new = self.get_fact_claim(new_claim_id)
+            if old is None or new is None:
+                raise ValueError("人物事实更正目标不存在")
+            if any(claim["scope_type"] != "person" or claim["scope_id"] != person_id for claim in (old, new)):
+                raise ValueError("人物事实更正不能跨人物")
+            if old["authority"] == "manual" or new["authority"] != "direct_user":
+                raise ValueError("人物事实更正不能覆盖人工记录或使用推断证据")
+            cursor.execute("SELECT 1 FROM fact_transitions WHERE old_claim_id=? AND new_claim_id=? AND reason=?",
+                           (old_id, new_claim_id, reason))
+            if cursor.fetchone():
+                return False  # A retry never restores a subsequently removed or corrected memory.
+            if old["status"] != "active" or new["status"] != "active":
+                raise ValueError("人物事实更正目标已失效")
+            if old["updated_at"] != previous["updated_at"] or old["value_text"] != previous["value_text"]:
+                raise ValueError("人物事实在抽取后已变化，拒绝过期更正")
+            for claim, required_ids in ((old, set()), (new, set(message_ids))):
+                supported = False
+                claim_evidence = self.get_fact_evidence(claim["claim_id"])
+                for evidence in claim_evidence:
+                    if evidence["evidence_type"] != "paragraph":
+                        continue
+                    paragraph = self.get_paragraph(evidence["evidence_id"])
+                    observed_ids = set()
+                    for observation in claim_evidence:
+                        source = observation.get("metadata", {})
+                        if (observation["evidence_type"] == "source" and source.get("chat_id") == chat_id
+                                and source.get("paragraph_hash") == evidence["evidence_id"]):
+                            observed_ids.update(source.get("message_ids", []))
+                    metadata = paragraph.get("metadata", {}) if paragraph else {}
+                    if (paragraph and not paragraph.get("is_deleted") and metadata.get("chat_id") == chat_id
+                            and metadata.get("dedup_managed") and metadata.get("source_type") == "person_fact"
+                            and _normalized_token(paragraph["content"]) == _normalized_token(claim["value_text"])
+                            and required_ids.issubset(set(metadata.get("evidence_message_ids", [])) | observed_ids)):
+                        supported = True
+                        break
+                if not supported:
+                    raise ValueError("人物事实更正缺少同群原始证据")
+            now = datetime.now().timestamp()
+            cursor.execute("UPDATE fact_claims SET status='superseded', valid_to=COALESCE(valid_to,?), updated_at=? WHERE claim_id=?",
+                           (now, now, old_id))
+            self._append_fact_transition(cursor, old_claim_id=old_id, new_claim_id=new_claim_id,
+                                         transition_type="supersede", reason=reason, evidence_type="paragraph",
+                                         evidence_id=evidence["evidence_id"], created_at=now)
+            self.enqueue_person_profile_refresh(person_id=person_id, reason="person_fact_corrected", conn=connection)
+        return True
+
     def get_fact_claim(self, claim_id: str) -> Optional[Dict[str, Any]]:
         token = str(claim_id or "").strip()
         if not token:

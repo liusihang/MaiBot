@@ -7,14 +7,31 @@ on:
       - "src/maisaka/participation.py"
       - "src/maisaka/reasoning_engine.py"
       - "src/maisaka/builtin_tool/reply.py"
+      - "src/maisaka/builtin_tool/query_emoji.py"
+      - "src/maisaka/builtin_tool/send_emoji.py"
+      - "src/maisaka/builtin_tool/context.py"
+      - "src/maisaka/builtin_tool/__init__.py"
+      - "src/maisaka/runtime.py"
+      - "src/learners/**"
+      - "src/chat/replyer/expression_vector_index.py"
+      - "src/services/emoji_retrieval.py"
+      - "src/services/group_expression_*.py"
+      - "src/maisaka/builtin_tool/query_group_expressions.py"
+      - "src/emoji_system/maisaka_tool.py"
       - "src/services/pi_harness/**"
       - "src/services/daily_topics/**"
       - "prompts/**/daily_topics*"
       - "prompts/**/participation_judge.prompt"
+      - "prompts/**/learn_joint.prompt"
+      - "prompts/**/expression_batch_review.prompt"
       - "pytests/services/test_daily_topic*.py"
       - "pytests/maisaka/test_pi_*.py"
       - "pytests/maisaka/test_single_agent_reply.py"
       - "pytests/maisaka/test_participation.py"
+      - "pytests/maisaka/test_joint_learning.py"
+      - "pytests/maisaka/test_group_expression_*.py"
+      - "pytests/maisaka/test_emoji*.py"
+      - "pytests/plugin_runtime/test_emoji_reply_target.py"
       - "pytests/services/test_pi_harness_bridge.py"
       - ".github/workflows/pi-harness-tests.yml"
   workflow_dispatch:
@@ -54,3 +71,14 @@ jobs:
           pytests/services/test_daily_topics.py
           pytests/services/test_daily_topic_service.py
           pytests/maisaka/test_pi_daily_topics.py
+          pytests/maisaka/test_pi_references.py
+          pytests/maisaka/test_pi_expression_references.py
+          pytests/maisaka/test_pi_expression_small_index.py
+          pytests/maisaka/test_joint_learning.py
+          pytests/maisaka/test_emoji_retrieval.py
+          pytests/maisaka/test_emoji_store.py
+          pytests/maisaka/test_show_emoji_persistence.py
+          pytests/plugin_runtime/test_emoji_reply_target.py
+          pytests/maisaka/test_group_expression_catalog.py
+          pytests/maisaka/test_group_expression_search.py
+          pytests/maisaka/test_group_expression_tool.py
