@@ -74,7 +74,6 @@ from src.web_search.provider import WebSearchToolProvider
 from src.web_search.config import resolve_web_search_config
 from src.web_search.service import WebSearchService
 from src.plugin_runtime.tool_provider import PluginToolProvider
-from src.services.group_expression_search import GroupLanguageIndexMaintainer
 from src.services.message_word_frequency_service import update_high_frequency_terms_from_context_messages
 
 from .chat_loop_service import ChatResponse, MaisakaChatLoopService
@@ -195,7 +194,6 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._pi_learning_source_ids: set[str] = set()
         from src.learners.joint_learning import JointLearningCoordinator
         self._joint_learning = JointLearningCoordinator(self)
-        self._group_language_index = GroupLanguageIndexMaintainer(session_id)
         self._queued_trimmed_learning_progress: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self._expression_learner = ExpressionLearner(session_id)
         self._jargon_learner = JargonLearner(session_id)
@@ -290,7 +288,6 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         await self._reasoning_engine.restore_pi_pending()
         self._running = True
         await self._joint_learning.start()
-        self._group_language_index.start()
         if self._is_focus_mode_active_for_current_chat():
             await focus_mode_manager.attach(self)
         self._ensure_background_tasks_running()
@@ -555,7 +552,6 @@ class MaisakaHeartFlowChatting(MaisakaRuntimeDisplayMixin):
         self._cancel_deferred_message_turn_task()
         self._cancel_wait_timeout_task()
         await self._joint_learning.stop()
-        await self._group_language_index.stop()
         await self._cancel_trimmed_history_learning_task()
         await self._stop_background_subagents()
         while not self._internal_turn_queue.empty():

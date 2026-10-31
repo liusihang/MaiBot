@@ -141,3 +141,58 @@ async def test_maintenance_start_is_idempotent_and_stop_cancels(monkeypatch):
     await started.wait()
     await maintainer.stop()
     assert task.cancelled() and maintainer.task is None
+
+
+@pytest.mark.asyncio
+async def test_service_maintains_quiet_sessions_and_cleans_up_workers(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    started = asyncio.Event()
+    worker = SimpleNamespace(start=lambda: started.set(), stop=AsyncMock())
+    monkeypatch.setattr(search, "_language_session_ids", lambda: ["stored-quiet-chat"])
+    constructed = []
+
+    def create(session_id):
+        constructed.append(session_id)
+        return worker
+
+    monkeypatch.setattr(search, "GroupLanguageIndexMaintainer", create)
+    task = asyncio.create_task(search.maintain_known_group_language_indexes())
+    await asyncio.wait_for(started.wait(), 2)
+    assert constructed == ["stored-quiet-chat"]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    worker.stop.assert_awaited_once()
+
+
+def test_session_discovery_uses_existing_session_ids_only(monkeypatch):
+    from contextlib import contextmanager
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine
+    from src.common.database import database
+    from src.common.database.database_model import ChatSession, Expression, Jargon
+
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add_all([ChatSession(session_id=sid, platform="qq") for sid in ["quiet", "jargon-chat", "unrelated"]])
+        db.add_all(
+            [
+                Expression(situation="场景", style="说法", content_list="[]", session_id=sid)
+                for sid in ["quiet", "orphan"]
+            ]
+        )
+        db.add(Jargon(content="词", meaning="义", session_id_dict='{"jargon-chat":1,"orphan":1}'))
+        db.commit()
+
+    @contextmanager
+    def session(**kwargs):
+        with Session(engine) as db:
+            yield db
+
+    monkeypatch.setattr(database, "get_db_session", session)
+    assert search._language_session_ids() == ["jargon-chat", "quiet"]
+    engine.dispose()

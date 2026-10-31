@@ -81,11 +81,12 @@ or null. Partial coverage must not be presented as full-library semantic top-k.
 For predictable full-catalog retrieval, an operator can explicitly run
 `warm_group_expression_index(session_id, max_items=100, max_seconds=60)` until `complete`.
 Each invocation is bounded (maximum 1,000 items/300 seconds), reuses durable progress and
-cross-process leases, and performs one route probe. The active chat runtime starts a background maintainer that checks catalog IDs and
-content versions every 30 seconds. Startup and changed catalogs trigger bounded
+cross-process leases, and performs one route probe. Service startup discovers existing source sessions with language records and starts
+a background maintainer for each, including quiet chats that have not received a
+new message. Maintainers check catalog IDs and content versions every 30 seconds. Startup and changed catalogs trigger bounded
 warmup (100 documents / 60 seconds per pass); incomplete passes resume from persisted
-vectors on subsequent checks. Unchanged catalogs make no embedding calls. Runtime
-shutdown cancels the maintainer. This also detects manual additions, edits, deletions
+vectors on subsequent checks. Unchanged catalogs make no embedding calls. Service
+shutdown cancels all maintainers. This also detects manual additions, edits, deletions
 and review changes through the live catalog, independent of the learning timer. New/edited records temporarily make coverage
 partial again. Database and ranking work run off the asyncio event loop. Cancellation
 propagates, and the reused lease helper releases in-flight claims safely.

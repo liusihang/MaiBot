@@ -408,3 +408,46 @@ class GroupLanguageIndexMaintainer:
             except Exception as exc:
                 logger.warning("Group language index refresh failed (%s); retrying later", type(exc).__name__)
             await asyncio.sleep(INDEX_REFRESH_SECONDS)
+
+
+def _language_session_ids() -> List[str]:
+    """Discover actual stored sessions owning language records, without fabricating IDs."""
+    from sqlmodel import select
+    from src.common.database.database import get_db_session
+    from src.common.database.database_model import ChatSession, Expression, Jargon
+
+    with get_db_session(auto_commit=False) as db:
+        known = set(db.exec(select(ChatSession.session_id)).all())
+        owners = set(db.exec(select(Expression.session_id).distinct()).all())
+        global_records = None in owners
+        for scopes_json, is_global in db.exec(select(Jargon.session_id_dict, Jargon.is_global)).all():
+            global_records = global_records or is_global
+            try:
+                scopes = json.loads(scopes_json)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(scopes, dict):
+                owners.update(scopes)
+    return sorted(known if global_records else known.intersection(owners))
+
+
+async def maintain_known_group_language_indexes() -> None:
+    """Start source-session workers at service startup, including quiet group chats."""
+    workers: Dict[str, GroupLanguageIndexMaintainer] = {}
+    try:
+        while True:
+            try:
+                session_ids = set(await asyncio.to_thread(_language_session_ids))
+                for session_id in session_ids:
+                    if session_id not in workers:
+                        workers[session_id] = GroupLanguageIndexMaintainer(session_id)
+                        workers[session_id].start()
+                for session_id in set(workers).difference(session_ids):
+                    await workers.pop(session_id).stop()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Group language session discovery failed (%s); retrying later", type(exc).__name__)
+            await asyncio.sleep(INDEX_REFRESH_SECONDS)
+    finally:
+        await asyncio.gather(*(worker.stop() for worker in workers.values()))

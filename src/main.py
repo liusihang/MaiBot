@@ -56,6 +56,7 @@ class MainSystem:
         self.http_server: ThreadedHTTPServer | None = None  # 独立线程中的公共 HTTP 服务器
         self._message_handlers_registered = False
         self.watchdog_task: Optional[asyncio.Task[None]] = None
+        self.group_language_index_task: Optional[asyncio.Task[None]] = None
 
     def _ensure_message_server(self) -> None:
         """按需初始化消息 API，避免阻塞主启动链路的早期阶段。"""
@@ -197,6 +198,11 @@ class MainSystem:
         from src.services.memory_flow_service import memory_automation_service
 
         await chat_manager.initialize()
+        from src.services.group_expression_search import maintain_known_group_language_indexes
+
+        self.group_language_index_task = asyncio.create_task(
+            maintain_known_group_language_indexes(), name="group-language-index-maintenance"
+        )
         asyncio.create_task(chat_manager.regularly_save_sessions())
 
         logger.info(t("startup.chat_manager_initialized"))
@@ -315,6 +321,12 @@ async def main() -> None:
         from src.desktop_pet.service import desktop_pet_service
 
         request_shutdown("main_finally")
+        if system.group_language_index_task is not None:
+            system.group_language_index_task.cancel()
+            try:
+                await system.group_language_index_task
+            except asyncio.CancelledError:
+                pass
         await stop_ws_broadcasts()
         await desktop_pet_service.stop()
         if system.app is not None:
