@@ -80,6 +80,59 @@ def test_literal_hit_cannot_override_a_measured_weak_semantic_match():
     )
 
 
+def test_source_examples_do_not_change_search_documents_or_keyword_ranks():
+    record = item("expression:1", "用倒装感叹表达惊讶")
+    record["situation"] = "惊讶于事情突然发生"
+    before = search._prepare([record], "叶师傅等破绽")
+    record["examples"] = [{"text": "叶师傅等破绽，来了我超"}]
+    after = search._prepare([record], "叶师傅等破绽")
+    assert before == after
+
+
+def test_topic_match_cannot_override_an_incompatible_communicative_situation():
+    record = item("expression:1", "没交互，纯等他出破绽")
+    record["situation"] = "吐槽战斗玩法单调"
+    document = search.semantic_document(record)
+    situation = search.situation_document(record)
+    result = search._rank(
+        [record], [document], [10000],
+        {document: [0.95, 0.3122], situation: [0.4, 0.9165]},
+        [1, 0], 6, query="俏皮表示自己会主动互动，接等破绽的梗",
+    )
+    assert result == []
+
+
+def test_expression_with_missing_situation_vector_is_not_semantically_ready():
+    record = item("expression:1", "用反话调侃装懂")
+    record["situation"] = "反讽装懂"
+    document = search.semantic_document(record)
+    vectors = {document: [1, 0]}
+    assert search._rank([record], [document], [100], vectors, [1, 0], 6) == []
+    assert search._indexed_count([record], [document], vectors) == 0
+
+
+@pytest.mark.asyncio
+async def test_style_intent_is_separate_from_topic_context(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from src.common.data_models.embedding_service_data_models import EmbeddingResult
+
+    records = [item("expression:1", "接招的说法"), item("jargon:2", "轮椅")]
+    records[0]["situation"] = "接受挑战"
+    monkeypatch.setattr(search, "load_group_expression_catalog", AsyncMock(return_value=records))
+    monkeypatch.setattr(search.vector_cache, "_space", lambda result: result.model_name)
+    client = SimpleNamespace(embed_text=AsyncMock(return_value=EmbeddingResult(
+        embedding=[1, 0], model_name="test", model_identifier="test", api_provider="test"
+    )))
+    index = search.vector_cache.EmojiDescriptionIndex(tmp_path / "vectors.sqlite")
+    result = await search.search_group_expressions("chat", "接受挑战", "游戏里在等破绽", client=client, index=index)
+    inputs = [call.args[0] for call in client.embed_text.await_args_list]
+    assert "接受挑战" in inputs
+    assert "接受挑战\n游戏里在等破绽" in inputs
+    assert result["coverage"]["complete"]
+    assert result["candidates"][0]["ranking"]["situation_score"] == pytest.approx(1)
+
+
 @pytest.mark.asyncio
 async def test_maintenance_skips_unchanged_and_rewarms_changed_catalog(monkeypatch):
     from unittest.mock import AsyncMock

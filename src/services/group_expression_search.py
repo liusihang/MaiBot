@@ -28,7 +28,9 @@ MAX_DOCUMENT_CHARS = 2400
 MAX_INDEX_ITEMS_PER_QUERY = 8
 INDEX_SECONDS_PER_QUERY = 8.0
 # Calibrated on the deployed Qwen3-VL text embedding space; re-evaluate on model changes.
-MIN_SEMANTIC_SIMILARITY = 0.58
+MIN_SEMANTIC_SIMILARITY = 0.62
+MIN_EXPRESSION_SIMILARITY = 0.64
+MIN_SITUATION_SIMILARITY = 0.70
 INDEX_REFRESH_SECONDS = 30.0
 
 
@@ -54,15 +56,25 @@ def tokenize(text: str) -> List[str]:
 
 
 def semantic_document(record: Dict[str, Any]) -> str:
-    """Bound every field so a long phrase cannot hide its meaning or evidence."""
-    examples = record.get("examples", [])[:3]
+    """Index reusable language, keeping source examples as presentation evidence."""
     parts = [
         "phrase: " + str(record.get("phrase", ""))[:400],
         "meaning: " + str(record.get("meaning", ""))[:600],
         "situation: " + str(record.get("situation", ""))[:600],
-        "examples: " + "\n".join(str(example.get("text", ""))[:220] for example in examples),
     ]
+    if record["kind"] == "jargon":
+        parts.append("examples: " + "\n".join(
+            str(example.get("text", ""))[:220]
+            for example in record.get("examples", [])[:3] if example.get("is_source", True)
+        ))
     return "\n".join(parts)[:MAX_DOCUMENT_CHARS]
+
+
+def situation_document(record: Dict[str, Any]) -> str:
+    """Compare the speaker's purpose independently of topical phrase overlap."""
+    if record["kind"] == "expression":
+        return str(record.get("situation", "")).strip()[:600]
+    return ""
 
 
 def bm25_scores(documents: Sequence[str], query: str) -> List[float]:
@@ -83,7 +95,7 @@ def bm25_scores(documents: Sequence[str], query: str) -> List[float]:
     return scores
 
 
-def _prepare(records: List[Dict[str, Any]], query: str) -> Tuple[List[str], List[float], List[str]]:
+def _prepare(records: List[Dict[str, Any]], query: str, context: str = "") -> Tuple[List[str], List[float], List[str]]:
     documents = [semantic_document(record) for record in records]
     # Structural embedding labels are not user language and must not generate
     # lexical matches for generic queries such as "meaning" or "examples".
@@ -93,19 +105,24 @@ def _prepare(records: List[Dict[str, Any]], query: str) -> Tuple[List[str], List
                 str(record.get("phrase", ""))[:400],
                 str(record.get("meaning", ""))[:600],
                 str(record.get("situation", ""))[:600],
-                *(str(example.get("text", ""))[:220] for example in record.get("examples", [])[:3]),
             ]
         )
         for record in records
     ]
     lexical = bm25_scores(lexical_documents, query)
+    if context:
+        contextual = bm25_scores(lexical_documents, query + "\n" + context)
+        lexical = [contextual[i] if record["kind"] == "jargon" else lexical[i] for i, record in enumerate(records)]
     # Interleave query-relevant entries with deterministic hash-order breadth.
     # Unlike registration-order first-N, repeated queries advance durable progress
     # and a first query can reach a late relevant entry in a large catalog.
     relevant = sorted(range(len(records)), key=lambda index: (-lexical[index], records[index]["id"]))
     breadth = sorted(range(len(records)), key=lambda index: sha256(records[index]["id"].encode()).hexdigest())
     order = list(dict.fromkeys(value for pair in zip(relevant, breadth, strict=True) for value in pair))
-    return documents, lexical, list(dict.fromkeys(documents[index] for index in order))
+    ordered = list(dict.fromkeys(
+        document for index in order for document in (documents[index], situation_document(records[index])) if document
+    ))
+    return documents, lexical, ordered
 
 
 def _bounded_candidate(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -160,25 +177,42 @@ def _rank(
     limit: int,
     *,
     query: str = "",
+    jargon_query_vector: Optional[List[float]] = None,
+    context: str = "",
 ) -> List[Dict[str, Any]]:
     cosine = {}
+    situations = {}
     if query_vector is not None:
         for index, document in enumerate(documents):
             vector = vectors.get(document)
             if vector is None:
                 continue
-            if len(vector) != len(query_vector):
+            target = jargon_query_vector if records[index]["kind"] == "jargon" and jargon_query_vector is not None else query_vector
+            if len(vector) != len(target):
                 raise ValueError("Language cached vector dimension does not match query")
-            score = sum(a * b for a, b in zip(vector, query_vector, strict=True))
+            score = sum(a * b for a, b in zip(vector, target, strict=True))
             if math.isfinite(score):
                 cosine[index] = score
+            situation = situation_document(records[index])
+            if situation and situation in vectors:
+                score = sum(a * b for a, b in zip(vectors[situation], query_vector, strict=True))
+                if math.isfinite(score):
+                    situations[index] = score
     # Apply eligibility to both routes: keyword overlap cannot rescue a measured
     # weak semantic match. Missing vectors permit only explicit phrase matches.
-    eligible = {
-        index
-        for index, record in enumerate(records)
-        if (cosine[index] >= MIN_SEMANTIC_SIMILARITY if index in cosine else _literal_match(record, query))
-    }
+    eligible = set()
+    for index, record in enumerate(records):
+        if index not in cosine:
+            literal_query = query + ("\n" + context if record["kind"] == "jargon" and context else "")
+            if _literal_match(record, literal_query):
+                eligible.add(index)
+            continue
+        minimum = MIN_EXPRESSION_SIMILARITY if record["kind"] == "expression" else MIN_SEMANTIC_SIMILARITY
+        if cosine[index] < minimum:
+            continue
+        if situation_document(record) and situations.get(index, -1) < MIN_SITUATION_SIMILARITY:
+            continue
+        eligible.add(index)
     lexical_order = sorted(
         (i for i, score in enumerate(lexical) if score > 0 and i in eligible),
         key=lambda i: (-lexical[i], records[i]["id"]),
@@ -202,6 +236,7 @@ def _rank(
                     "semantic_rank": semantic_ranks.get(index),
                     "bm25_score": lexical[index],
                     "cosine_score": cosine.get(index),
+                    "situation_score": situations.get(index),
                     "rrf_score": fused[index],
                 },
             }
@@ -236,6 +271,8 @@ def _coverage(total: int, indexed: int, *, space: Optional[str] = None, error: O
         "embedding_error": error,
         "rrf_k": RRF_K,
         "semantic_similarity_floor": MIN_SEMANTIC_SIMILARITY,
+        "expression_similarity_floor": MIN_EXPRESSION_SIMILARITY,
+        "situation_similarity_floor": MIN_SITUATION_SIMILARITY,
     }
 
 
@@ -260,10 +297,11 @@ async def search_group_expressions(
     records = await load_group_expression_catalog(session_id)
     if not records:
         return {"candidates": [], "coverage": _coverage(0, 0)}
-    query = intent.strip() + ("\n" + context.strip() if context.strip() else "")
-    documents, lexical, ordered = await asyncio.to_thread(_prepare, records, query)
+    query, context = intent.strip(), context.strip()
+    documents, lexical, ordered = await asyncio.to_thread(_prepare, records, query, context)
     vectors: Dict[str, List[float]] = {}
     query_vector = None
+    jargon_query_vector = None
     space = None
     error = None
     try:
@@ -272,6 +310,13 @@ async def search_group_expressions(
         probe = await asyncio.wait_for(client.embed_text(query, session_id=session_id), INDEX_SECONDS_PER_QUERY)
         query_vector = vector_cache.unit_vector(probe.embedding)
         space = vector_cache._space(probe)
+        if context and any(record["kind"] == "jargon" for record in records):
+            contextual = await asyncio.wait_for(
+                client.embed_text(query + "\n" + context, session_id=session_id), INDEX_SECONDS_PER_QUERY
+            )
+            if vector_cache._space(contextual) != space:
+                raise ValueError("Language intent and context embedding spaces do not match")
+            jargon_query_vector = vector_cache.unit_vector(contextual.embedding)
         vectors = await asyncio.to_thread(index.read, space, ordered)
         vectors = await vector_cache._populate(
             ordered,
@@ -288,7 +333,7 @@ async def search_group_expressions(
         # Never use possibly mismatched vectors after a route/validation failure.
         error = type(exc).__name__
         logger.warning("Group language semantic retrieval failed (%s); returning explicit lexical-only coverage", error)
-        vectors, query_vector = {}, None
+        vectors, query_vector, jargon_query_vector = {}, None, None
     # Embedding can outlast a review/privacy edit. Revalidate live scope and
     # canonical content version before exposing any previously loaded evidence.
     fresh = await load_group_expression_catalog(session_id)
@@ -299,9 +344,12 @@ async def search_group_expressions(
     stale_removed = len(records) - len(unchanged)
     if catalog_changed:
         records = unchanged
-        documents, lexical, _ = await asyncio.to_thread(_prepare, records, query)
-    ranked = await asyncio.to_thread(_rank, records, documents, lexical, vectors, query_vector, limit, query=query)
-    indexed = sum(document in vectors for document in documents)
+        documents, lexical, _ = await asyncio.to_thread(_prepare, records, query, context)
+    ranked = await asyncio.to_thread(
+        _rank, records, documents, lexical, vectors, query_vector, limit,
+        query=query, jargon_query_vector=jargon_query_vector, context=context,
+    )
+    indexed = _indexed_count(records, documents, vectors)
     # Cap serialized model-visible evidence as well as per-field text. Keep a
     # ranked prefix, never silently substitute lower-ranked smaller records.
     bounded = []
@@ -355,7 +403,14 @@ async def warm_group_expression_index(
         max_items=max_items,
         max_seconds=max(0.0, max_seconds - (time.monotonic() - started)),
     )
-    return _coverage(len(records), sum(document in vectors for document in documents), space=space)
+    return _coverage(len(records), _indexed_count(records, documents, vectors), space=space)
+
+
+def _indexed_count(records: List[Dict[str, Any]], documents: List[str], vectors: Dict[str, List[float]]) -> int:
+    return sum(
+        document in vectors and (not situation_document(record) or situation_document(record) in vectors)
+        for record, document in zip(records, documents, strict=True)
+    )
 
 
 class GroupLanguageIndexMaintainer:

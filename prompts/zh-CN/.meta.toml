@@ -217,3 +217,13 @@ description = "外接 Planner 中断恢复。"
 display_name = "外接 Planner 继续执行"
 advanced = true
 description = "外接 Planner 继续执行。"
+
+[learn_joint]
+display_name = "群聊语言联合学习"
+advanced = true
+description = "从真实群聊中精选有表达特点的说法与特殊含义的黑话，并绑定原句。"
+
+[expression_batch_review]
+display_name = "表达学习批量审核"
+advanced = true
+description = "结合来源上下文，审核表达特点、适用目的及真实例句。"

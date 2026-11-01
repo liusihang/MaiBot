@@ -222,3 +222,13 @@ description = "外部 Planner 中断復帰。"
 display_name = "外部 Planner 継続実行"
 advanced = true
 description = "外部 Planner 継続実行。"
+
+[learn_joint]
+display_name = "グループ言語の共同学習"
+advanced = true
+description = "実際の会話から特徴のある表現と隠語を用例に紐付けて選びます。"
+
+[expression_batch_review]
+display_name = "表現の一括審査"
+advanced = true
+description = "文脈に基づき表現の特徴、発話の目的、実際の用例を審査します。"

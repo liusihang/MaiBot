@@ -19,10 +19,20 @@ this race. Newly changed/added records wait for a subsequent query, with incompl
 coverage explicitly reported. Canonical `expression:<id>` / `jargon:<id>` identities stay
 separate, including two senses of the same phrase. No phrase-only deduplication is used.
 
-Each semantic document contains phrase (400 characters), meaning (600), situation (600),
-and up to three real source/context examples (220 characters each); total is capped at
-2,400 characters. Historical entries with no evidence do not get invented examples.
-The embedder uses these descriptions to retrieve an intention without literal overlap.
+Semantic documents contain the reusable phrase (400 characters), meaning (600)
+and situation (600). Real examples remain authenticated model-visible evidence. Expression examples
+do not participate in BM25 or document embeddings; authentic jargon source
+examples still help encode the special meaning, while neighbouring conversation
+and examples never supply BM25 keyword overlap.
+Expression queries use `intent`; jargon queries also use `context` to distinguish
+special meanings. Both kinds are returned together, up to six entries.
+Expressions additionally index their situation independently: its cosine against
+`intent` must reach 0.70, in addition to the primary document floor below. This
+prevents a topical phrase match from bypassing an incompatible communicative
+purpose. New extraction/review prompts describe the speaker's intended meaning
+and attitude in `situation`, rather than merely naming the subject of discussion.
+The situation floor was evaluated with the deployed Qwen3-VL embedding space;
+it is not a probability or a general threshold for other embedding models.
 
 1. Global lexical ranking: Okapi BM25 (`k1=1.2`, `b=0.75`, positive Robertson IDF).
    Structural semantic labels are excluded from lexical documents.
@@ -34,7 +44,8 @@ The embedder uses these descriptions to retrieve an intention without literal ov
    scores are diagnostic only, never added together. Missing routes contribute nothing.
 
 Candidates must pass relevance filtering before either route enters RRF. With
-an available vector, cosine similarity must be at least 0.58. Keyword overlap,
+an available vector, cosine similarity must reach 0.64 for expressions or 0.62
+for jargon, with the independent 0.70 situation floor for expressions. Keyword overlap,
 even a large BM25 score or a literal occurrence, cannot override a measured score
 below this floor. The initial floor is calibrated for the deployed Qwen3-VL text
 embedding space; changing the embedding model requires new quality evaluation.
@@ -59,8 +70,11 @@ Namespace identity comes from actual provider/model/configuration/dimension fing
 query/document route mismatches are never mixed. Edited content gets a new hash. Cache
 sharing does not grant cross-group retrieval: the current catalog remains the allowlist.
 
-A query makes one embedding request (8-second timeout) and fills at most eight missing
-document embeddings within a separate 8-second fill budget. Existing cached documents
+A query embeds its intent (8-second timeout). If context is present and jargon is
+available, it also embeds intent plus context, validating the same observed space.
+It fills at most eight missing document/situation vectors within a separate
+8-second fill budget. Situation vectors share the existing content-addressed
+cache; coverage counts an expression only when both required vectors exist. Existing cached documents
 remain searchable. Missing-document scheduling interleaves BM25-relevant records with
 deterministic hash-order breadth, not registration-order first-eight. Subsequent calls
 skip successful content and advance the index. These are individual embedding requests,
@@ -95,7 +109,8 @@ propagates, and the reused lease helper releases in-flight claims safely.
 
 `PYTHONPATH=. python -m pytest pytests/maisaka/test_group_expression_search.py -q`
 uses simulated vectors only: Chinese BM25, genuine completed full-index hybrid,
-zero-literal-overlap retrieval above the relevance floor, weak-match rejection across both routes,
+zero-literal-overlap retrieval above the relevance floor, independent situation filtering,
+example-independent ranking, separate intent/context queries, weak-match rejection across both routes,
 explicit lexical fallback, RRF vs raw-score addition, homonyms, live catalog removal,
 cache/content/model identities, bounded cold fill, explicit warmup, unavailable/mismatched
 routes, empty results, cancellation/lease recovery and bounded inputs/output. No live-model quality/cost claim is implied.

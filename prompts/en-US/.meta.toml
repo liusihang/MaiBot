@@ -222,3 +222,13 @@ description = "External planner recovery。"
 display_name = "External planner continuation"
 advanced = true
 description = "External planner continuation。"
+
+[learn_joint]
+display_name = "Joint group language learning"
+advanced = true
+description = "Select distinctive expressions and jargon from authentic group chat with attributed examples."
+
+[expression_batch_review]
+display_name = "Expression batch review"
+advanced = true
+description = "Review expressive features, communicative purpose and source examples in context."

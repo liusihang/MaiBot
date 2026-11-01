@@ -52,7 +52,7 @@ def test_chinese_bigrams_and_bm25():
 def test_rrf_uses_independent_ranks_not_raw_scores():
     records = [record("expression:1", "a"), record("jargon:2", "b"), record("jargon:3", "c")]
     ranked = search._rank(
-        records, ["a", "b", "c"], [1000000, 1, 0], {"a": [0.6, 0.8], "b": [1, 0], "c": [0.8, 0.6]}, [1, 0], 3
+        records, ["a", "b", "c"], [1000000, 1, 0], {"a": [0.65, 0.759934], "b": [1, 0], "c": [0.8, 0.6]}, [1, 0], 3
     )
     # b: lexical rank2 + semantic rank1 beats a: lexical rank1 + semantic rank3.
     assert ranked[0]["id"] == "jargon:2"
@@ -173,7 +173,7 @@ def test_document_fields_bounded_and_real_examples_only():
     item["examples"] = [{"text": "real source " + "e" * 5000} for _ in range(20)]
     text = search.semantic_document(item)
     assert len(text) <= search.MAX_DOCUMENT_CHARS
-    assert "meaning: y" in text and "situation: z" in text and "real source" in text
+    assert "meaning: y" in text and "situation: z" in text and "real source" not in text
 
 
 def test_candidate_payload_bounded_without_inventing_evidence():
