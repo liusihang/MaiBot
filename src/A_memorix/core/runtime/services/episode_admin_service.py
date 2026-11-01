@@ -3,26 +3,27 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable
 
 import asyncio
+import json
 
+from ...utils.hash import compute_hash
 from ...utils.runtime_payloads import optional_float, tokens
 from .base import KernelServiceBase
 
 
 class MemoryEpisodeAdminService(KernelServiceBase):
-    async def rebuild_episodes_for_sources(self, sources: Iterable[str]) -> Dict[str, Any]:
+    async def rebuild_episodes_for_sources(self, sources: Iterable[str], *, max_model_calls: int) -> Dict[str, Any]:
         await self.initialize()
         assert self.metadata_store is not None
         source_tokens = tokens(sources)
         for source in source_tokens:
-            self.metadata_store.enqueue_episode_source_rebuild(
-                source,
-                reason="episode_admin_rebuild",
-                debounce_seconds=0.0,
-            )
+            await asyncio.to_thread(self.metadata_store.enqueue_episode_source_rebuild,
+                source, reason="episode_admin_rebuild", debounce_seconds=0.0)
         result = await self.process_episode_source_rebuild_batch(
             sources=source_tokens,
             limit=max(1, len(source_tokens)),
             max_wait_seconds=0.0,
+            upgrade_generation=True,
+            max_model_calls=max_model_calls,
         )
         result["sources"] = source_tokens
         return result
@@ -69,21 +70,38 @@ class MemoryEpisodeAdminService(KernelServiceBase):
             )
             return {"success": True, **result}
 
-        if act == "rebuild":
+        if act in {"preview_rebuild", "rebuild"}:
             sources = tokens(kwargs.get("sources"))
             if not sources:
                 source = str(kwargs.get("source", "") or "").strip()
                 if source:
                     sources = [source]
             if not sources and bool(kwargs.get("all", False)):
-                sources = self.metadata_store.list_episode_sources_for_rebuild()
+                sources = await asyncio.to_thread(self.metadata_store.list_episode_sources_for_rebuild)
                 if not sources:
                     sources = [
-                        str(row.get("source", "") or "").strip() for row in self.metadata_store.get_all_sources()
+                        str(row.get("source", "") or "").strip()
+                        for row in await asyncio.to_thread(self.metadata_store.get_all_sources)
                     ]
             if not sources:
                 return {"success": False, "error": "未提供可重建的 source"}
-            result = await self.rebuild_episodes_for_sources(sources)
+            sources = sorted(set(sources))
+            previews = [await self.episode_service.preview_source_rebuild(source) for source in sources]
+            preview = {
+                "source_count": len(sources), "items": previews,
+                "paragraph_count": sum(p["paragraph_count"] for p in previews),
+                "model_calls_upper_bound": sum(p["model_calls_upper_bound"] for p in previews),
+                "generation_hash": self.episode_service.generation_hash(),
+            }
+            preview["preview_id"] = compute_hash(json.dumps(preview, sort_keys=True))
+            if act == "preview_rebuild":
+                return {"success": True, "preview": preview}
+            budget = kwargs.get("max_model_calls")
+            if kwargs.get("preview_id") != preview["preview_id"]:
+                return {"success": False, "error": "请先预览当前资料的重建量，再提交预览编号和调用预算", "preview": preview}
+            if type(budget) is not int or budget < preview["model_calls_upper_bound"] or budget < 0:
+                return {"success": False, "error": "调用预算不足或无效，未启动重建", "preview": preview}
+            result = await self.rebuild_episodes_for_sources(sources, max_model_calls=budget)
             completed = int(result.get("rebuilt", 0) or 0)
             success = (
                 len(result.get("failures", [])) == 0

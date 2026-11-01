@@ -172,6 +172,8 @@ export function MemoryEpisodeManager({
   const [rebuildSource, setRebuildSource] = useState('')
   const [rebuildSources, setRebuildSources] = useState('')
   const [rebuildAll, setRebuildAll] = useState(false)
+  const [rebuildBudget, setRebuildBudget] = useState('')
+  const [rebuildPreview, setRebuildPreview] = useState<MemoryEpisodeActionPayload['preview']>()
   const [pendingLimit, setPendingLimit] = useState('20')
   const [pendingMaxRetry, setPendingMaxRetry] = useState('3')
   const initialLoadedRef = useRef(false)
@@ -339,37 +341,38 @@ export function MemoryEpisodeManager({
     }
   }, [loadDetail, selectedId])
 
-  const submitRebuild = useCallback(async () => {
-    if (rebuildAll && !window.confirm('确认重建全部可用来源的 Episode？这个操作可能耗时较长。')) {
+  const submitRebuild = useCallback(async (execute: boolean = false) => {
+    const sources = rebuildSources.split(',').map((item) => item.trim()).filter(Boolean)
+    const budget = Number(rebuildBudget)
+    if (execute && (!rebuildPreview || rebuildBudget.trim() === '' || !Number.isInteger(budget)
+      || budget < rebuildPreview.model_calls_upper_bound)) {
+      toast({ title: '请先预览并填写足够的模型调用预算', variant: 'destructive' })
       return
     }
-    const sources = rebuildSources
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean)
+    if (execute && !window.confirm(`确认升级 ${rebuildPreview!.source_count} 个来源的情节？模型调用上限 ${budget} 次。`)) return
     setActionLoading(true)
     try {
       const payload = await rebuildMemoryEpisodes({
-        source: rebuildSource.trim(),
-        sources,
-        all: rebuildAll,
+        source: rebuildSource.trim(), sources, all: rebuildAll, dry_run: !execute,
+        ...(execute ? { preview_id: rebuildPreview!.preview_id, max_model_calls: budget } : {}),
       })
+      if (payload.preview) setRebuildPreview(payload.preview)
       toast({
-        title: payload.success ? 'Episode 重建已提交' : 'Episode 重建失败',
-        description: getEpisodeActionDescription(payload),
+        title: execute ? payload.success ? 'Episode 重建完成' : 'Episode 重建未完成' : '重建量预览',
+        description: !execute && payload.preview
+          ? `${payload.preview.source_count} 个来源，${payload.preview.paragraph_count} 个段落，预计最多 ${payload.preview.model_calls_upper_bound} 次模型调用；复用已完成结果时会减少。`
+          : getEpisodeActionDescription(payload),
         variant: payload.success ? 'default' : 'destructive',
       })
-      await loadEpisodes()
+      if (execute) await loadEpisodes()
     } catch (error) {
-      toast({
-        title: 'Episode 重建失败',
-        description: error instanceof Error ? error.message : String(error),
-        variant: 'destructive',
-      })
+      toast({ title: 'Episode 操作失败', description: error instanceof Error ? error.message : String(error), variant: 'destructive' })
     } finally {
       setActionLoading(false)
     }
-  }, [loadEpisodes, rebuildAll, rebuildSource, rebuildSources, toast])
+  }, [loadEpisodes, rebuildAll, rebuildSource, rebuildSources, rebuildBudget, rebuildPreview, toast])
+
+  useEffect(() => { setRebuildPreview(undefined) }, [rebuildSource, rebuildSources, rebuildAll])
 
   const submitProcessPending = useCallback(async () => {
     const limit = parsePositiveInt(pendingLimit, 200)
@@ -643,7 +646,7 @@ export function MemoryEpisodeManager({
                 <div>
                   <div className="text-sm font-medium">重新生成来源 Episode</div>
                   <div className="mt-1 text-xs text-muted-foreground">
-                    适用于导入内容变化、反馈纠错后，需要用来源下的段落替换旧 Episode 的场景。
+                    新资料和内容更正由后台增量处理。需要将旧情节升级到当前生成规则时，先预览处理量，再设置调用预算。
                   </div>
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
@@ -670,10 +673,23 @@ export function MemoryEpisodeManager({
                   <Checkbox checked={rebuildAll} onCheckedChange={(checked) => setRebuildAll(checked === true)} />
                   重新生成全部可用来源
                 </label>
-                <Button onClick={() => void submitRebuild()} disabled={actionLoading}>
-                  <RotateCcw className="mr-2 h-4 w-4" />
-                  重新生成 Episode
-                </Button>
+                <div className="flex flex-wrap items-end gap-3">
+                  <Button variant="outline" onClick={() => void submitRebuild()} disabled={actionLoading}>
+                    预览重建量
+                  </Button>
+                  <div className="space-y-2">
+                    <Label htmlFor="episode-rebuild-budget">模型调用次数上限</Label>
+                    <Input id="episode-rebuild-budget" type="number" min={0} step={1}
+                      value={rebuildBudget} onChange={(event) => setRebuildBudget(event.target.value)} />
+                  </div>
+                  <Button onClick={() => void submitRebuild(true)} disabled={actionLoading || !rebuildPreview}>
+                    <RotateCcw className="mr-2 h-4 w-4" />确认重建
+                  </Button>
+                </div>
+                {rebuildPreview && <p className="text-sm text-muted-foreground">
+                  {rebuildPreview.source_count} 个来源 · {rebuildPreview.paragraph_count} 个段落 ·
+                  最多 {rebuildPreview.model_calls_upper_bound} 次模型调用
+                </p>}
               </div>
 
               <div className="space-y-3 rounded-lg border bg-muted/10 p-3">

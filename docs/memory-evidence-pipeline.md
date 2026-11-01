@@ -24,3 +24,13 @@ Summary windows carry deterministic source-window IDs and source-message IDs. Pr
 Changes to the bundled A_Memorix implementation are intentionally maintained in this independent MaiBot fork, as explicitly requested by its owner. No upstream submission or live-data migration is part of this change.
 
 Existing identical statements retain their recorded classification; a weaker later mention does not silently demote a verified or manual fact. This change does not bulk reclassify historical facts.
+
+## Episode incremental generation
+
+An implementation/model generation change alone does not enqueue a completed source. New evidence, corrections and deletions still advance its source revision. Automatic materialization preserves existing group boundaries and reuses unchanged results across generation versions; only new or changed groups use the current segmenter. Existing episodes remain queryable.
+
+Completed groups, including empty results, are checkpointed to `metadata/episode_groups.sqlite3` before source publication. This derived cache is keyed by evidence data and generation, so interrupted work can resume without repeating successful requests. Final publication retains the existing source-revision/lease CAS contract.
+
+Manual upgrades use `memory_episode_admin(action="preview_rebuild", sources=[...])` first. The response reports source/paragraph counts, a conservative model-request upper bound and a preview ID tied to the evidence snapshot and generation. Execution uses `action="rebuild"`, `preview_id` and `max_model_calls`; stale previews or insufficient budgets do not enqueue work. The budget covers the selected sources in one operation and is checked before each segmentation request. A failed/interrupted manual job is not resumed by the unlimited automatic worker.
+
+The WebUI offers the same preview, budget and confirmation flow. The CLI defaults to preview; execution requires `--wait --max-model-calls N`. Matching completed groups can reduce actual calls below the displayed upper bound. This patch is a scoped MaiBot live-cost repair in A_Memorix internals; equivalent upstream ownership remains `A-Dawn/A_memorix:MaiBot_branch`.

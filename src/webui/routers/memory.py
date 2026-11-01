@@ -92,6 +92,9 @@ class SourceBatchDeleteRequest(BaseModel):
 
 
 class EpisodeRebuildRequest(BaseModel):
+    dry_run: bool = True
+    preview_id: str = ""
+    max_model_calls: int | None = Field(None, ge=0)
     source: str = ""
     sources: list[str] = Field(default_factory=list)
     all: bool = False
@@ -3343,10 +3346,12 @@ async def _episode_get(episode_id: str) -> dict:
 
 async def _episode_rebuild(payload: EpisodeRebuildRequest) -> dict:
     return await memory_service.episode_admin(
-        action="rebuild",
+        action="preview_rebuild" if payload.dry_run else "rebuild",
         source=payload.source,
         sources=payload.sources,
         all=payload.all,
+        preview_id=payload.preview_id,
+        max_model_calls=payload.max_model_calls,
     )
 
 
