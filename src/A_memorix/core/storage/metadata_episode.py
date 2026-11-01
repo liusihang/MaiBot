@@ -240,7 +240,9 @@ class MetadataEpisodeMixin:
         lease_until = now_ts + max(1.0, float(lease_seconds))
         max_wait_cutoff = now_ts - max(0.0, float(max_wait_seconds))
         claims: List[Dict[str, Any]] = []
-        source_filter_sql = ""
+        # Maintenance rebuilds require their explicit request budget; the daemon
+        # must not resume them with an unlimited automatic budget after a restart.
+        source_filter_sql = "AND COALESCE(reason, '') != 'episode_admin_rebuild'"
         source_filter_params: List[Any] = []
         if source_scope:
             source_filter_sql = "AND source IN (SELECT value FROM json_each(?))"
@@ -254,7 +256,6 @@ class MetadataEpisodeMixin:
                 FROM episode_rebuild_sources
                 WHERE (
                         COALESCE(desired_revision, 0) > COALESCE(built_revision, 0)
-                     OR COALESCE(built_generation_hash, '') != ?
                 )
                   AND (
                         retry_revision IS NULL
@@ -279,7 +280,6 @@ class MetadataEpisodeMixin:
                 LIMIT ?
                 """,
                 (
-                    generation_token,
                     generation_token,
                     safe_retry,
                     now_ts,

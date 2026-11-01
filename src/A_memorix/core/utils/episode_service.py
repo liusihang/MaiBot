@@ -21,6 +21,7 @@ import re
 from src.common.logger import get_logger
 from src.config.config import global_config
 
+from .episode_group_cache import EpisodeCallBudget, EpisodeGroupCache
 from .episode_segmentation_service import EpisodeSegmentationService
 from .hash import compute_hash
 from .metadata import coerce_metadata_dict
@@ -173,7 +174,7 @@ class EpisodeService:
             enriched.append(item)
         return enriched
 
-    def _group_input_fingerprint(self, group: Dict[str, Any]) -> str:
+    def _group_input_fingerprint(self, group: Dict[str, Any], *, data_only: bool = False) -> str:
         """计算分组输入版本，只有会影响分段或派生字段的内容进入指纹。"""
         paragraphs = sorted(list(group.get("paragraphs") or []), key=self._paragraph_sort_key)
         paragraph_payloads: List[Dict[str, Any]] = []
@@ -213,6 +214,9 @@ class EpisodeService:
             },
             "paragraphs": paragraph_payloads,
         }
+        if data_only:
+            fingerprint_payload.pop("segmentation_generation")
+            fingerprint_payload.pop("grouping")
         return compute_hash(json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True))
 
     @staticmethod
@@ -534,106 +538,141 @@ class EpisodeService:
             "fallback_count": 0,
         }
 
-    async def plan_source_rebuild(
-        self,
-        source: str,
-        *,
-        segmentation_generation: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """读取完整来源并生成可供CAS发布的确定性物化计划。"""
-        token = str(source or "").strip()
-        if not token:
-            return {
-                "source": "",
-                "payloads": [],
-                "episode_count": 0,
-                "fallback_count": 0,
-                "group_count": 0,
-                "paragraph_count": 0,
-            }
-
-        memory_cfg = global_config.a_memorix.integration
-        paragraphs = await asyncio.to_thread(
-            self.metadata_store.get_live_paragraphs_by_source, token,
-            exclude_stale=bool(getattr(memory_cfg, "feedback_correction_paragraph_hard_filter_enabled", True)),
-        )
-        generation = (
-            dict(segmentation_generation)
-            if isinstance(segmentation_generation, dict)
-            else self.generation_signature()
-        )
-        generation_hash = self.generation_hash(generation)
-        if not paragraphs:
-            return {
-                "source": token,
-                "payloads": [],
-                "episode_count": 0,
-                "fallback_count": 0,
-                "group_count": 0,
-                "paragraph_count": 0,
-                "generation_hash": generation_hash,
-                "reused_group_count": 0,
-                "reused_episode_count": 0,
-                "recomputed_group_count": 0,
-            }
-
-        paragraphs = await asyncio.to_thread(self._enrich_paragraph_participants, paragraphs)
-        groups = self.group_paragraphs(paragraphs)
-        existing_episodes = await asyncio.to_thread(self.metadata_store.get_episodes_by_source, token)
-        cached_empty_groups = set(await asyncio.to_thread(
-            self.metadata_store.get_episode_empty_group_fingerprints, token,
-        ))
-        empty_group_fingerprints: List[str] = []
-        cached_by_fingerprint: Dict[str, List[Dict[str, Any]]] = {}
+    def _incremental_groups(
+        self, paragraphs: List[Dict[str, Any]], checkpoints: List[Dict[str, Any]],
+        existing_episodes: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Keep existing group boundaries so an insertion/deletion cannot shift an entire source."""
+        live = {p["hash"]: p for p in paragraphs}
+        assigned = set()
+        groups = []
+        prior_groups: Dict[str, List[Dict[str, Any]]] = {}
         for episode in existing_episodes:
-            input_fingerprint = str(episode.get("input_fingerprint", "") or "").strip()
-            if input_fingerprint:
-                cached_by_fingerprint.setdefault(input_fingerprint, []).append(episode)
-        payloads: List[Dict[str, Any]] = []
-        fallback_count = 0
-        reused_group_count = 0
-        reused_episode_count = 0
-        recomputed_group_count = 0
-
-        for group in groups:
-            group["_segmentation_generation"] = generation
-            input_fingerprint = self._group_input_fingerprint(group)
-            group["_input_fingerprint"] = input_fingerprint
-            if input_fingerprint in cached_empty_groups:
-                empty_group_fingerprints.append(input_fingerprint)
-                reused_group_count += 1
+            fingerprint = str(episode.get("input_fingerprint") or "")
+            if fingerprint:
+                prior_groups.setdefault(fingerprint, []).append(episode)
+        candidates = list(checkpoints)
+        # Existing current-format snapshots can identify the original complete
+        # input group even when the model intentionally omitted some evidence.
+        for group in self.group_paragraphs(paragraphs):
+            group["_segmentation_generation"] = self.generation_signature()
+            fingerprint = self._group_input_fingerprint(group)
+            if fingerprint in prior_groups:
+                candidates.append({"paragraph_ids": [p["hash"] for p in group["paragraphs"]],
+                    "legacy_payloads": prior_groups[fingerprint], "input_fingerprint": fingerprint})
+        for fingerprint, episodes in prior_groups.items():
+            candidates.append({"paragraph_ids": list(dict.fromkeys(
+                h for e in episodes for h in e.get("evidence_ids", []))),
+                "legacy_payloads": episodes, "input_fingerprint": fingerprint})
+        for candidate in candidates:
+            hashes = [h for h in candidate["paragraph_ids"] if h in live]
+            if not hashes or assigned.intersection(hashes):
                 continue
-            cached_payloads = self._reusable_group_payloads(
-                group,
-                input_fingerprint,
-                cached_by_fingerprint,
-            )
-            if cached_payloads:
-                payloads.extend(cached_payloads)
-                reused_group_count += 1
-                reused_episode_count += len(cached_payloads)
-                continue
-            result = await self._build_episode_payloads_for_group(group)
-            group_payloads = list(result.get("payloads") or [])
-            payloads.extend(group_payloads)
-            if not group_payloads:
-                empty_group_fingerprints.append(input_fingerprint)
-            fallback_count += int(result.get("fallback_count") or 0)
-            recomputed_group_count += 1
+            members = sorted([live[h] for h in hashes], key=self._paragraph_sort_key)
+            group = {"source": members[0]["source"], "paragraphs": members}
+            if "legacy_payloads" in candidate:
+                # Before checkpoints existed, unchanged evidence IDs plus their
+                # write times let us preserve the already-published group. A
+                # correction updates the evidence time and invalidates reuse.
+                episodes = candidate["legacy_payloads"]
+                evidence_time = max(float(p.get("updated_at") or p.get("created_at") or 0) for p in members)
+                result_time = min(float(e.get("updated_at") or e.get("created_at") or 0) for e in episodes)
+                if (set(hashes) == set(candidate["paragraph_ids"]) and evidence_time <= result_time
+                        and self._reusable_group_payloads(group, candidate["input_fingerprint"],
+                                                         {candidate["input_fingerprint"]: episodes})):
+                    group["_legacy_payloads"] = episodes
+                    group["_legacy_fingerprint"] = candidate["input_fingerprint"]
+            assigned.update(hashes)
+            groups.append(group)
+        groups.extend(self.group_paragraphs([p for p in paragraphs if p["hash"] not in assigned]))
+        return sorted(groups, key=lambda g: self._paragraph_sort_key(g["paragraphs"][0]))
 
-        return {
-            "source": token,
-            "payloads": payloads,
-            "episode_count": len(payloads),
-            "fallback_count": fallback_count,
-            "group_count": len(groups),
-            "paragraph_count": len(paragraphs),
-            "reused_group_count": reused_group_count,
-            "reused_episode_count": reused_episode_count,
-            "recomputed_group_count": recomputed_group_count,
-            "generation_hash": generation_hash,
-            "empty_group_fingerprints": empty_group_fingerprints,
-        }
+    async def preview_source_rebuild(self, source: str) -> Dict[str, Any]:
+        """No model calls or writes; one group is at most one segmentation request."""
+        paragraphs = await asyncio.to_thread(self.metadata_store.get_live_paragraphs_by_source, source,
+            exclude_stale=bool(global_config.a_memorix.integration.feedback_correction_paragraph_hard_filter_enabled))
+        groups = self.group_paragraphs(paragraphs)
+        enriched = await asyncio.to_thread(self._enrich_paragraph_participants, paragraphs)
+        snapshot = compute_hash(json.dumps([
+            self._group_input_fingerprint(group, data_only=True) for group in self.group_paragraphs(enriched)]))
+        return {"source": source, "snapshot": snapshot, "paragraph_count": len(paragraphs),
+                "model_calls_upper_bound": len(groups),
+                "characters": sum(len(p.get("content", "")) for p in paragraphs)}
+
+    async def plan_source_rebuild(
+        self, source: str, *, segmentation_generation: Optional[Dict[str, Any]] = None,
+        upgrade_generation: bool = False, call_budget: Optional[EpisodeCallBudget] = None,
+    ) -> Dict[str, Any]:
+        """Build changed groups; stage every result before source-level CAS publication."""
+        token = str(source or "").strip()
+        generation = (dict(segmentation_generation) if isinstance(segmentation_generation, dict)
+                      else self.generation_signature())
+        generation_hash = self.generation_hash(generation)
+        result = {"source": token, "payloads": [], "episode_count": 0, "fallback_count": 0,
+                  "group_count": 0, "paragraph_count": 0, "generation_hash": generation_hash,
+                  "reused_group_count": 0, "reused_episode_count": 0, "recomputed_group_count": 0,
+                  "empty_group_fingerprints": [], "data_fingerprints": []}
+        if not token:
+            return result
+        paragraphs = await asyncio.to_thread(self.metadata_store.get_live_paragraphs_by_source, token,
+            exclude_stale=bool(global_config.a_memorix.integration.feedback_correction_paragraph_hard_filter_enabled))
+        paragraphs = await asyncio.to_thread(self._enrich_paragraph_participants, paragraphs)
+        existing = await asyncio.to_thread(self.metadata_store.get_episodes_by_source, token)
+        cache = EpisodeGroupCache(self.metadata_store.get_db_path().with_name("episode_groups.sqlite3"))
+        try:
+            checkpoints = await asyncio.to_thread(cache.list_source, token)
+            groups = (self.group_paragraphs(paragraphs) if upgrade_generation else
+                      self._incremental_groups(paragraphs, checkpoints, existing))
+            existing_by_fingerprint: Dict[str, List[Dict[str, Any]]] = {}
+            for episode in existing:
+                existing_by_fingerprint.setdefault(str(episode.get("input_fingerprint") or ""), []).append(episode)
+            cached_empty = set(await asyncio.to_thread(self.metadata_store.get_episode_empty_group_fingerprints, token))
+            result.update(group_count=len(groups), paragraph_count=len(paragraphs))
+            for group in groups:
+                group["_segmentation_generation"] = generation
+                fingerprint = self._group_input_fingerprint(group)
+                data_fingerprint = self._group_input_fingerprint(group, data_only=True)
+                result["data_fingerprints"].append(data_fingerprint)
+                saved = next((c for c in checkpoints if c["data_fingerprint"] == data_fingerprint
+                              and (not upgrade_generation or c["generation_hash"] == generation_hash)), None)
+                reused = True
+                cache_generation = generation_hash
+                if saved is not None:
+                    payloads = saved["payloads"]
+                    fingerprint = saved["input_fingerprint"]
+                    cache_generation = saved["generation_hash"]
+                elif fingerprint in cached_empty:
+                    payloads = []
+                else:
+                    payloads = self._reusable_group_payloads(group, fingerprint, existing_by_fingerprint)
+                    if not payloads and not upgrade_generation and group.get("_legacy_payloads"):
+                        payloads = group["_legacy_payloads"]
+                        fingerprint = group["_legacy_fingerprint"]
+                        # A legacy result has no proven current generation signature.
+                        cache_generation = "legacy:" + fingerprint
+                    if not payloads:
+                        reused = False
+                        if call_budget is not None:
+                            call_budget.reserve()
+                        group["_input_fingerprint"] = fingerprint
+                        payloads = list((await self._build_episode_payloads_for_group(group))["payloads"])
+                # Commit independently of the whole-source publication. A later
+                # failure, cancellation or service restart cannot lose this group.
+                if saved is None:
+                    await asyncio.to_thread(cache.put, token, data_fingerprint, cache_generation, fingerprint,
+                        [p["hash"] for p in group["paragraphs"]], payloads)
+                result["payloads"].extend(payloads)
+                if reused:
+                    result["reused_group_count"] += 1
+                    result["reused_episode_count"] += len(payloads)
+                else:
+                    result["recomputed_group_count"] += 1
+                if not payloads:
+                    result["empty_group_fingerprints"].append(fingerprint)
+            result["episode_count"] = len(result["payloads"])
+            return result
+        finally:
+            await asyncio.to_thread(cache.close)
 
     async def rebuild_source(self, source: str) -> Dict[str, Any]:
         """离线管理入口；在线后台必须使用带租约的来源发布流程。"""
@@ -646,6 +685,8 @@ class EpisodeService:
             list(plan.get("payloads") or []),
             empty_group_fingerprints=list(plan.get("empty_group_fingerprints") or []),
         )
+        cache = EpisodeGroupCache(self.metadata_store.get_db_path().with_name("episode_groups.sqlite3"))
+        await asyncio.to_thread(cache.retain, token, plan["data_fingerprints"])
         result = {key: value for key, value in plan.items() if key != "payloads"}
         result["episode_count"] = int(replace_result.get("episode_count") or 0)
         return result

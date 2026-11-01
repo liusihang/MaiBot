@@ -1417,6 +1417,12 @@ export interface MemoryEpisodeActionPayload extends Record<string, unknown> {
   unfinished?: number
   failures?: Array<{ source?: string; error?: string; reason?: string }>
   unfinished_items?: Array<{ source?: string; error?: string; reason?: string }>
+  preview?: {
+    preview_id: string
+    source_count: number
+    paragraph_count: number
+    model_calls_upper_bound: number
+  }
 }
 
 export interface MemoryProfileItemPayload extends Record<string, unknown> {
@@ -1906,6 +1912,9 @@ export async function rebuildMemoryEpisodes(payload: {
   source?: string
   sources?: string[]
   all?: boolean
+  dry_run?: boolean
+  preview_id?: string
+  max_model_calls?: number
 }): Promise<MemoryEpisodeActionPayload> {
   return requestJson<MemoryEpisodeActionPayload>('/episodes/rebuild', {
     method: 'POST',

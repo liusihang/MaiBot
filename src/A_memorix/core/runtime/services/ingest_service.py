@@ -10,6 +10,7 @@ from src.common.logger import get_logger
 from ...storage import VectorStore
 from ...utils import profile_policy
 from ...utils.hash import compute_hash, normalize_text
+from ...utils.episode_group_cache import EpisodeCallBudget, EpisodeGroupCache
 from ...utils.fact_deduplication import FactDeduplicator, fact_scope_lock, observation_id
 from ...utils.metadata import coerce_metadata_dict
 from ...utils.relation_write_service import RelationWriteService
@@ -620,6 +621,8 @@ class MemoryIngestService(KernelServiceBase):
         max_retry: int = 3,
         lease_seconds: float = 1800.0,
         max_wait_seconds: float = 60.0,
+        upgrade_generation: bool = False,
+        max_model_calls: Optional[int] = None,
     ) -> Dict[str, Any]:
         """按来源领取物化任务，并以revision CAS发布完整Episode快照。"""
         safe_max_retry = int(max_retry)
@@ -629,6 +632,9 @@ class MemoryIngestService(KernelServiceBase):
         assert self.metadata_store is not None
         assert self.episode_service is not None
 
+        if upgrade_generation and (type(max_model_calls) is not int or max_model_calls < 0 or sources is None):
+            raise ValueError("explicit episode upgrade requires scoped sources and a model call budget")
+        budget = EpisodeCallBudget(max_model_calls) if upgrade_generation else None
         generation = self.episode_service.generation_signature()
         generation_hash = self.episode_service.generation_hash(generation)
         source_scope = list(dict.fromkeys(str(item or "").strip() for item in (sources or []) if str(item or "").strip()))
@@ -653,7 +659,7 @@ class MemoryIngestService(KernelServiceBase):
         episode_count = 0
 
         for _ in range(max(1, int(limit))):
-            claims = self.metadata_store.claim_episode_source_rebuild_batch(
+            claims = await asyncio.to_thread(self.metadata_store.claim_episode_source_rebuild_batch,
                 generation_hash=generation_hash,
                 sources=source_scope if sources is not None else None,
                 limit=1,
@@ -684,10 +690,9 @@ class MemoryIngestService(KernelServiceBase):
                 try:
                     source_type = source.split(":", 1)[0]
                     if profile_policy.should_auto_enqueue_episode(self._cfg, source_type=source_type):
+                        options = {"upgrade_generation": True, "call_budget": budget} if upgrade_generation else {}
                         plan = await self.episode_service.plan_source_rebuild(
-                            source,
-                            segmentation_generation=generation,
-                        )
+                            source, segmentation_generation=generation, **options)
                     else:
                         plan = {
                             "source": source,
@@ -726,6 +731,9 @@ class MemoryIngestService(KernelServiceBase):
                         }
                     )
                     continue
+                if "data_fingerprints" in plan:
+                    cache = EpisodeGroupCache(self.metadata_store.get_db_path().with_name("episode_groups.sqlite3"))
+                    await asyncio.to_thread(cache.retain, source, plan["data_fingerprints"])
                 item = {key: value for key, value in plan.items() if key != "payloads"}
                 item.update(publish_result)
                 rebuilt_items.append(item)
@@ -735,7 +743,7 @@ class MemoryIngestService(KernelServiceBase):
                 error = str(exc)[:500]
                 retry_count = max(0, int(claim.get("retry_count", 0) or 0))
                 try:
-                    self.metadata_store.fail_episode_source_rebuild(
+                    await asyncio.to_thread(self.metadata_store.fail_episode_source_rebuild,
                         source,
                         lease_token=lease_token,
                         claimed_revision=claimed_revision,
@@ -755,6 +763,7 @@ class MemoryIngestService(KernelServiceBase):
         if rebuilt_items:
             self._persist()
         return {
+            "model_calls_used": budget.used if budget is not None else None,
             "processed": len(rebuilt_items) + len(failures) + len(unfinished_items),
             "rebuilt": len(rebuilt_items),
             "superseded": superseded,

@@ -987,6 +987,8 @@ class SDKMemoryKernel(KernelCompatibilityMixin):
         max_retry: int = 3,
         lease_seconds: float = 1800.0,
         max_wait_seconds: float = 60.0,
+        upgrade_generation: bool = False,
+        max_model_calls: Optional[int] = None,
     ) -> Dict[str, Any]:
         service = self._ingest_service
         return await type(service).process_episode_source_rebuild_batch(
@@ -996,6 +998,7 @@ class SDKMemoryKernel(KernelCompatibilityMixin):
             max_retry=max_retry,
             lease_seconds=lease_seconds,
             max_wait_seconds=max_wait_seconds,
+            **({"upgrade_generation": True, "max_model_calls": max_model_calls} if upgrade_generation else {}),
         )
 
     async def search_memory(self, request: KernelSearchRequest) -> Dict[str, Any]:
@@ -1086,9 +1089,9 @@ class SDKMemoryKernel(KernelCompatibilityMixin):
             limit=limit,
         )
 
-    async def rebuild_episodes_for_sources(self, sources: Iterable[str]) -> Dict[str, Any]:
+    async def rebuild_episodes_for_sources(self, sources: Iterable[str], *, max_model_calls: int) -> Dict[str, Any]:
         service = self._episode_admin_service
-        return await type(service).rebuild_episodes_for_sources(service, sources)
+        return await type(service).rebuild_episodes_for_sources(service, sources, max_model_calls=max_model_calls)
 
     def memory_stats(self) -> Dict[str, Any]:
         service = self._stats_service

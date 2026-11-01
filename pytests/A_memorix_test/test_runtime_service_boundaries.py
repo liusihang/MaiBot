@@ -1666,14 +1666,20 @@ async def test_episode_admin_rebuild_uses_kernel_patched_rebuild_boundary(
     async def fake_initialize() -> None:
         return None
 
-    async def fake_rebuild_episodes_for_sources(sources: list[str]) -> dict[str, Any]:
+    async def fake_rebuild_episodes_for_sources(sources: list[str], *, max_model_calls: int) -> dict[str, Any]:
         captured.append(list(sources))
         return {"rebuilt": 1, "items": [{"source": "source-1"}], "failures": [], "sources": ["source-1"]}
 
     monkeypatch.setattr(kernel, "initialize", fake_initialize)
     monkeypatch.setattr(kernel, "rebuild_episodes_for_sources", fake_rebuild_episodes_for_sources)
 
-    result = await kernel.memory_episode_admin(action="rebuild", sources=["source-1"])
+    async def preview_source(source):
+        return {"source": source, "paragraph_count": 1, "model_calls_upper_bound": 1}
+
+    kernel.episode_service = SimpleNamespace(preview_source_rebuild=preview_source, generation_hash=lambda: "v1")
+    preview = await kernel.memory_episode_admin(action="preview_rebuild", sources=["source-1"])
+    result = await kernel.memory_episode_admin(action="rebuild", sources=["source-1"],
+        preview_id=preview["preview"]["preview_id"], max_model_calls=1)
 
     assert result == {
         "success": True,
@@ -1695,7 +1701,7 @@ async def test_episode_admin_reports_superseded_rebuild_as_unfinished(
     async def fake_initialize() -> None:
         return None
 
-    async def fake_rebuild_episodes_for_sources(sources: list[str]) -> dict[str, Any]:
+    async def fake_rebuild_episodes_for_sources(sources: list[str], *, max_model_calls: int) -> dict[str, Any]:
         assert sources == ["source-1"]
         return {
             "rebuilt": 0,
@@ -1709,7 +1715,13 @@ async def test_episode_admin_reports_superseded_rebuild_as_unfinished(
     monkeypatch.setattr(kernel, "initialize", fake_initialize)
     monkeypatch.setattr(kernel, "rebuild_episodes_for_sources", fake_rebuild_episodes_for_sources)
 
-    result = await kernel.memory_episode_admin(action="rebuild", sources=["source-1"])
+    async def preview_source(source):
+        return {"source": source, "paragraph_count": 1, "model_calls_upper_bound": 1}
+
+    kernel.episode_service = SimpleNamespace(preview_source_rebuild=preview_source, generation_hash=lambda: "v1")
+    preview = await kernel.memory_episode_admin(action="preview_rebuild", sources=["source-1"])
+    result = await kernel.memory_episode_admin(action="rebuild", sources=["source-1"],
+        preview_id=preview["preview"]["preview_id"], max_model_calls=1)
 
     assert result["success"] is False
     assert result["unfinished"] == 1
@@ -1738,6 +1750,8 @@ async def test_rebuild_episodes_for_sources_enqueues_and_uses_source_worker(
             "sources": ["source-ok", "source-fail"],
             "limit": 2,
             "max_wait_seconds": 0.0,
+            "upgrade_generation": True,
+            "max_model_calls": 2,
         }
         return {
             "rebuilt": 1,
@@ -1748,7 +1762,7 @@ async def test_rebuild_episodes_for_sources_enqueues_and_uses_source_worker(
     monkeypatch.setattr(kernel, "initialize", fake_initialize)
     monkeypatch.setattr(kernel, "process_episode_source_rebuild_batch", fake_process_source_batch)
 
-    result = await kernel.rebuild_episodes_for_sources(["source-ok", "source-fail"])
+    result = await kernel.rebuild_episodes_for_sources(["source-ok", "source-fail"], max_model_calls=2)
 
     assert result["rebuilt"] == 1
     assert result["items"] == [{"source": "source-ok", "episode_count": 2}]

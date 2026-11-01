@@ -509,7 +509,7 @@ def test_scoped_claim_does_not_consume_older_unrelated_source(tmp_path) -> None:
         store.close()
 
 
-def test_materialization_config_change_claims_clean_source_without_data_revision(tmp_path) -> None:
+def test_materialization_config_change_keeps_clean_source_without_data_revision(tmp_path) -> None:
     store = MetadataStore(data_dir=tmp_path)
     store.connect()
     source = "chat_summary:generation"
@@ -549,9 +549,8 @@ def test_materialization_config_change_claims_clean_source_without_data_revision
             max_wait_seconds=0.0,
             now=now + 1.0,
         )
-        assert len(changed_claim) == 1
-        assert changed_claim[0]["source"] == source
-        assert changed_claim[0]["claimed_revision"] == clean_state["built_revision"]
+        assert changed_claim == []
+        assert store.query_episodes(source=source)
     finally:
         store.close()
 
@@ -738,6 +737,7 @@ async def test_sync_rebuild_script_returns_failure_when_publish_is_rejected(
             FakeStore(),
             {},
             ["chat_summary:script"],
+            max_model_calls=1,
         )
     finally:
         sys.modules.pop("rebuild_episodes", None)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from typing import Any, Dict, List
 
@@ -17,6 +18,7 @@ except Exception:  # pragma: no cover
 
 from A_memorix.core.storage import MetadataStore
 from A_memorix.core.utils.episode_service import EpisodeService
+from A_memorix.core.utils.episode_group_cache import EpisodeCallBudget
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -24,6 +26,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR), help="插件数据目录")
     parser.add_argument("--source", type=str, help="指定单个 source 入队/重建")
     parser.add_argument("--all", action="store_true", help="对所有 source 入队/重建")
+    parser.add_argument("--max-model-calls", type=int, help="本次分段模型调用次数上限；执行时必填")
     parser.add_argument("--wait", action="store_true", help="在脚本内同步执行重建")
     return parser
 
@@ -80,8 +83,9 @@ async def _maintain_source_lease(
     return True
 
 
-async def _run_rebuilds(store: MetadataStore, plugin_config: Dict[str, Any], sources: List[str]) -> int:
+async def _run_rebuilds(store: MetadataStore, plugin_config: Dict[str, Any], sources: List[str], *, max_model_calls: int) -> int:
     service = EpisodeService(metadata_store=store, plugin_config=plugin_config)
+    budget = EpisodeCallBudget(max_model_calls)
     failures_by_source: Dict[str, str] = {}
     completed_sources = set()
     remaining_sources = list(dict.fromkeys(sources))
@@ -119,7 +123,8 @@ async def _run_rebuilds(store: MetadataStore, plugin_config: Dict[str, Any], sou
                 )
             )
             try:
-                plan = await service.plan_source_rebuild(source, segmentation_generation=generation)
+                plan = await service.plan_source_rebuild(source, segmentation_generation=generation,
+                    upgrade_generation=True, call_budget=budget)
             finally:
                 heartbeat_stop.set()
                 await heartbeat_task
@@ -182,8 +187,20 @@ def main() -> int:
             print("no sources to rebuild")
             return 0
 
+        plugin_config = _load_plugin_config()
+        service = EpisodeService(metadata_store=store, plugin_config=plugin_config)
+        async def preview():
+            return [await service.preview_source_rebuild(source) for source in sources]
+        items = asyncio.run(preview())
+        upper_bound = sum(item["model_calls_upper_bound"] for item in items)
+        print(json.dumps({"source_count": len(sources), "paragraph_count": sum(item["paragraph_count"] for item in items),
+                          "model_calls_upper_bound": upper_bound, "dry_run": not args.wait}, ensure_ascii=False))
+        if not args.wait:
+            return 0
+        if args.max_model_calls is None or args.max_model_calls < upper_bound or args.max_model_calls < 0:
+            parser.error("执行需提供足够的 --max-model-calls；未启动重建")
         enqueued = 0
-        reason = "script_rebuild_all" if args.all else "script_rebuild_source"
+        reason = "episode_admin_rebuild"
         for source in sources:
             enqueued += int(
                 store.enqueue_episode_source_rebuild(
@@ -194,11 +211,7 @@ def main() -> int:
             )
         print(f"enqueued={enqueued} sources={len(sources)}")
 
-        if not args.wait:
-            return 0
-
-        plugin_config = _load_plugin_config()
-        return asyncio.run(_run_rebuilds(store, plugin_config, sources))
+        return asyncio.run(_run_rebuilds(store, plugin_config, sources, max_model_calls=args.max_model_calls))
     finally:
         store.close()
 
