@@ -183,6 +183,10 @@ class MCPManager:
                 self._connection_errors[config.name] = connection.last_error or "连接失败"
                 continue
 
+            # 在注册前筛选，让工具目录、状态计数和执行入口使用同一份开放列表。
+            if config.enabled_tools:
+                enabled_tools = set(config.enabled_tools)
+                connection.tools = [tool for tool in connection.tools if tool.name in enabled_tools]
             self._connections[config.name] = connection
             registered_tool_count = self._register_tools(config.name, connection)
             registered_prompt_count = self._register_prompts(config.name, connection)

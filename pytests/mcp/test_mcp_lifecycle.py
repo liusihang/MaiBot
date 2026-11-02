@@ -11,6 +11,7 @@ import pytest
 
 from src.mcp_module import stdio_filter
 from src.config.official_configs import MCPConfig, MCPServerItemConfig
+from src.core.tooling import ToolInvocation
 from src.mcp_module.config import MCPClientRuntimeConfig, MCPServerRuntimeConfig
 from src.mcp_module.connection import MCPConnection
 from src.mcp_module.manager import MCPManager
@@ -73,6 +74,45 @@ def processes(monkeypatch) -> List[_Process]:
 
 def _connection() -> MCPConnection:
     return MCPConnection(MCPServerRuntimeConfig(name="test", command="test-server"), MCPClientRuntimeConfig())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "enabled_tools, expected",
+    [
+        ([], ["browser_navigate", "browser_file_upload"]),
+        (["browser_navigate"], ["browser_navigate"]),
+        (["missing"], []),
+    ],
+)
+async def test_enabled_tools_controls_catalog_status_and_dispatch(processes, monkeypatch, enabled_tools, expected) -> None:
+    """服务筛选同时约束目录与显式指定服务器的调用，默认保持完整目录。"""
+    from mcp.types import Tool
+
+    async def discover(connection):
+        connection.tools = [
+            Tool(name=name, inputSchema={"type": "object"})
+            for name in ["browser_navigate", "browser_file_upload"]
+        ]
+
+    monkeypatch.setattr(MCPConnection, "_load_server_features", discover)
+    manager = MCPManager(MCPClientRuntimeConfig())
+    await manager._connect_all(
+        [MCPServerRuntimeConfig(name="test", command="test-server", enabled_tools=enabled_tools)]
+    )
+    try:
+        assert [spec.name for spec in manager.get_tool_specs()] == expected
+        assert manager.tool_count == len(expected)
+        assert manager.get_status_snapshot()["servers"][0]["tool_count"] == len(expected)
+        assert manager.is_mcp_tool("browser_file_upload") == ("browser_file_upload" in expected)
+        if "browser_file_upload" not in expected:
+            result = await manager.call_tool_invocation(
+                ToolInvocation(tool_name="browser_file_upload", metadata={"mcp_server_name": "test"})
+            )
+            assert not result.success
+            assert "未提供工具" in result.error_message
+    finally:
+        await manager.close()
 
 
 @pytest.mark.asyncio

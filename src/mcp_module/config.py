@@ -49,6 +49,7 @@ class MCPServerRuntimeConfig:
     """单个 MCP 服务器的运行时配置。"""
 
     name: str
+    enabled_tools: list[str] = field(default_factory=list)
     transport: Literal["stdio", "streamable_http", "sse"] = "stdio"
     command: str = ""
     args: list[str] = field(default_factory=list)
@@ -156,6 +157,7 @@ def build_mcp_server_runtime_config(server: "MCPServerItemConfig") -> MCPServerR
 
     return MCPServerRuntimeConfig(
         name=server.name.strip(),
+        enabled_tools=[name.strip() for name in server.enabled_tools if name.strip()],
         transport=server.transport,
         command=server.command.strip(),
         args=[str(argument) for argument in server.args],

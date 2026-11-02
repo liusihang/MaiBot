@@ -6,6 +6,8 @@
 
 `--isolated` 让不同 MCP 客户端使用独立的浏览器上下文；未启用共享上下文。两个群的页面与 Cookie 分开，同一 MaiBot 进程中的主、子 Agent 仍共用该进程的 MCP 连接，同群浏览器任务按提示词依次执行。浏览器上下文在连接结束或服务重启后清除。
 
-工具由 MCP 目录提供，包括 `browser_navigate`、`browser_wait_for`、`browser_snapshot`、`browser_evaluate`、标签页与截图。打开页面后等待正文出现，再从最新快照或可见 DOM 读取内容。网站的登录要求、访问权限和内容状态按实际页面处理。
+MaiBot 通过每个服务的 `enabled_tools` 仅开放 6 个浏览器工具：`browser_navigate`、`browser_wait_for`、`browser_snapshot`、`browser_evaluate`、`browser_tabs`、`browser_close`。工具目录、调用入口与后台计数使用同一份筛选结果。列表按 MCP 原始工具名填写，空列表保留全部工具。共享 Playwright 服务本身仍提供完整目录。
+
+打开页面后等待正文出现，再从最新快照或可见 DOM 读取内容；通过标签页管理与关闭工具结束任务。网站的登录要求、访问权限和内容状态按实际页面处理。
 
 Pi 会话固定 System、工具与执行绑定。给已有实例增加 MCP 服务时，需要停止该实例的唯一会话写入者，使用 Pi SessionManager 追加更新后的 `maibot.contract`（完整工具列表与绑定），保留原有文件前缀，再启动服务。仅修改 TOML 后直接重启会引发 `SESSION_CONTRACT_CHANGED`。

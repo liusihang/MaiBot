@@ -4,6 +4,7 @@ enable = true
 [[mcp.servers]]
 name = "playwright"
 enabled = true
+enabled_tools = ["browser_navigate", "browser_wait_for", "browser_snapshot", "browser_evaluate", "browser_tabs", "browser_close"]
 transport = "streamable_http"
 url = "http://maibot-browser-mcp:8931/mcp"
 http_timeout_seconds = 30.0

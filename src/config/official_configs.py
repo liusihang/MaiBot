@@ -5754,6 +5754,15 @@ class MCPServerItemConfig(ConfigBase):
     )
     """是否启用这个 MCP 服务器。"""
 
+    enabled_tools: list[str] = Field(
+        default_factory=list,
+        json_schema_extra={
+            "label": {"zh_CN": "开放的工具名称"},
+            "x-widget": "custom",
+        },
+    )
+    """仅开放列表中的原始工具名；空列表开放该服务的全部工具。"""
+
     transport: Literal["stdio", "streamable_http", "sse"] = Field(
         default="stdio",
         json_schema_extra={
