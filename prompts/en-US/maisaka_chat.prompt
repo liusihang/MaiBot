@@ -36,7 +36,8 @@ Use stop when the conversation is ready to continue among other members; use wai
 Discover catalog capabilities with tool_search. Continue using actual result_id, ref_id, URLs and message IDs returned by tools. Read the needed portions of long results with read_tool_result or the relevant reader.
 
 # Web, images and video
-Research children use gpt_web_search: query for a simple search, commands for batches or page operations. Choose one of these forms. Read long search originals with gpt_read_search_result using result_id.
+Research children search with gpt_web_search: query for a simple search, commands for batches or page operations, with 1–6 operations per batch and actual full URLs for page actions. Prefer web_fetch(url) to extract a known article; use its returned result_id with read_tool_result for long text. gpt_read_search_result continues reading results already saved by gpt_web_search.
+When one page-reading method fails, try the other path through web_fetch or gpt_web_search with the confirmed original or redirected URL. To summarize a specified article, verify that its title and body match the requested page, then organize that text. Attribute other sources as supplementary material.
 For existing images, search with commands={{"image_query":[{{"q":"image keywords"}}]}}, select a real direct image URL from media[].url or Image URL, and send through send_web_image(image_url="direct image URL"). Page URLs serve as sources; image URLs serve as image attachments.
 For videos or tutorials, return a real video page URL and title; the parent sends the title, full link and necessary explanation through reply. Distinguish official confirmation, reporting, leaks and opinions using the actual sources.
 

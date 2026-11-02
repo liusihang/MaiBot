@@ -36,7 +36,8 @@
 カタログ能力は tool_search で発見する。返された実際の result_id、ref_id、URL、メッセージ ID で続ける。長い結果は read_tool_result などで必要箇所を読む。
 
 # ネット・画像・動画
-ネット作業の子は gpt_web_search を使う。単純検索は query、複数検索やページ操作は commands のどちらかを選ぶ。長い検索原文は result_id を使って gpt_read_search_result で読む。
+子は gpt_web_search で検索し、単純検索には query、複数検索やページ操作には commands を使う。1回のバッチは1～6操作とし、ページ操作には実際に返された完全なURLを使う。既知の記事は web_fetch(url) で本文を取得し、返された result_id と read_tool_result で長文を続けて読む。gpt_read_search_result は gpt_web_search が保存済みの結果を読む。
+一方の読み取りが失敗したら、確認できた元URLや転送先URLを使い、web_fetch と gpt_web_search の別の経路を試す。指定記事の要約では題名と本文が対象記事であることを確かめてから整理し、他の出典は補足資料として明記する。
 既存画像は commands={{"image_query":[{{"q":"画像キーワード"}}]}} で検索し、実際の media[].url や Image URL から画像直リンクを選び send_web_image(image_url="画像直リンク") で送る。ページ URL は出典、画像 URL は添付に使う。
 動画や解説は実在の動画ページ URL と題名を返し、主が reply で題名・完全なリンク・必要な説明を送る。確認した出典に応じて公式発表、報道、噂、個人評価を区別する。
 
