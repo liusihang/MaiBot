@@ -1,0 +1,30 @@
+name: maibot-browser
+services:
+  browser:
+    image: mcr.microsoft.com/playwright/mcp@sha256:690763cbb437ee7233f538a953bb5390bf03791eb5c965b471e59d17a6132fcb
+    container_name: maibot-browser-mcp
+    init: true
+    restart: unless-stopped
+    shm_size: 1gb
+    entrypoint: ["node", "/app/cli.js"]
+    command:
+      - --headless
+      - --browser
+      - chromium
+      - --no-sandbox
+      - --port
+      - "8931"
+      - --host
+      - 0.0.0.0
+      - --allowed-hosts
+      - maibot-browser-mcp:8931,localhost:8931,127.0.0.1:8931
+      - --isolated
+      - --no-webmcp
+      - --codegen
+      - none
+    networks:
+      - bot
+networks:
+  bot:
+    external: true
+    name: maibot-two-groups_bot
