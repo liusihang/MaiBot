@@ -32,7 +32,11 @@ host tools as their parent, including search, media, memory writes and reply.
 immediately. Completion is durably queued to the parent inbox and wakes its normal
 internal turn without waiting for Luna. `read_subagent(handle, wait=true)` joins an
 already running task. Intermediate evidence stays in the child; the parent gets a
-bounded conclusion, sources and a durable evidence handle. Tool execution retains
+faithfully organized findings and one actionable original-evidence reader as plain text.
+Execution IDs, receipts, empty fields and diagnostics stay in the business store and UI.
+The child uses a separate tool-execution System, with Beijing time and source/media
+instructions; the parent owns group persona, conversational judgment and final replies.
+The completed findings are returned in full; explicit original-evidence reads paginate. Tool execution retains
 the group's real business scope and per-child delivery receipts. Child stop/wait
 controls do not change the parent's scheduling state. Interrupted actions are not
 automatically replayed after restart.

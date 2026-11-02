@@ -232,3 +232,8 @@ description = "Select distinctive expressions and jargon from authentic group ch
 display_name = "Expression batch review"
 advanced = true
 description = "Review expressive features, communicative purpose and source examples in context."
+
+[maisaka_subagent]
+display_name = "Pi tool-execution assistant"
+advanced = true
+description = "Independent instructions for delegated tool execution and source-grounded findings."

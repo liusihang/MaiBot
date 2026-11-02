@@ -227,3 +227,8 @@ description = "从真实群聊中精选有表达特点的说法与特殊含义�
 display_name = "表达学习批量审核"
 advanced = true
 description = "结合来源上下文，审核表达特点、适用目的及真实例句。"
+
+[maisaka_subagent]
+display_name = "Pi 子代理执行助手"
+advanced = true
+description = "子代理独立执行工具并忠实整理资料的提示词。"

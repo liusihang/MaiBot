@@ -3,15 +3,35 @@
 from typing import Any, Dict
 
 import asyncio
-import json
 
 import pytest
 
-from src.maisaka.pi_runtime.subagents import MAX_CONCLUSION_CHARS, PiSubagentService
+from src.maisaka.pi_runtime.subagents import PiSubagentService, format_subagent_result
 
 
 def tool(name: str) -> Dict[str, Any]:
     return {"type": "function", "function": {"name": name, "parameters": {"type": "object"}}}
+
+
+def test_parent_projection_keeps_content_and_actionable_reads_only():
+    result = {
+        "handle": "pi-child-test", "status": "completed", "conclusion": "事实与来源 https://example.org",
+        "sources": [{"kind": "host_tool_receipt", "call_id": "private-call", "result_id": None}],
+        "uncertainty": "", "error": "", "conclusion_truncated": False, "evidence_handle": "pi-child-test",
+    }
+    visible = format_subagent_result(result)
+    assert "事实与来源 https://example.org" in visible
+    assert 'read_subagent(handle="pi-child-test")' in visible
+    for field in ("host_tool_receipt", "private-call", "result_id", "uncertainty", "conclusion_truncated", "evidence_handle"):
+        assert field not in visible
+    page = {**result, "text": "原始工具资料", "offset": 0, "next_offset": 800, "total_chars": 1200}
+    visible = format_subagent_result(page)
+    assert "原始工具资料" in visible and "事实与来源" not in visible
+    assert 'offset=800' in visible
+    assert "total_chars" not in visible
+    assert "wait=true" in format_subagent_result({"handle": "pi-child-test", "status": "running"})
+    failed = format_subagent_result({"handle": "pi-child-test", "status": "failed", "error": "RuntimeError"})
+    assert "RuntimeError" in failed
 
 
 def test_isolation_permissions_and_original_evidence(tmp_path):
@@ -72,10 +92,11 @@ def test_no_eviction_restart_pagination_and_bounded_parent_output(tmp_path):
         path = str(tmp_path / "children.sqlite")
         service = PiSubagentService(path, runner)
         first = await service.delegate("parent", "task", [])
-        assert len(first["conclusion"]) == MAX_CONCLUSION_CHARS
-        assert first["conclusion_truncated"] is True
+        assert len(first["conclusion"]) == 9000
         assert first["sources"] == []
-        assert "No separately structured" in first["uncertainty"]
+        visible = format_subagent_result(first)
+        assert "a" * 9000 in visible
+        assert "uncertainty" not in visible and "No separately structured" not in visible
         for _ in range(22):
             await service.delegate("parent", "later task", [])
         restarted = PiSubagentService(path, runner)
@@ -87,9 +108,9 @@ def test_no_eviction_restart_pagination_and_bounded_parent_output(tmp_path):
             if page["next_offset"] is None:
                 break
             offset = page["next_offset"]
-        original = json.loads("".join(pages))
-        assert original["events"][0]["text"] == "original-evidence-" + "x" * 15000
-        assert len(original["result"]["conclusion"]) == 9000
+        original = "".join(pages)
+        assert "original-evidence-" + "x" * 15000 in original
+        assert "a" * 9000 in original
         assert "opaque-private" not in "".join(pages)
         assert "PRIVATE_THINKING" not in "".join(pages)
         # Provider packets remain only in Node SessionManager, not the Python business cache.
@@ -130,9 +151,9 @@ def test_failed_and_cancelled_child_evidence_survives(tmp_path):
         with pytest.raises(asyncio.CancelledError):
             await service.delegate("parent", "cancel", [])
         for handle, expected in zip(captured, ["failed", "cancelled"], strict=True):
-            record = json.loads((await service.read("parent", handle))["text"])
+            record = await service.read("parent", handle)
             assert record["status"] == expected
-            assert record["events"] == []
+            assert "RuntimeError" in record["text"] if expected == "failed" else "cancelled" in record["text"]
 
     asyncio.run(run())
 

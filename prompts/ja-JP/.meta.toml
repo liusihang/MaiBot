@@ -232,3 +232,8 @@ description = "実際の会話から特徴のある表現と隠語を用例に�
 display_name = "表現の一括審査"
 advanced = true
 description = "文脈に基づき表現の特徴、発話の目的、実際の用例を審査します。"
+
+[maisaka_subagent]
+display_name = "Pi ツール実行助手"
+advanced = true
+description = "委託されたツール実行と根拠資料を整理する独立した指示。"

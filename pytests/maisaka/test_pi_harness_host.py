@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 import asyncio
 import json
+import re
 
 import pytest
 
@@ -458,7 +459,7 @@ async def test_generic_emoji_media_receipt_survives_lost_ack_and_restart(monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("child_tool", ["web_fetch", "reply"])
+@pytest.mark.parametrize("child_tool", ["web_fetch", "reply", "gpt_web_search"])
 async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads(monkeypatch, tmp_path, child_tool):
     from src.maisaka.pi_runtime.evidence import DurableEvidenceStore
     from src.maisaka.tool_result_store import ToolResultStore
@@ -467,8 +468,8 @@ async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads
 
     def read_delegation(request, requests):
         tool_outputs = [message["content"] for message in request["messages"] if message.get("role") == "tool"]
-        delegation = next(json.loads(text) for text in tool_outputs if "pi-child-" in text)
-        return "read_subagent", {"handle": delegation["handle"]}
+        delegation = next(text for text in tool_outputs if "pi-child-" in text)
+        return "read_subagent", {"handle": re.search(r'handle="(pi-child-[^\"]+)"', delegation)[1]}
 
     with wire_server(
         [
@@ -481,10 +482,19 @@ async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads
     ) as (config, requests):
         monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
         host, effects = engine()
+        if child_tool == "gpt_web_search":
+            host._runtime._tool_registry.list_tools.return_value.append(
+                ToolSpec(name=child_tool, description=child_tool, parameters_schema={"type": "object"}, provider_name="isolated")
+            )
         source_store = ToolResultStore()
 
         async def invoke(invocation, context, **kwargs):
             effects.append(invocation)
+            if child_tool == "gpt_web_search":
+                return ToolExecutionResult(child_tool, True, content=json.dumps({
+                    "status": "ok", "content": "child preview only", "result_id": "ws-original",
+                    "reader_tool": "gpt_read_search_result",
+                }))
             handle = source_store.save(invocation.session_id, child_tool, "child original evidence only")
             return ToolExecutionResult(child_tool, True, content="child preview only", metadata={"result_id": handle})
 
@@ -502,30 +512,41 @@ async def test_actual_child_has_isolated_harness_and_durable_scoped_source_reads
             assert requests[1]["model"] == requests[0]["model"] == "mock-model"
             assert requests[1]["tools"] == requests[0]["tools"]
             assert "child-only research task" in json.dumps(requests[1]["messages"])
-            assert "职责是在本线程直接完成工具步骤" in json.dumps(requests[1]["messages"], ensure_ascii=False)
-            assert "主 Agent 负责发送最终群聊正文" in json.dumps(requests[1]["messages"], ensure_ascii=False)
+            assert "工具执行助手" in json.dumps(requests[1]["messages"], ensure_ascii=False)
+            assert "Stable group persona" not in json.dumps(requests[1]["messages"])
+            assert "当前北京时间" in json.dumps(requests[1]["messages"], ensure_ascii=False)
             assert "child preview only" not in json.dumps(requests[3]["messages"])
             assert "child preview only" in json.dumps(requests[4]["messages"])
             receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
-            delegation = json.loads(receipt.result["content"][0]["text"])
-            assert delegation["conclusion"] == "child-only source-grounded conclusion"
+            visible = receipt.result["content"][0]["text"]
+            handle = re.search(r'handle="(pi-child-[^\"]+)"', visible)[1]
+            assert "child-only source-grounded conclusion" in visible
+            assert all(field not in visible for field in ("host_tool_receipt", "call_id", "uncertainty", "evidence_handle"))
+            delegation = await asyncio.to_thread(runner.subagents._summary, runner.session_id, handle)
             [source] = delegation["sources"]
             assert source["kind"] == "host_tool_receipt"
             detail = await runner.subagents.read(runner.session_id, delegation["handle"])
             assert "child preview only" in detail["text"]
-            raw = await runner.evidence.read(runner.session_id, source["result_id"])
-            assert "child original evidence only" in json.dumps(raw)
+            if child_tool == "gpt_web_search":
+                assert source["result_id"] == "ws-original"
+                assert source["reader_tool"] == "gpt_read_search_result"
+                assert "ws-original" in detail["text"]
+            else:
+                raw = await runner.evidence.read(runner.session_id, source["result_id"])
+                assert "child original evidence only" in json.dumps(raw)
             with pytest.raises(PermissionError):
                 await runner.subagents.read("other-group", delegation["handle"])
-            with pytest.raises(PermissionError):
-                await runner.evidence.read("other-group", source["result_id"])
+            if child_tool != "gpt_web_search":
+                with pytest.raises(PermissionError):
+                    await runner.evidence.read("other-group", source["result_id"])
         finally:
             await runner.close()
         restored = PiGroupRunner(host, data_dir=tmp_path)
         try:
             await restored._ensure_storage()
             assert (await restored.subagents.read(restored.session_id, delegation["handle"]))["text"] == detail["text"]
-            assert await restored.evidence.read(restored.session_id, source["result_id"]) == raw
+            if child_tool != "gpt_web_search":
+                assert await restored.evidence.read(restored.session_id, source["result_id"]) == raw
         finally:
             await restored.close()
 
@@ -872,7 +893,7 @@ async def test_background_child_allows_new_parent_turn_and_delivers_completion_o
             await runner.run([])
             assert any("PARENT_NEW_CHAT" in json.dumps(r["messages"]) for r in requests)
             receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
-            handle = json.loads(receipt.result["content"][0]["text"])["handle"]
+            handle = re.search(r'handle="(pi-child-[^\"]+)"', receipt.result["content"][0]["text"])[1]
             release.set()
             result = await runner.subagents.read(runner.session_id, handle, wait=True)
             assert result["conclusion"] == "CHILD_FINISHED"
@@ -884,6 +905,7 @@ async def test_background_child_allows_new_parent_turn_and_delivers_completion_o
             main_requests = [r for r in requests if "# 独立任务" not in json.dumps(r["messages"], ensure_ascii=False)]
             assert "CHILD_FINISHED" in json.dumps(main_requests[-1]["messages"])
             assert "CHILD_PRIVATE_SOURCE" not in json.dumps(main_requests[-1]["messages"])
+            assert all(field not in json.dumps(main_requests[-1]["messages"]) for field in ("host_tool_receipt", "evidence_handle", "conclusion_truncated", "No separately structured"))
             child_requests = [r for r in requests if "# 独立任务" in json.dumps(r["messages"], ensure_ascii=False)]
             assert child_requests[0]["tools"] == main_requests[0]["tools"]
             assert "PARENT_NEW_CHAT" not in json.dumps(child_requests[0]["messages"])

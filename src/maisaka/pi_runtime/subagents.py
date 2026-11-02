@@ -27,14 +27,13 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "gpt_read_search_result",
     }
 )
-MAX_CONCLUSION_CHARS = 4000
 MAX_READ_CHARS = 12000
 SUBAGENT_TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
             "name": "subagent",
-            "description": "Delegate internet search, external verification, cross-source research, complex execution and image tasks to an independent Pi thread with the same tools, including a single web search. The main Agent directly handles memory lookups, document reading and existing results, keeps conversational judgment and writes final replies. Supply the question, essential context, real message IDs and deliverable. Keep full research in the child and request compact findings, key sources and evidence handles. wait=true returns the result; wait=false returns a handle and delivers completion later. Ordinary chat and context-supported answers stay in the parent.",
+            "description": "Delegate internet search, external verification, cross-source research, complex execution and image tasks to an independent tool-execution thread, including a single web search. Supply the information or action needed, essential context and real message IDs. The child returns faithfully organized findings with sources, evidence gaps and actual action receipts. The main Agent handles memory and document reading, forms its own judgment and writes the final group reply. wait=true returns the findings as text with an original-evidence reader; wait=false returns a waiting instruction and delivers completion later.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -54,7 +53,7 @@ SUBAGENT_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "read_subagent",
-            "description": "Read a delegated task's status, conclusion and original tool evidence in this chat, including after restart. Set wait=true to await a running task instead of polling.",
+            "description": "Read a delegated task's findings and original tool evidence as paginated text in this chat, including after restart. Use the returned offset to continue. Set wait=true to await a running task instead of polling.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -80,6 +79,24 @@ def _tool_name(definition: Mapping[str, Any]) -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def format_subagent_result(result: Mapping[str, Any]) -> str:
+    """Model-facing text; execution metadata remains in the business store."""
+    handle = json.dumps(result["handle"], ensure_ascii=False)
+    if result["status"] == "running":
+        return f"任务正在执行。\n继续等待：read_subagent(handle={handle}, wait=true)"
+    if "text" in result:
+        text = result["text"]
+        offset = result["next_offset"]
+        if offset is not None:
+            text += f"\n\n继续读取：read_subagent(handle={handle}, offset={offset})"
+        return text
+    if result["status"] == "completed":
+        text = result.get("conclusion") or "任务结束，未返回资料正文。"
+    else:
+        text = f"任务未完成（{result['status']}）：{result.get('error') or '执行已结束'}"
+    return text + f"\n\n原始资料：read_subagent(handle={handle})"
 
 
 class PiSubagentService:
@@ -181,7 +198,7 @@ class PiSubagentService:
         execution.add_done_callback(completed)
         if wait:
             return await asyncio.shield(execution)
-        return {"handle": handle, "status": "running", "evidence_handle": handle}
+        return {"handle": handle, "status": "running"}
 
     async def _execute(
         self, handle: str, child_id: str, parent: str, task: str, tools: List[Dict[str, Any]], background: bool
@@ -224,15 +241,14 @@ class PiSubagentService:
             "handle": handle,
             "status": row["status"],
             "error": row["error"],
-            "conclusion": conclusion[:MAX_CONCLUSION_CHARS],
-            "conclusion_truncated": len(conclusion) > MAX_CONCLUSION_CHARS,
+            "conclusion": conclusion,
             # Never manufacture source URLs from arbitrary assistant prose.
             "sources": [source for source in sources[:20] if len(_json(source)) <= 1000]
             if isinstance(sources, list)
             else [],
             "uncertainty": uncertainty[:1000]
             if isinstance(uncertainty, str)
-            else "No separately structured uncertainty statement was returned; inspect the conclusion and original evidence.",
+            else "",
             "evidence_handle": handle,
         }
 
@@ -340,25 +356,18 @@ class PiSubagentService:
                 )
             ]
         result = json.loads(row["result"]) if row["result"] else None
-        public_result = (
-            None
-            if not isinstance(result, dict)
-            else {
-                "conclusion": self._conclusion(result),
-                "sources": result.get("sources", []),
-                "uncertainty": result.get("uncertainty", ""),
-            }
-        )
-        transcript = _json(
-            {
-                "content_type": "child_public_conclusion_and_tool_evidence",
-                "task": row["task"],
-                "status": row["status"],
-                "events": [projected for event in events if (projected := self._public_event(event)) is not None],
-                "result": public_result,
-                "error": row["error"],
-            }
-        )
+        # Keep evidence in its original order, with one copy of the final text.
+        # Tool names aid interpretation; call IDs and receipts belong to the UI.
+        parts = []
+        if isinstance(result, dict) and self._conclusion(result):
+            parts.append("任务结果\n" + self._conclusion(result))
+        elif row["status"] != "completed":
+            parts.append(f"任务未完成（{row['status']}）：{row['error'] or '执行已结束'}")
+        for event in events:
+            projected = self._public_event(event)
+            if projected is not None and projected["type"] == "tool_evidence":
+                parts.append(f"工具资料：{projected['tool_name']}\n{projected['text']}")
+        transcript = "\n\n".join(parts)
         end = min(offset + limit, len(transcript))
         return {
             "handle": handle,
