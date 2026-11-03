@@ -562,7 +562,10 @@ test('context pressure uses SDK image estimates and upstream usage, not encoded 
   const config = fixtureConfig(); config.models[0].visual = true;
   const h = harness(t);
   await h.initialize('group-a', [], { config });
-  const image = { type: 'image', mimeType: 'image/png', data: 'A'.repeat(2_000_000) };
+  // A decodable PNG with padding keeps the encoding large without allocating
+  // a large pixel buffer. Model-side preview processing now validates images.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC', 'base64');
+  const image = { type: 'image', mimeType: 'image/png', data: Buffer.concat([png, Buffer.alloc(1_500_000)]).toString('base64') };
   const pending = await h.handle('append', { sessionId: 'group-a', additions: [
     { ...user('image', 'large-image'), content: [image] },
   ] });
