@@ -58,7 +58,7 @@ Markdown 正文及其纯文本兼容段的重复接收：相邻两段只差换�
 
 2026-11-03 接话风格：保留用户提供的人格与表达风格原文，接续规则以自身态度、直接对话和现场具体行为为主；增加拆台、回嘴、赞同、认真回答与结束动作示例。主模板及面板 behavior_style 同步更新，原会话保留历史并显式迁移 System。
 
-当前主模板直接包含人格正文；面板三段配置是对应副本，修改面板不会自动重写主模板。部署时须同时更新模板和 overlay 的 personality、behavior_style、reply_style，并显式迁移已有 Pi 会话的 System 契约；原有历史保持不变。原生压缩指令位于 `runtime/pi_agent/runtime.mjs`，旧 context_compaction 模板不控制此路径。
+当前主模板直接包含人格正文；面板三段配置是对应副本，修改面板不会自动重写主模板。部署时须同时更新模板和 overlay 的 personality、behavior_style、reply_style，并显式迁移已有 Pi 会话的 System 契约；原有历史保持不变。工具 schema 或描述发生变化时，须同时迁移 `tools` 和对应 `toolBindings.<name>.definition`；用 `check-pi-session.mjs` 检查两者一致性后再验证 SDK 加载。该脚本从 stdin 接收 `{file, contract, config}`，应在实例工作目录运行，验证过程不执行模型和群聊发送。原生压缩指令位于 `runtime/pi_agent/runtime.mjs`，旧 context_compaction 模板不控制此路径。
 内置普通/Focus 提示词的中文、英文和日文工具约定已同步为 `reply(msg_id, text)`。
 
 - `bot_config.overlay.toml`：基础设置；其中旧人格、表达注入与拆句设置由当前 overlay 覆盖。
