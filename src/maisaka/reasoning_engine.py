@@ -15,6 +15,7 @@ import uuid
 
 from src.chat.heart_flow.heartFC_utils import CycleDetail
 from src.chat.message_receive.message import SessionMessage
+from src.chat.utils.utils import is_bot_self
 from src.common.data_models.message_component_data_model import (
     EmojiComponent,
     ImageComponent,
@@ -803,6 +804,18 @@ class MaisakaReasoningEngine:
 
         message_triggered, timeout_triggered, proactive_triggered = self._drain_ready_turn_triggers(queued_trigger)
         silent_reply_frequency = self._runtime._is_reply_frequency_silent()
+
+        if message_triggered and not (timeout_triggered or proactive_triggered) and self._runtime._has_pending_messages():
+            pending = self._runtime.message_cache[self._runtime._last_processed_index:]
+            if all(is_bot_self(message.platform, message.message_info.user_info.user_id) for message in pending):
+                # A delayed adapter echo belongs in history, but does not wake the
+                # Agent or complete an outstanding wait for an external message.
+                self._runtime._mark_message_turn_unscheduled()
+                await self._ingest_messages(self._runtime._collect_pending_messages())
+                runner = self._get_pi_runner()
+                await runner.ingest()
+                runner._schedule_context_maintenance()
+                return TurnStartContext([], None, False, False, silent_reply_frequency)
 
         if (
             self._runtime._agent_state == self._runtime._STATE_WAIT

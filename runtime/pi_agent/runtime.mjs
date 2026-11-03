@@ -139,6 +139,7 @@ function publicEvent(event, manager, owner) {
     result.toolResults = event.toolResults.map(publicMessage);
     result.toolResultEntryIds = event.toolResultEntryIds;
     result.terminatedByTool = owner?.terminated === true;
+    result.finishedAfterReply = owner?.finishAfterReply === true;
   }
   if (event.type.startsWith('tool_execution_')) {
     result.toolCallId = event.toolCallId;
@@ -158,6 +159,8 @@ class BusinessSession {
     this.running = false;
     this.transition = false;
     this.terminated = false;
+    this.terminalTool = null;
+    this.finishAfterReply = false;
     this.closing = false;
     this.poisoned = null;
     this.lastError = null;
@@ -225,12 +228,12 @@ class BusinessSession {
             // Official boundary fires only after assistant and every tool result are durable.
             await this.notify({ type: 'turn_end', message: event.message, toolResults: event.toolResults,
               messageEntryId: event.messageEntryId, toolResultEntryIds: event.toolResultEntryIds });
-            if (this.terminated || this.unresolvedCalls().length || event.outcome !== 'completed') return;
-            return { ...delivery, continue: this.drainPending() > 0 || delivery.continue === true };
+            if (this.lastError || this.unresolvedCalls().length || event.outcome !== 'completed') return;
+            return { ...delivery, continue: this.continueAtBoundary() || delivery.continue === true };
           });
           pi.on('agent_before_settle', (event) => {
-            if (this.terminated || this.lastError || this.unresolvedCalls().length || event.outcome !== 'completed') return;
-            return { continue: this.drainPending() > 0 };
+            if (this.lastError || this.unresolvedCalls().length || event.outcome !== 'completed') return;
+            return { continue: this.continueAtBoundary() };
           });
           pi.on('session_before_compact', (event) => this.prepareCompaction(event));
         },
@@ -311,7 +314,7 @@ class BusinessSession {
     const finish = session.agent.finishTurn;
     session.agent.finishTurn = async (...args) => {
       const result = await finish(...args);
-      return this.terminated || this.lastError || this.unresolvedCalls().length || ['length', 'error', 'aborted'].includes(args[0].message.stopReason)
+      return this.terminated || this.finishAfterReply || this.lastError || this.unresolvedCalls().length || ['length', 'error', 'aborted'].includes(args[0].message.stopReason)
         ? { action: 'end' } : result;
     };
   }
@@ -398,7 +401,7 @@ class BusinessSession {
       const item = this.pending[0];
       if (item.kind === 'input') {
         this.manager.appendMessage({ ...clone(item.value), hostInboxId: item.id });
-        if (this.running) this.deliveryStatus = 'not_requested';
+        if (this.running && item.value.hostSelfEcho !== true) this.deliveryStatus = 'not_requested';
       }
       else this.appendReference(item.value, item.id);
       this.pending.shift();
@@ -406,6 +409,25 @@ class BusinessSession {
     }
     if (count) this.session?.refreshContext();
     return count;
+  }
+
+  continueAtBoundary() {
+    // A completed stop/reply concerns the inputs already considered. New
+    // external input at this durable boundary starts the next exchange; QQ
+    // self echoes remain history without requesting another model response.
+    if (this.terminated && this.terminalTool !== 'stop') return false;
+    const finishing = this.terminated || this.finishAfterReply;
+    const hasInput = this.pending.some((entry) => entry.kind === 'input' && entry.value.hostSelfEcho !== true);
+    const hasReferences = this.pending.some((entry) => entry.kind === 'reference');
+    this.drainPending();
+    if (hasInput) {
+      this.terminated = false;
+      this.terminalTool = null;
+      this.finishAfterReply = false;
+      this.deliveryRetries = 0;
+      return true;
+    }
+    return !finishing && hasReferences;
   }
 
   unresolvedCalls() {
@@ -438,7 +460,8 @@ class BusinessSession {
         if (['reply', 'send_emoji', 'send_web_image', 'gemini_generate_image', 'gemini_selfie', 'gemini_selfie_video'].includes(name)) this.deliveryStatus = 'sent';
         else if (['stop', 'wait'].includes(name) && this.deliveryStatus !== 'sent') this.deliveryStatus = name === 'stop' ? 'stopped' : 'waiting';
       }
-      if (result.terminate === true) this.terminated = true;
+      if (this.params.requireDelivery && name === 'reply') this.finishAfterReply = !result.isError && result.finishTurn === true;
+      if (result.terminate === true) { this.terminated = true; this.terminalTool = name; }
       return clone(result);
     } catch (error) {
       this.terminated = true;
@@ -525,6 +548,8 @@ class BusinessSession {
     check(this.unresolvedCalls().length === 0, 'UNRESOLVED_TOOL_CALLS', 'Reconcile unknown business effects before another model request');
     this.running = true;
     this.terminated = false;
+    this.terminalTool = null;
+    this.finishAfterReply = false;
     this.lastError = null;
     this.completedTurnHead = null;
     this.deliveryStatus = 'not_requested';

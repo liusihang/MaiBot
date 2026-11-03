@@ -1,5 +1,6 @@
 from datetime import datetime
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import asyncio
 import time
@@ -89,3 +90,36 @@ async def test_queued_proactive_turn_resumes_wait_entered_after_enqueue() -> Non
     assert runtime._chat_history[0].tool_call_id == "wait-call"
     assert runtime._get_pending_wait_tool_call_ids() == set()
     assert runtime._agent_state == runtime._STATE_RUNNING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiting", [False, True])
+async def test_late_self_echo_persists_without_waking_or_completing_wait(waiting: bool) -> None:
+    runtime = _build_runtime_stub()
+    if waiting:
+        runtime._enter_wait_state(tool_call_id="wait-call", logical_turn_id="turn-wait")
+    echo = SimpleNamespace(platform="qq", message_info=SimpleNamespace(user_info=SimpleNamespace(user_id="bot")))
+    runtime.message_cache = [echo]
+    runtime._last_processed_index = 0
+    runtime._is_reply_frequency_silent = lambda: False
+    runtime._has_pending_messages = lambda: runtime._last_processed_index < len(runtime.message_cache)
+
+    def collect():
+        pending = runtime.message_cache[runtime._last_processed_index:]
+        runtime._last_processed_index = len(runtime.message_cache)
+        return pending
+
+    runtime._collect_pending_messages = collect
+    engine = MaisakaReasoningEngine(runtime)
+    engine._ingest_messages = AsyncMock()
+    engine._pi_runner = SimpleNamespace(ingest=AsyncMock(), run=AsyncMock(), _schedule_context_maintenance=Mock())
+    with patch("src.maisaka.reasoning_engine.is_bot_self", return_value=True):
+        context = await engine._prepare_turn_start_context("message")
+    assert context.trigger_message is None
+    assert runtime._last_processed_index == 1
+    engine._ingest_messages.assert_awaited_once_with([echo])
+    engine._pi_runner.ingest.assert_awaited_once()
+    engine._pi_runner.run.assert_not_called()
+    engine._pi_runner._schedule_context_maintenance.assert_called_once()
+    assert runtime._agent_state == (runtime._STATE_WAIT if waiting else runtime._STATE_RUNNING)
+    assert runtime._get_pending_wait_tool_call_ids() == ({"wait-call"} if waiting else set())

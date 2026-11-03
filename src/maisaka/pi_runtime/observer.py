@@ -28,6 +28,7 @@ class PiObserver:
         self.tools: Dict[str, Dict[str, Any]] = {}
         self.accounted_entry = None
         self.terminated = False
+        self.finished_after_reply = False
         self.delivery_status = ""
 
     async def handle(self, event: Dict[str, Any]) -> None:
@@ -46,6 +47,7 @@ class PiObserver:
             self.started, self.ended = time.time(), 0.0
             self.event, self.tools = event, {}
             self.terminated = False
+            self.finished_after_reply = False
             await self._emit("planner.progress")
         elif kind == "message_end" and message.get("role") == "assistant":
             self.ended = time.time()
@@ -108,6 +110,7 @@ class PiObserver:
             await self._emit("planner.progress")
         elif kind == "turn_end":
             self.terminated = event.get("terminatedByTool", False)
+            self.finished_after_reply = event.get("finishedAfterReply", False)
             await self._emit("planner.finalized")
 
     async def _emit(self, kind: str, *, active: str = "") -> None:
@@ -150,8 +153,8 @@ class PiObserver:
             planner_interrupted=stop == "aborted",
             end_reason=("provider_" + stop)
             if stop in {"error", "aborted", "length"}
-            else ("tool_stop" if self.terminated else "tool_continue" if calls else "planner_no_tool"),
-            end_detail={
+            else ("reply_complete" if self.finished_after_reply else "tool_stop" if self.terminated else "tool_continue" if calls else "planner_no_tool"),
+            end_detail="本轮回复发送完成，已结束处理" if self.finished_after_reply else {
                 "recovering": "正文已生成但未发送，正在由原 Agent 完成发送选择",
                 "undelivered": "正文未发送：一次纠正后仍未调用发送工具",
                 "sent": "本轮已有发送工具成功回执",

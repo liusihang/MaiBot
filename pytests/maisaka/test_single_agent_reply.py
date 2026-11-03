@@ -109,6 +109,19 @@ class DirectReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("expression_intent", schema["properties"])
         self.assertIn("attach_pic", schema["properties"])
 
+    async def test_finish_turn_is_explicit_and_defaults_to_finishing(self):
+        schema = reply.get_tool_spec().parameters_schema
+        self.assertEqual(schema["properties"]["finish_turn"]["default"], True)
+        result = await self.invoke()
+        self.assertTrue(result.metadata["finish_turn"])
+        result = await self.invoke(finish_turn=False)
+        self.assertFalse(result.metadata["finish_turn"])
+
+    async def test_invalid_finish_turn_is_rejected_before_sending(self):
+        result = await self.invoke(finish_turn="false")
+        self.assertFalse(result.success)
+        self.send.assert_not_called()
+
     async def test_picture_and_at_attachments_preserved(self):
         result = await self.invoke(
             text="图在这。", attach_at=["test-target"], attach_pic=[{"msg_id": "test-target", "index": 0}]

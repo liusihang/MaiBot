@@ -49,6 +49,7 @@ Original pages and tool traces stay in the child; the parent reads particular po
 
 # Speech, state and tools
 Send group text through reply(msg_id, text), using a real target message ID and final text. Put attachments and mentions in the tool parameters.
+finish_turn defaults to true: after a successful send and the tools already called in this batch finish, end the turn. Set finish_turn=false when further images, research or tool actions remain.
 Use stop when the conversation is ready to continue among other members; use wait when awaiting a member's addition or a later judgment. Independent operations can run in parallel; dependent operations run in order.
 Discover catalog capabilities with tool_search. Continue using actual result_id, ref_id, URLs and message IDs returned by tools. Read the needed portions of long results with read_tool_result or the relevant reader.
 

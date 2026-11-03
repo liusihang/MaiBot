@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from src.maisaka.reply_supplement import ReplySupplement
 
 logger = get_logger("maisaka_builtin_reply")
-_REPLY_TOOL_INTERNAL_ARGUMENTS = {"msg_id", "text", "_reply_id", "_plugin_reply_prompt"}
+_REPLY_TOOL_INTERNAL_ARGUMENTS = {"msg_id", "text", "finish_turn", "_reply_id", "_plugin_reply_prompt"}
 _DUPLICATE_TARGET_REPLY_REMINDER_ARG = "_duplicate_target_reply_reminder"
 _DUPLICATE_TARGET_REPLY_REMINDER_TEMPLATE = (
     "你刚刚已经回复过这条消息，你刚刚的发言是：“{previous_reply}”\n"
@@ -136,6 +136,11 @@ def get_tool_spec(context: Optional[ToolAvailabilityContext] = None) -> ToolSpec
             "minLength": 1,
             "description": "你已经写好的最终消息正文，将直接发送；只填群友应看到的文字。",
         },
+        "finish_turn": {
+            "type": "boolean",
+            "default": True,
+            "description": "发送成功并完成当前批工具后结束本轮，默认 true；后续还要发图、查询或执行其他工具时填 false。",
+        },
     }
     properties["attach_pic"] = {
         "type": "array",
@@ -184,7 +189,7 @@ def get_tool_spec(context: Optional[ToolAvailabilityContext] = None) -> ToolSpec
 
     return ToolSpec(
         name="reply",
-        description="发送你已写好的消息正文，可附带图片、表情和@。成功返回发送回执，失败返回原因；不会再调用模型改写。",
+        description="发送最终正文，可附带图片、表情和@，返回发送回执。finish_turn 默认 true，完成本批工具后结束；需要继续操作时设为 false。",
         parameters_schema={
             "type": "object",
             "properties": properties,
@@ -363,7 +368,13 @@ async def handle_tool(
         return _preflight_failure(
             tool_ctx, "reply", 'reply 需要非空的 text 正文，例如 {"msg_id":"123","text":"要发送的话"}。'
         )
-    return await execute_reply(tool_ctx, invocation_arguments, call_id=invocation.call_id)
+    finish_turn = invocation_arguments.get("finish_turn", True)
+    if not isinstance(finish_turn, bool):
+        return _preflight_failure(tool_ctx, "reply", "finish_turn 应为布尔值 true 或 false。")
+    result = await execute_reply(tool_ctx, invocation_arguments, call_id=invocation.call_id)
+    if result.success:
+        result.metadata["finish_turn"] = finish_turn
+    return result
 
 
 async def execute_reply(

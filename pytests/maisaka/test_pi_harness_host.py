@@ -181,6 +181,91 @@ async def test_chat_plain_draft_is_corrected_by_same_agent_before_host_delivery(
 
 
 @pytest.mark.asyncio
+async def test_host_finished_reply_uses_only_one_real_sdk_model_request(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([("reply", {"text": "one answer"})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, effects = engine()
+        next(spec for spec in host._runtime._tool_registry.list_tools.return_value if spec.name == "reply").provider_type = "builtin"
+
+        async def invoke(invocation, context, **kwargs):
+            effects.append(invocation)
+            return ToolExecutionResult("reply", True, content="sent", metadata={"finish_turn": True})
+
+        host._runtime._tool_registry.invoke = invoke
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            assert len(requests) == 1
+            assert len(effects) == 1
+            assert runner.ledger.pending_turn(runner.session_id) is None
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_host_admits_a_late_answer_at_stop_and_continues_the_same_thread(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([("stop", {}), ("reply", {"text": "got the answer"})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, effects = engine()
+        next(spec for spec in host._runtime._tool_registry.list_tools.return_value if spec.name == "reply").provider_type = "builtin"
+        host._runtime._tool_registry.list_tools.return_value.append(
+            ToolSpec(name="stop", description="stop", parameters_schema={"type": "object"},
+                     provider_name="maisaka_builtin", provider_type="builtin")
+        )
+        pending = False
+        source = original_source_message()
+        host._runtime._has_pending_messages = lambda: pending
+        host._runtime._enter_running_state = Mock()
+
+        async def ingest_pending():
+            nonlocal pending
+            pending = False
+            host._runtime._chat_history.append(history("the answer you just asked for", "late-answer"))
+            return [source]
+
+        host._ingest_pending_messages = AsyncMock(side_effect=ingest_pending)
+
+        async def invoke(invocation, context, **kwargs):
+            nonlocal pending
+            effects.append(invocation)
+            if invocation.tool_name == "stop":
+                pending = True
+                return ToolExecutionResult("stop", True, content="stopped", stop_after_execution=True)
+            return ToolExecutionResult("reply", True, content="sent", metadata={"finish_turn": True})
+
+        host._runtime._tool_registry.invoke = invoke
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            assert len(requests) == 2
+            assert [effect.tool_name for effect in effects] == ["stop", "reply"]
+            assert "the answer you just asked for" in json.dumps(requests[1])
+            host._runtime._enter_running_state.assert_called_once()
+            assert runner.ledger.pending_turn(runner.session_id) is None
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_inbound_self_echo_is_typed_by_sender_identity(monkeypatch):
+    from src.common.data_models.message_component_data_model import TextComponent
+    from src.maisaka.context.messages import SessionBackedMessage
+    from src.maisaka.pi_runtime.runner import history_message
+
+    source = original_source_message()
+    source.raw_message = MessageSequence([TextComponent("own message")])
+    history_entry = SessionBackedMessage.from_session_message(
+        source, raw_message=source.raw_message, visible_text="own message"
+    )
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.is_bot_self", lambda platform, user_id: True)
+    assert (await history_message(history_entry, "echo"))["hostSelfEcho"] is True
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.is_bot_self", lambda platform, user_id: False)
+    assert "hostSelfEcho" not in await history_message(history_entry, "other-user")
+
+
+@pytest.mark.asyncio
 async def test_real_harness_search_read_reply_stable_wire_prefix(monkeypatch, tmp_path):
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     with wire_server([("web_search", {}), ("web_fetch", {}), ("reply", {"text": "main exact text"})]) as (

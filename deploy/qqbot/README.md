@@ -5,7 +5,7 @@
 
 ## 核心行为
 
-- 主 Agent 自己理解消息、调用工具并写正文；`reply(msg_id, text)` 直接发送正文，监控记录 `replyer_llm_calls=0`。
+- 主 Agent 自己理解消息、调用工具并写正文；`reply(msg_id, text)` 直接发送正文，监控记录 `replyer_llm_calls=0`。`finish_turn` 默认 true，成功发送并完成本批工具后结束；还有后续操作时传 false。自身发送回传仅追加历史，结束边界收到的真实新消息继续在原线程判断。
 - `subagent(task, wait)` 在独立 Pi 线程完成联网搜索、外部核实、复杂执行和媒体任务，继承同一套工具；主 Agent 直接查记忆、读资料并写最终正文。主 Agent 自选等待或后台执行；后台完成后结果持久追加并唤醒本群线程。`read_subagent(handle, wait=true)` 可等待已派发任务，原始证据继续按群归属读取。
 - 插件明确调用回复生成服务时，保留原来的生成入口和 1.3.18 富文本补充编排。
 - 部署使用 `group-decisions` 专属路由，经 Pi 原生 classifier 调用官方 OpenAI `/decisions`，只返回 `engage/ignore`；输入为最近最多 50 条历史和本批全部新消息，各聊天最多每 30 秒启动一次判断。@、提及、引用机器人和已有工具任务直接放行。冷却中的普通消息留在队列，判断失败显式记录并交给主 Agent，不偷偷改用 chat。已有网关必须实际支持该端点；显式 `chat.participation_mode="chat"` 可保留旧入口。[配置和边界](../../docs/decisions-participation.md)。

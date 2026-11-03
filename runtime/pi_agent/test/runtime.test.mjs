@@ -108,6 +108,64 @@ test('chat repeated undelivered text ends with an explicit error instead of sile
   assert.equal(rows(h.runtime.sessions.get('group-a')).some((e) => e.customType === 'maibot.turn_completed'), false);
 });
 
+test('finished reply plus its own QQ echo settles without another model request', async (t) => {
+  const h = harness(t, {
+    response: (n) => n === 1 ? [call('reply', { text: 'sent once' }, 'send', 'send-item')]
+      : [call('stop', {}, 'stop', 'stop-item')],
+    execute: ({ name }) => success('sent', { finishTurn: name === 'reply', terminate: name === 'stop' }),
+    event: async ({ event }, runtime) => {
+      if (event.type === 'turn_end') await runtime.handle('append', { sessionId: 'group-a',
+        additions: [{ ...user('sent once', 'qq-own-echo'), hostSelfEcho: true }] });
+    },
+  });
+  await h.initialize('group-a', ['reply', 'stop'].map(tool), { requireDelivery: true });
+  const result = await h.prompt('question');
+  assert.equal(h.wires.length, 1);
+  assert.equal(h.calls.length, 1);
+  assert.equal(result.deliveryStatus, 'sent');
+  assert.equal(result.error, null);
+  assert.ok(result.messages.some((m) => m.hostEventId === 'qq-own-echo'));
+});
+
+test('reply finishing waits for its already emitted tool batch and permits explicit continuation', async (t) => {
+  for (const finishTurn of [true, false]) {
+    const h = harness(t, {
+      response: (n) => n === 1
+        ? [call('reply', { text: 'caption' }, 'caption', 'caption-item'), call('send_emoji', {}, 'image', 'image-item')]
+        : [call('stop', {}, 'stop', 'stop-item')],
+      execute: ({ name }) => success('ack', { finishTurn: name === 'reply' && finishTurn, terminate: name === 'stop' }),
+    });
+    await h.initialize('group-a', ['reply', 'send_emoji', 'stop'].map(tool), { requireDelivery: true });
+    await h.prompt();
+    assert.deepEqual(h.calls.map((c) => c.name), finishTurn ? ['reply', 'send_emoji'] : ['reply', 'send_emoji', 'stop']);
+    assert.equal(h.wires.length, finishTurn ? 1 : 2);
+  }
+});
+
+for (const firstTool of ['stop', 'reply']) test(`new external input at ${firstTool} boundary continues before settling`, async (t) => {
+  let appended = false;
+  const h = harness(t, {
+    response: (n) => n === 1 ? [call(firstTool, {}, 'first', 'first-item')]
+      : n === 2 ? [call('reply', { text: 'answer to the new message' }, 'second', 'second-item')]
+        : [call('stop', {}, 'last', 'last-item')],
+    execute: ({ name }) => success('ack', { terminate: name === 'stop', finishTurn: name === 'reply' }),
+    event: async ({ event }, runtime) => {
+      if (event.type === 'turn_end' && !appended) {
+        appended = true;
+        await runtime.handle('append', { sessionId: 'group-a', additions: [user('new external answer', 'new-source')] });
+      }
+    },
+  });
+  await h.initialize('group-a', ['reply', 'stop'].map(tool), { requireDelivery: true });
+  const result = await h.prompt();
+  assert.equal(h.wires.length, 2);
+  assert.equal(h.calls[1].arguments.text, 'answer to the new message');
+  assert.ok(JSON.stringify(h.wires[1]).includes('new external answer'));
+  assert.equal(result.queuedMessageCount, 0);
+  assert.equal(result.deliveryStatus, 'sent');
+  assert.equal(result.error, null);
+});
+
 test('successful image delivery and explicit stop or wait do not trigger a text resend', async (t) => {
   for (const name of ['send_emoji', 'reply', 'stop', 'wait']) {
     const h = harness(t, { response: (n) => n === 1 ? [call(name, {}, 'effect', 'effect-item')] : [answer('internal follow-up')],

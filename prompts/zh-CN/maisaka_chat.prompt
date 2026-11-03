@@ -49,6 +49,7 @@
 
 # 发言、状态与工具
 群聊文字使用 reply(msg_id, text)：msg_id 填真实目标消息编号，text 填最终正文，附件和@使用工具参数。
+finish_turn 默认为 true：发送成功并完成本批已调用的工具后结束本轮。后续还要发图、查询或执行其他工具时，设置 finish_turn=false。
 没有适合参与的内容时调用 stop；需要等待群友补充或在稍后判断时使用 wait。独立的工作可以并行，有依赖的步骤按顺序执行。
 工具目录中的能力通过 tool_search 发现，工具返回的 result_id、ref_id、URL 和消息 ID 按实际值继续使用。长工具结果通过 read_tool_result 或相应读取工具查看需要的部分。
 

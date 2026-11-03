@@ -19,6 +19,7 @@ import uuid
 from src.common.paths import get_instance_root
 from src.common.logger import get_logger
 from src.common.prompt_i18n import load_prompt
+from src.chat.utils.utils import is_bot_self
 from src.config.config import global_config
 from src.services.pi_harness.config import export_harness_config
 from src.core.tooling import ToolInvocation
@@ -79,12 +80,17 @@ async def history_message(history: Any, event_id: str) -> Dict[str, Any]:
                 )
     if not content:
         content = [{"type": "text", "text": history.processed_plain_text}]
-    return {
+    payload = {
         "role": "user",
         "content": content,
         "hostEventId": event_id,
         "timestamp": int(history.timestamp.timestamp() * 1000),
     }
+    if isinstance(history, SessionBackedMessage):
+        source = history.original_message
+        if is_bot_self(source.platform, source.message_info.user_info.user_id):
+            payload["hostSelfEcho"] = True
+    return payload
 
 
 def source_fingerprint(message: Any) -> str:
@@ -575,7 +581,15 @@ class PiGroupRunner:
             # in debounce. Ordinary group arrivals enter at this safe boundary.
             # This is business intake, not a durability ACK for model history.
             if self.runtime._has_pending_messages():
-                await self.engine._ingest_pending_messages()
+                messages = await self.engine._ingest_pending_messages()
+                stopping = any(
+                    part.get("type") == "toolCall" and part.get("name") == "stop"
+                    for part in event.get("message", {}).get("content", [])
+                )
+                if stopping and any(
+                    not is_bot_self(message.platform, message.message_info.user_info.user_id) for message in messages
+                ):
+                    self.runtime._enter_running_state()
             await self.ingest()
         return {}
 
@@ -609,6 +623,7 @@ class PiGroupRunner:
         media_event_ids = []
         search_observation = None
         post_execution = None
+        finish_turn = False
         try:
             if name == "subagent":
                 value = await self.subagents.delegate(
@@ -756,6 +771,11 @@ class PiGroupRunner:
                 if child is None:
                     post_execution = (invocation, result, self._specs.get(name))
                 text, success = result.get_history_content(), result.success
+                if (
+                    child is None and name == "reply" and success
+                    and binding["provider_name"] == "maisaka_builtin" and binding["provider_type"] == "builtin"
+                ):
+                    finish_turn = result.metadata.get("finish_turn") is True
                 if name == "tool_search":
                     search_observation = {
                         key: result.metadata.get(key, [])
@@ -783,6 +803,7 @@ class PiGroupRunner:
                 },
                 "isError": not success,
                 "terminate": terminate,
+                "finishTurn": finish_turn,
             }
             if terminate:
                 self._terminated_sessions.add(session_id)
