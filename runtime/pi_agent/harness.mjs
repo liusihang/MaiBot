@@ -1,6 +1,7 @@
 /** Isolated official Pi harness. Scheduling, tool validation, transcript and replay are SDK-owned. */
 import { mkdirSync } from 'node:fs';
 import { createAgentSession, DefaultResourceLoader, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { createImageProjection } from './media-context.mjs';
 
 export async function createIsolatedSession({ cwd, agentDir, modelRuntime, resolved, sessionManager, system, customTools = [], extensionFactory }) {
   mkdirSync(cwd, { recursive: true });
@@ -46,5 +47,9 @@ export async function createIsolatedSession({ cwd, agentDir, modelRuntime, resol
     });
   }
   await created.session.bindExtensions({ mode: 'rpc', onError: (error) => { throw new Error(`Pi extension failed: ${error.error}`); } });
+  const transform = created.session.agent.transformContext;
+  const projectImages = createImageProjection();
+  created.session.agent.transformContext = async (messages, signal) => projectImages(
+    transform ? await transform(messages, signal) : messages, signal);
   return created.session;
 }
