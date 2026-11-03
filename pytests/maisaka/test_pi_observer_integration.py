@@ -1,11 +1,85 @@
 from unittest.mock import AsyncMock, Mock
 
+import sqlite3
+
 import pytest
 
 from src.core.tooling import ToolExecutionResult, ToolSpec
 from src.maisaka.pi_runtime import observer
 from src.maisaka.pi_runtime.runner import PiGroupRunner
 from pytests.maisaka.test_pi_harness_host import engine, history, wire_server
+
+
+@pytest.mark.asyncio
+async def test_tool_receipt_survives_auxiliary_database_record_failure(monkeypatch, tmp_path):
+    """完成的 stop 不因后台工具记录写入失败而变为未知并锁死后续轮次。"""
+    from src.maisaka.builtin_tool.stop import get_tool_spec
+
+    monkeypatch.setattr(observer.PiObserver, "handle", AsyncMock())
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([("stop", {}), ("stop", {})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        host._runtime._tool_registry.list_tools.return_value = [get_tool_spec()]
+
+        async def invoke(invocation, context, **kwargs):
+            invoked.append(invocation)
+            return ToolExecutionResult("stop", True, content="Stopped", metadata={"pause_execution": True})
+
+        host._runtime._tool_registry.invoke = invoke
+        host._record_tool_execution_effects.side_effect = sqlite3.OperationalError("database is locked")
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            await runner._db("assert_no_unresolved_executions", runner.session_id)
+            receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            assert receipt.status == "succeeded" and receipt.result["terminate"]
+            await runner.run([])
+            assert len(requests) == len(invoked) == 2
+            assert (await runner.bridge.request("state", sessionId=runner.session_id))["unresolvedToolCalls"] == []
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_builtin_stop_recovers_without_redispatch(monkeypatch, tmp_path):
+    """stop 的回执写入中断后，重启仅核对本地控制，不重新执行或发送。"""
+    from src.maisaka.builtin_tool.stop import get_tool_spec
+
+    monkeypatch.setattr(observer.PiObserver, "handle", AsyncMock())
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([("stop", {}), ("stop", {})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        host._runtime._tool_registry.list_tools.return_value = [get_tool_spec()]
+
+        async def invoke(invocation, context, **kwargs):
+            invoked.append(invocation)
+            return ToolExecutionResult("stop", True, content="Stopped", metadata={"pause_execution": True})
+
+        host._runtime._tool_registry.invoke = invoke
+        first = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await first.ensure_initialized()
+            first.ledger.record_tool_outcome = Mock(side_effect=sqlite3.OperationalError("database is locked"))
+            with pytest.raises(RuntimeError, match="requires reconciliation"):
+                await first.run([])
+            assert (await first._db("lookup_tool_execution", first.session_id, "call-1")).status == "unknown"
+        finally:
+            await first.close()
+
+        restored = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await restored.ensure_initialized()
+            await restored._db("assert_no_unresolved_executions", restored.session_id)
+            receipt = await restored._db("lookup_tool_execution", restored.session_id, "call-1")
+            assert receipt.status == "failed" and receipt.result["isError"]
+            assert (await restored.bridge.request("state", sessionId=restored.session_id))["unresolvedToolCalls"] == []
+            assert len(invoked) == len(requests) == 1
+            await restored.run([])
+            assert len(invoked) == len(requests) == 2
+        finally:
+            await restored.close()
 
 
 @pytest.mark.asyncio

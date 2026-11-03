@@ -247,6 +247,33 @@ class PiGroupRunner:
         results = []
         for call in state.get("unresolvedToolCalls", []):
             receipt = await self._db("lookup_tool_execution", self.session_id, call["id"])
+            binding = self._bindings.get(call["name"], {})
+            if (
+                receipt is not None
+                and receipt.status in {"executing", "unknown"}
+                and call["name"] == "stop"
+                and json.loads(receipt.intent_json).get("name") == "stop"
+                and binding.get("provider_name") == "maisaka_builtin"
+                and binding.get("provider_type") == "builtin"
+            ):
+                # stop only ends the local turn. An interrupted receipt cannot
+                # imply an uncertain QQ send; settle it as interrupted without
+                # redispatching it. All external-effect tools retain their fence.
+                receipt = await self._db(
+                    "record_tool_outcome",
+                    self.session_id,
+                    call["id"],
+                    {
+                        "content": [{
+                            "type": "text",
+                            "text": "The previous local stop was interrupted; no control was replayed.",
+                        }],
+                        "isError": True,
+                        "terminate": True,
+                    },
+                    status="failed",
+                )
+                logger.warning(f"[{self.session_id}] 已核对中断的本地 stop，保留失败回执并解除停顿: {call['id']}")
             if receipt is not None and receipt.status in {"succeeded", "failed"}:
                 value = receipt.result
                 results.append(
@@ -543,6 +570,7 @@ class PiGroupRunner:
         media_content = []
         media_event_ids = []
         search_observation = None
+        post_execution = None
         try:
             if name == "subagent":
                 value = await self.subagents.delegate(
@@ -688,7 +716,7 @@ class PiGroupRunner:
                             source.update(result_id=search["result_id"], reader_tool="gpt_read_search_result")
                     child["sources"].append(source)
                 if child is None:
-                    await self.engine._record_tool_execution_effects(invocation, result, self._specs.get(name))
+                    post_execution = (invocation, result, self._specs.get(name))
                 text, success = result.get_history_content(), result.success
                 if name == "tool_search":
                     search_observation = {
@@ -723,9 +751,18 @@ class PiGroupRunner:
             await self._db(
                 "record_tool_outcome", session_id, call_id, callback_result, status="succeeded" if success else "failed"
             )
+            if post_execution is not None:
+                try:
+                    await self.engine._record_tool_execution_effects(*post_execution)
+                except Exception:
+                    # Monitor/history/feedback writes observe a completed tool;
+                    # they cannot turn its durable receipt into an unknown send.
+                    logger.exception(f"[{session_id}] 工具回执已保存，后台后处理失败: {name} {call_id}")
             return callback_result
         except BaseException:
-            await asyncio.shield(self._db("mark_tool_execution_unknown", session_id, call_id))
+            receipt = await asyncio.shield(self._db("lookup_tool_execution", session_id, call_id))
+            if receipt is not None and receipt.status in {"executing", "unknown"}:
+                await asyncio.shield(self._db("mark_tool_execution_unknown", session_id, call_id))
             raise
 
     async def _run_child(
