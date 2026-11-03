@@ -3,7 +3,7 @@
 from contextlib import contextmanager
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -732,6 +732,93 @@ async def test_host_explicit_sdk_compaction_and_archive_remain_reachable(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_slow_post_reply_maintenance_yields_to_the_next_main_turn(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    entered, release, interrupted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    host, effects = engine()
+    with wire_server([("reply", {"text": "first answer"}), None, ("reply", {"text": "second answer"}), None]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+
+        async def slow_maintenance():
+            assert runner.ledger.pending_turn(runner.session_id) is None
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                interrupted.set()
+                raise
+
+        monkeypatch.setattr(runner, "_maintain_context", slow_maintenance)
+        first = asyncio.create_task(runner.run([]))
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            assert first.done(), "Post-reply maintenance still occupies the main run loop"
+            await first
+            host._runtime._chat_history.append(history("next real question", "next-question"))
+            await asyncio.wait_for(runner.run([]), 10)
+            assert interrupted.is_set()
+            assert [item.arguments["text"] for item in effects] == ["first answer", "second answer"]
+            assert len(requests) == 4
+        finally:
+            release.set()
+            await first
+            await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_ingress_interrupts_real_sdk_summary_without_replaying_delivery(monkeypatch, tmp_path):
+    from src.config.config import global_config
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 51200)
+    entered, release = Event(), Event()
+    host, effects = engine()
+    host._build_history_message = AsyncMock(return_value=history("new question while summarizing", "new-source"))
+
+    def slow_summary(request, requests):
+        assert "Summarize this group conversation faithfully" in json.dumps(request)
+        entered.set()
+        release.wait(20)
+        return {"text": "late summary must not replace the conversation"}
+
+    with wire_server([
+        ("reply", {"text": "first answer"}), None, slow_summary,
+        ("reply", {"text": "new answer"}), None,
+    ], prompt_tokens=52000) as (config, requests):
+        config["model_task_config"]["memory"] = {"model_list": ["mock"], "max_tokens": 1000}
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host._runtime._chat_history.append(history("original source preserved across cancellation", "old-source"))
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            assert await asyncio.to_thread(entered.wait, 10)
+            summary_task = runner._maintenance_task
+            state = await runner.bridge.request("state", sessionId=runner.session_id)
+            assert state["isCompacting"]
+            await asyncio.wait_for(runner.record_pending(original_source_message()), 5)
+            assert summary_task.cancelled()
+            assert runner._failed_compaction_head is None
+            state = await runner.bridge.request("state", sessionId=runner.session_id)
+            assert not state["isCompacting"]
+            assert state["unresolvedToolCalls"] == []
+            assert runner.ledger.pending_turn(runner.session_id) is None
+
+            schedule = Mock()
+            monkeypatch.setattr(runner, "_schedule_context_maintenance", schedule)
+            await asyncio.wait_for(runner.run([]), 10)
+            assert not release.is_set(), "Main reply waited for the old summary provider"
+            assert [item.arguments["text"] for item in effects] == ["first answer", "new answer"]
+            assert "original source preserved across cancellation" in json.dumps(requests[3])
+            assert "new question while summarizing" in json.dumps(requests[3])
+            assert "late summary must not replace" not in json.dumps(requests[3])
+            schedule.assert_called_once()  # The next completed turn retries maintenance.
+        finally:
+            release.set()
+            await runner.close()
+
+
+@pytest.mark.asyncio
 async def test_high_watermark_compacts_after_reply_and_durable_completion(monkeypatch, tmp_path):
     from src.config.config import global_config
 
@@ -752,6 +839,7 @@ async def test_high_watermark_compacts_after_reply_and_durable_completion(monkey
         runner = PiGroupRunner(host, data_dir=tmp_path)
         try:
             await runner.run([])
+            await runner._maintenance_task
             assert len(requests) == 3
             state = await runner.bridge.request("state", sessionId=runner.session_id)
             assert state["contextTokens"] < 51200
@@ -787,6 +875,7 @@ async def test_post_reply_summary_failure_keeps_the_delivered_turn_complete(monk
 
             monkeypatch.setattr(runner.bridge, "request", request)
             await runner.run([])
+            await runner._maintenance_task
             assert len(requests) == 2
             assert len(effects) == 1 and effects[0].arguments["text"] == "visible answer"
             assert runner.ledger.pending_turn(runner.session_id) is None
