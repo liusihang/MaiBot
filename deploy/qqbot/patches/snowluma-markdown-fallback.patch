@@ -1,0 +1,20 @@
+--- a/codecs/inbound/message_codec.py
++++ b/codecs/inbound/message_codec.py
+@@ -270,12 +270,15 @@
+ 
+             if segment_type == "text":
+                 if text_value := str(segment_data.get("text") or ""):
+-                    # SnowLuma 会在 Markdown 后附加相同正文的 text 兼容段，只消费一次正文。
++                    # NapCat / SnowLuma 可能在 Markdown 后附带排版空白不同的 text 兼容段。
++                    # 只跳过相邻且内容等价的兼容段，Markdown 原文和普通重复文本保持不变。
+                     if segment_index > 0:
+                         previous_segment = message_payload[segment_index - 1]
++                        previous_content = previous_segment["data"].get("content")
+                         if (
+                             previous_segment["type"] == "markdown"
+-                            and previous_segment["data"].get("content") == text_value
++                            and isinstance(previous_content, str)
++                            and previous_content.split() == text_value.split()
+                         ):
+                             continue
+                     converted_segments.append(self._build_text_segment(text_value))

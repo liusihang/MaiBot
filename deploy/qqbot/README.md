@@ -40,6 +40,12 @@ QQ 收发继续使用 [SnowLuma Adapter](https://github.com/Mai-with-u/MaiBot-Sn
 在对应版本的绘图插件目录先执行 `git apply --check <补丁绝对路径>`，通过后再应用。
 保留插件原有 MIT 许可和作者信息。
 
+`patches/snowluma-markdown-fallback.patch` 修复 SnowLuma Adapter 1.1.9 对
+Markdown 正文及其纯文本兼容段的重复接收：相邻两段只差换行或空白时保留 Markdown 正文。
+在适配器目录先执行 `git apply --check <补丁绝对路径>`，通过后再应用。
+回归命令为 `SNOWLUMA_PLUGIN_DIR=<适配器绝对路径> python <test_snowluma_markdown_fallback.py绝对路径>`。
+普通文本复读、段内重复和不同内容均保留；补丁沿用适配器原许可与作者信息。
+
 ## 提示词和配置
 
 `custom_prompts/zh-CN/` 保存中文部署提示词，包括主 Agent、参与判断和记忆摘要。
