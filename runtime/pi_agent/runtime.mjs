@@ -3,11 +3,12 @@
  */
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { calculateContextTokens, estimateTokens, SessionManager } from '@earendil-works/pi-coding-agent';
 import { createIsolatedSession } from './harness.mjs';
 import { createHostModelRuntime, resolveTaskModel } from './provider.mjs';
+import { validateSessionLog } from './session-log.mjs';
 
 const clone = (value) => structuredClone(value);
 const canonical = (value) => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
@@ -191,19 +192,7 @@ class BusinessSession {
       // Pi's loader tolerates malformed trailing records. A host ACK archive must
       // instead fail closed on a torn append, never silently forget accepted input.
       if (existsSync(file)) {
-        const data = readFileSync(file, 'utf8');
-        check(data.endsWith('\n'), 'CORRUPT_SESSION', 'Incomplete session append requires explicit recovery');
-        try {
-          const records = data.trimEnd().split('\n').map((line) => JSON.parse(line));
-          check(records[0]?.type === 'session', 'CORRUPT_SESSION', 'Session header is missing');
-          const ids = new Set();
-          for (const entry of records.slice(1)) {
-            check(typeof entry.id === 'string' && !ids.has(entry.id)
-              && (entry.parentId === null || ids.has(entry.parentId)),
-            'CORRUPT_SESSION', 'Session entry IDs or ancestry are invalid');
-            ids.add(entry.id);
-          }
-        } catch { throw new RuntimeError('CORRUPT_SESSION', 'Invalid session JSONL requires explicit recovery'); }
+        await validateSessionLog(file);
       }
       this.manager = SessionManager.open(file, dir, cwd);
       this.installDurabilityGuard();
