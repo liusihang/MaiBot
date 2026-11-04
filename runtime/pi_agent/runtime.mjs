@@ -447,6 +447,27 @@ class BusinessSession {
     return [...pending.values()].filter(Boolean);
   }
 
+  pendingToolObservations() {
+    const entries = this.manager?.getEntries() ?? [];
+    const resolved = new Set(entries.filter((e) => e.customType === 'maibot.tool_resolved').map((e) => e.data.callId));
+    return entries.flatMap((entry) => {
+      const m = entry.type === 'message' && entry.message;
+      return m?.role === 'toolResult' && m.details?.execution_outcome === 'unknown' && !resolved.has(m.toolCallId)
+        ? [{ id: m.toolCallId, name: m.toolName }] : [];
+    });
+  }
+
+  acceptToolResult(name, result) {
+    check(result && Array.isArray(result.content), 'INVALID_TOOL_RESULT', 'Business tool returned no content array');
+    if (this.params.requireDelivery && !result.isError) {
+      if (['reply', 'send_emoji', 'send_web_image', 'gemini_generate_image', 'gemini_selfie', 'gemini_selfie_video'].includes(name)) this.deliveryStatus = 'sent';
+      else if (['stop', 'wait'].includes(name) && this.deliveryStatus !== 'sent') this.deliveryStatus = name === 'stop' ? 'stopped' : 'waiting';
+    }
+    if (this.params.requireDelivery && name === 'reply') this.finishAfterReply = !result.isError && result.finishTurn === true;
+    if (result.terminate === true) { this.terminated = true; this.terminalTool = name; }
+    return clone(result);
+  }
+
   async executeTool(name, toolCallId, args, signal) {
     this.healthy();
     const anchor = this.manager.getEntries().findLast((entry) => entry.type === 'message' && entry.message.role === 'assistant'
@@ -455,19 +476,27 @@ class BusinessSession {
     try {
       const result = await this.callback('tool', { sessionId: this.id, toolCallId, name, arguments: clone(args), messageId: anchor.id }, signal);
       this.healthy();
-      check(result && Array.isArray(result.content), 'INVALID_TOOL_RESULT', 'Business tool returned no content array');
-      if (this.params.requireDelivery && !result.isError) {
-        if (['reply', 'send_emoji', 'send_web_image', 'gemini_generate_image', 'gemini_selfie', 'gemini_selfie_video'].includes(name)) this.deliveryStatus = 'sent';
-        else if (['stop', 'wait'].includes(name) && this.deliveryStatus !== 'sent') this.deliveryStatus = name === 'stop' ? 'stopped' : 'waiting';
-      }
-      if (this.params.requireDelivery && name === 'reply') this.finishAfterReply = !result.isError && result.finishTurn === true;
-      if (result.terminate === true) { this.terminated = true; this.terminalTool = name; }
-      return clone(result);
+      return this.acceptToolResult(name, result);
     } catch (error) {
-      this.terminated = true;
-      this.lastError = `Business tool outcome requires reconciliation: ${toolCallId}`;
-      this.manager.appendCustomEntry('maibot.tool_unknown', { callId: toolCallId, name, messageId: anchor.id });
-      throw error;
+      this.healthy();
+      if (signal?.aborted) {
+        // An aborted run stops here; the host supplies the interrupted tool's
+        // observation before the next run, without redispatching its effect.
+        this.manager.appendCustomEntry('maibot.tool_unknown', { callId: toolCallId, name, messageId: anchor.id });
+        throw error;
+      }
+      try {
+        const receipt = await this.callback('authorize', { sessionId: this.id, toolCallId, name }, signal);
+        this.healthy();
+        if (receipt?.toolResult) return this.acceptToolResult(name, receipt.toolResult);
+      } catch {
+        this.healthy();
+        signal?.throwIfAborted();
+      }
+      // Tool/bridge errors are model-visible observations, not a session stop.
+      // The host ledger owns duplicate-effect checks when delivery is uncertain.
+      return { content: [{ type: 'text', text: `${name} failed: ${error.message ?? String(error)}. Execution was not confirmed; check existing results before repeating this operation.` }],
+        details: { execution_outcome: 'unknown' }, isError: true };
     }
   }
 
@@ -525,6 +554,7 @@ class BusinessSession {
       pressureIsHardBound: false,
       isRunning: this.running, isCompacting: this.transition, paused: !this.running && unresolved.length > 0,
       unresolvedToolCalls: unresolved.map(({ id, name }) => ({ id, name })), terminatedByTool: this.terminated,
+      pendingToolObservations: this.pendingToolObservations(),
       error: this.lastError ?? ({ error: 'Pi provider request did not complete successfully',
         aborted: 'Pi provider request was canceled or timed out', length: 'Pi response reached its output limit before completion' }[lastAssistant?.stopReason] ?? null),
       poisoned: this.poisoned,
@@ -584,13 +614,16 @@ class BusinessSession {
     check(!this.running && !this.transition, 'SESSION_BUSY', 'Tool recovery requires an idle session');
     check(Array.isArray(results), 'INVALID_TOOL_RESULT', 'results must be an array');
     const calls = new Map(this.unresolvedCalls().map((call) => [call.id, call]));
+    // An observed bridge error can later acquire a confirmed receipt without
+    // having paused the session or replacing its original toolResult.
+    for (const call of this.pendingToolObservations()) calls.set(call.id, call);
     for (const result of results) check(result?.role === 'toolResult' && calls.get(result.toolCallId)?.name === result.toolName
       && Array.isArray(result.content) && typeof result.isError === 'boolean', 'INVALID_TOOL_RESULT', 'Recovery result must match an unresolved call and known receipt');
     for (const result of results) {
       const exists = this.manager.getEntries().some((entry) => entry.type === 'message' && entry.message.role === 'toolResult'
         && entry.message.toolCallId === result.toolCallId);
       if (exists) this.manager.appendCustomMessageEntry('maibot.receipt_reconciled',
-        [{ type: 'text', text: `Durable business receipt for ${result.toolName} (${result.toolCallId}):` }, ...clone(result.content)], false,
+        [{ type: 'text', text: `Durable business receipt for ${result.toolName}:` }, ...clone(result.content)], false,
         { toolCallId: result.toolCallId, isError: result.isError });
       else this.manager.appendMessage(clone(result));
       this.manager.appendCustomEntry('maibot.tool_resolved', { callId: result.toolCallId });

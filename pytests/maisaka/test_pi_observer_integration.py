@@ -48,7 +48,7 @@ async def test_interrupted_builtin_stop_recovers_without_redispatch(monkeypatch,
 
     monkeypatch.setattr(observer.PiObserver, "handle", AsyncMock())
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
-    with wire_server([("stop", {}), ("stop", {})]) as (config, requests):
+    with wire_server([("stop", {}), None, ("stop", {})]) as (config, requests):
         monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
         host, invoked = engine()
         host._runtime._tool_registry.list_tools.return_value = [get_tool_spec()]
@@ -62,9 +62,9 @@ async def test_interrupted_builtin_stop_recovers_without_redispatch(monkeypatch,
         try:
             await first.ensure_initialized()
             first.ledger.record_tool_outcome = Mock(side_effect=sqlite3.OperationalError("database is locked"))
-            with pytest.raises(RuntimeError, match="requires reconciliation"):
-                await first.run([])
-            assert (await first._db("lookup_tool_execution", first.session_id, "call-1")).status == "unknown"
+            await first.run([])
+            assert (await first._db("lookup_tool_execution", first.session_id, "call-1")).status in {"executing", "unknown"}
+            assert not (await first.bridge.request("state", sessionId=first.session_id))["paused"]
         finally:
             await first.close()
 
@@ -75,9 +75,9 @@ async def test_interrupted_builtin_stop_recovers_without_redispatch(monkeypatch,
             receipt = await restored._db("lookup_tool_execution", restored.session_id, "call-1")
             assert receipt.status == "failed" and receipt.result["isError"]
             assert (await restored.bridge.request("state", sessionId=restored.session_id))["unresolvedToolCalls"] == []
-            assert len(invoked) == len(requests) == 1
+            assert len(invoked) == 1 and len(requests) == 2
             await restored.run([])
-            assert len(invoked) == len(requests) == 2
+            assert len(invoked) == 2 and len(requests) == 3
         finally:
             await restored.close()
 

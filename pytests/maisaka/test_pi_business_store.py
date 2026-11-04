@@ -22,18 +22,22 @@ def test_inbox_is_business_delivery_not_second_transcript(tmp_path: Path):
     assert not hasattr(store, "commit_compaction")
 
 
-def test_unknown_side_effect_fences_new_calls_and_restart(tmp_path: Path):
+def test_unknown_effect_is_scoped_to_its_operation_not_the_chat(tmp_path: Path):
     store = BusinessStore(tmp_path / "business.sqlite3")
-    store.prepare_tool_execution("group", "call", {"name": "reply", "args": {"text": "hi"}})
+    intent = {"name": "reply", "arguments": {"msg_id": "old", "text": "command"}}
+    store.prepare_tool_execution("group", "call", intent)
     assert store.claim_tool_execution("group", "call")
     store.mark_tool_execution_unknown("group", "call", observation={"sent_message_ids": ["receipt-1"]})
     restored = BusinessStore(tmp_path / "business.sqlite3")
-    with pytest.raises(LedgerConflict):
-        restored.assert_no_unresolved_executions("group")
-    restored.prepare_tool_execution("group", "new-call", {"name": "reply"})
-    assert not restored.claim_tool_execution("group", "new-call")
+    restored.prepare_tool_execution("group", "new-call", {"name": "reply", "arguments": {"text": "new topic"}})
+    assert restored.claim_tool_execution("group", "new-call")
+    assert restored.find_pending_effect("group", "new-call", intent).call_id == "call"
+    assert restored.find_pending_effect("other", "new-call", intent) is None
+    assert restored.find_pending_effect("group", "new-call", {"name": "web_fetch", "arguments": {}}) is None
+    assert restored.find_pending_effect("group", "new-call", {
+        "name": "reply", "arguments": {**intent["arguments"], "finish_turn": False},
+    }).call_id == "call"
     assert restored.lookup_tool_execution("group", "call").result == {"sent_message_ids": ["receipt-1"]}
-    restored.assert_no_unresolved_executions("other")
 
 
 def test_known_receipt_can_recover_without_redispatch(tmp_path: Path):

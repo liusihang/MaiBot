@@ -315,8 +315,33 @@ async def test_ignored_messages_persist_in_real_sdk_and_restart_once(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_evidence_failure_after_confirmed_send_preserves_success(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([("reply", {"text": "confirmed message"})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        next(spec for spec in host._runtime._tool_registry.list_tools.return_value if spec.name == "reply").provider_type = "builtin"
+        host._runtime._tool_registry.invoke = AsyncMock(return_value=ToolExecutionResult(
+            "reply", True, content="message sent", metadata={"finish_turn": True, "sent_message_ids": ["sent-1"]}
+        ))
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.ensure_initialized()
+            monkeypatch.setattr(runner.evidence, "capture", AsyncMock(side_effect=OSError("evidence unavailable")))
+            await runner.run([])
+            receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            assert receipt.status == "succeeded"
+            assert receipt.result["isError"] is False
+            assert receipt.result["details"]["sent_message_ids"] == ["sent-1"]
+            assert len(requests) == 1
+            host._runtime._tool_registry.invoke.assert_awaited_once()
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("failure", ["exception", "partial_send"])
-async def test_actual_registry_unknown_send_stops_model_and_restart(monkeypatch, tmp_path, failure):
+async def test_unknown_send_blocks_only_same_effect_and_allows_chat_after_restart(monkeypatch, tmp_path, failure):
     from src.core.tooling import ToolRegistry
 
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
@@ -327,25 +352,28 @@ async def test_actual_registry_unknown_send_stops_model_and_restart(monkeypatch,
         provider_type = "builtin"
 
         async def list_tools(self, context):
-            return [
-                ToolSpec(
-                    name="reply",
-                    description="reply",
-                    parameters_schema={"type": "object"},
-                    provider_name=self.provider_name,
-                    provider_type=self.provider_type,
-                )
-            ]
+            return [ToolSpec(name=name, description=name, parameters_schema={"type": "object"},
+                             provider_name=self.provider_name, provider_type=self.provider_type)
+                    for name in ("reply", "web_fetch")]
 
         async def invoke(self, invocation, context):
-            effects.append(invocation.call_id)
-            if failure == "exception":
-                raise OSError("fake send happened, acknowledgement lost")
-            return ToolExecutionResult(
-                "reply", False, error_message="second segment failed", metadata={"sent_message_ids": ["sent-1"]}
-            )
+            effects.append(invocation)
+            if invocation.tool_name == "reply" and invocation.arguments["text"] == "command":
+                if failure == "exception":
+                    raise OSError("acknowledgement lost after sending")
+                return ToolExecutionResult("reply", False, error_message="second segment failed",
+                                           metadata={"sent_message_ids": ["sent-1"]})
+            return ToolExecutionResult(invocation.tool_name, True, content="ok",
+                                       metadata={"finish_turn": invocation.tool_name == "reply"})
 
-    with wire_server([("reply", {"text": "message"})]) as (config, requests):
+    original = {"msg_id": "old-question", "text": "command"}
+    with wire_server([
+        ("reply", original),
+        ("reply", {**original, "finish_turn": False}),
+        ("web_fetch", {"url": "https://example.com"}),
+        ("reply", {"msg_id": "new-question", "text": "continue chatting"}),
+        ("reply", {"msg_id": "later-question", "text": "after restart"}),
+    ]) as (config, requests):
         monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
         host, _ = engine()
         registry = ToolRegistry()
@@ -353,24 +381,44 @@ async def test_actual_registry_unknown_send_stops_model_and_restart(monkeypatch,
         host._runtime._tool_registry = registry
         runner = PiGroupRunner(host, data_dir=tmp_path)
         try:
-            with pytest.raises(RuntimeError):
-                await runner.run([])
-            assert effects == ["call-1"]
-            assert len(requests) == 1
+            await runner.run([])
+            assert len(requests) == 4
+            assert [item.tool_name for item in effects] == ["reply", "web_fetch", "reply"]
             receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
             assert receipt.status == "unknown"
+            assert receipt.result["isError"] is True
+            assert receipt.result["details"]["execution_outcome"] == "unknown"
             if failure == "partial_send":
-                assert receipt.result["metadata"]["sent_message_ids"] == ["sent-1"]
+                assert "sent-1" in str(receipt.result)
+            duplicate = await runner._db("lookup_tool_execution", runner.session_id, "call-2")
+            assert duplicate.status == "failed"
+            assert duplicate.result["details"]["execution_outcome"] == "not_executed"
+            if failure == "exception":
+                assert "acknowledgement lost" in json.dumps(requests[1])
         finally:
             await runner.close()
+        from pathlib import Path
+        import subprocess
+
+        session_file = next((tmp_path / "sessions").glob("*.jsonl"))
+        append_legacy_marker = """import {SessionManager} from '@earendil-works/pi-coding-agent';
+import {dirname} from 'node:path';
+const file=process.argv[1];
+SessionManager.open(file,dirname(file),process.cwd()).appendCustomEntry(
+  'maibot.tool_unknown',{callId:'call-1',name:'reply'});"""
+        process = await asyncio.to_thread(
+            subprocess.run, ["node", "--input-type=module", "-e", append_legacy_marker, str(session_file)],
+            cwd=Path(__file__).resolve().parents[2] / "runtime/pi_agent", capture_output=True, text=True,
+        )
+        assert process.returncode == 0, process.stderr
         restored = PiGroupRunner(host, data_dir=tmp_path)
         try:
-            await restored.ensure_initialized()
-            await restored.restore_pending_turn()
-            host._runtime._queue_proactive_turn.assert_not_called()
-            with pytest.raises(RuntimeError):
-                await restored.run([])
-            assert effects == ["call-1"] and len(requests) == 1
+            await restored.run([])
+            assert len(requests) == 5
+            assert effects[-1].arguments["text"] == "after restart"
+            assert len(effects) == 4
+            state = await restored.bridge.request("state", sessionId=restored.session_id)
+            assert not state["paused"] and state["error"] is None
         finally:
             await restored.close()
 
@@ -498,15 +546,11 @@ async def test_generic_emoji_media_receipt_survives_lost_ack_and_restart(monkeyp
         if lose_ack:
             monkeypatch.setattr(runner.bridge, "_send", lose_completed_tool_ack)
         try:
-            if lose_ack:
-                with pytest.raises(RuntimeError):
-                    await runner.run([])
-            else:
-                await runner.run([])
+            await runner.run([])
             receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
             assert receipt.status == "succeeded"
             assert receipt.result["content"][-1] == {"type": "image", "data": image_data, "mimeType": "image/png"}
-            assert len(effects) == 1 and len(requests) == (1 if lose_ack else 2)
+            assert len(effects) == 1 and len(requests) == 2
             before = requests[-1]["messages"]
         finally:
             await runner.close()
@@ -531,14 +575,10 @@ async def test_generic_emoji_media_receipt_survives_lost_ack_and_restart(monkeyp
                 and entry["message"].get("toolCallId") == "call-1"
             ]
             image_part = {"type": "image", "data": image_data, "mimeType": "image/png"}
-            if lose_ack:
-                # Keep the original SDK error result unchanged; reconcile the
-                # already-known receipt append-only rather than rewriting history.
-                reconciled = [entry for entry in entries if entry.get("customType") == "maibot.receipt_reconciled"]
-                assert len(reconciled) == 1 and image_part in reconciled[0]["content"]
-                assert all(result["isError"] is True for result in results)
-            else:
-                assert len(results) == 1 and image_part in results[0]["content"]
+            # A read-only receipt lookup recovers the lost IPC ACK immediately;
+            # the original tool is not re-executed and its image appears once.
+            assert len(results) == 1 and image_part in results[0]["content"]
+            assert results[0]["isError"] is False
         finally:
             await restored.close()
 
@@ -734,9 +774,9 @@ async def test_real_hot_tool_rebinding_rejects_before_any_effect(monkeypatch, tm
                 specs[0].provider_name = "different-owner"
             else:
                 specs.pop(0)
-            with pytest.raises(RuntimeError):
-                await runner.run([])
-            assert not invoked and len(requests) == 1
+            await runner.run([])
+            assert not invoked and len(requests) == 2
+            assert not (await runner.bridge.request("state", sessionId=runner.session_id))["paused"]
             assert await runner._db("lookup_tool_execution", runner.session_id, "call-1") is None
             await runner._db("assert_no_unresolved_executions", runner.session_id)
         finally:
@@ -1288,7 +1328,7 @@ async def test_local_search_timeout_is_failed_receipt_and_allows_reply(monkeypat
 @pytest.mark.asyncio
 @pytest.mark.parametrize("not_executed", [True, False])
 @pytest.mark.parametrize("name", ["remember_memory", "reply"])
-async def test_builtin_validation_can_continue_but_uncertain_write_stays_paused(monkeypatch, tmp_path, not_executed, name):
+async def test_builtin_failed_results_allow_self_correction_with_or_without_metadata(monkeypatch, tmp_path, not_executed, name):
     from src.maisaka.builtin_tool.remember_memory import get_tool_spec as memory_spec
     from src.maisaka.builtin_tool.reply import get_tool_spec as reply_spec
     from src.core.tooling import ToolAvailabilityContext
@@ -1317,20 +1357,13 @@ async def test_builtin_validation_can_continue_but_uncertain_write_stays_paused(
         host._runtime._tool_registry.invoke = invoke
         runner = PiGroupRunner(host, data_dir=tmp_path)
         try:
-            if not_executed:
-                await runner.run([])
-                receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
-                assert receipt.status == "failed"
-                assert receipt.result["isError"] is True
-                assert receipt.result["content"][0]["text"] == "target not found"
-                await runner._db("assert_no_unresolved_executions", runner.session_id)
-                assert [item.tool_name for item in invoked] == [name, "reply"]
-            else:
-                with pytest.raises(RuntimeError, match="paused"):
-                    await runner.run([])
-                receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
-                assert receipt.status == "unknown"
-                assert [item.tool_name for item in invoked] == [name]
+            await runner.run([])
+            receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            assert receipt.status == "failed"
+            assert receipt.result["isError"] is True
+            assert receipt.result["content"][0]["text"] == "target not found"
+            assert [item.tool_name for item in invoked] == [name, "reply"]
+            assert len(requests) >= 2
         finally:
             await runner.close()
 
@@ -1388,7 +1421,7 @@ async def test_child_browser_navigation_timeout_returns_error_and_keeps_research
     ("browser_navigate", "other-server", "https://example.org"),
     ("browser_navigate", "playwright", "javascript:submitForm()"),
 ])
-async def test_navigation_recovery_does_not_cover_scripts_or_other_providers(tmp_path, name, server, url):
+async def test_other_provider_failed_results_return_to_child_without_pausing(tmp_path, name, server, url):
     from src.core.tooling import ToolAnnotation
     from src.maisaka.pi_runtime.runner import pi_tool
 
@@ -1408,10 +1441,10 @@ async def test_navigation_recovery_does_not_cover_scripts_or_other_providers(tmp
         runner._tools = {name: pi_tool(spec.to_llm_definition())}
         runner._bindings = {name: spec.execution_contract()}
         runner._children[child] = {"tools": [name]}
-        with pytest.raises(RuntimeError, match="uncertain outcome"):
-            await runner._tool({"sessionId": child, "name": name, "toolCallId": "action-1", "arguments": {"url": url}})
+        result = await runner._tool({"sessionId": child, "name": name, "toolCallId": "action-1", "arguments": {"url": url}})
+        assert result["isError"] is True
         receipt = await runner._db("lookup_tool_execution", child, "action-1")
-        assert receipt.status == "unknown"
+        assert receipt.status == "failed"
     finally:
         runner._children.clear()
         await runner.close()

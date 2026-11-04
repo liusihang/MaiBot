@@ -179,14 +179,31 @@ test('successful image delivery and explicit stop or wait do not trigger a text 
   }
 });
 
-test('uncertain delivery never requests another send', async (t) => {
-  const h = harness(t, { response: () => [call('reply', {}, 'unknown', 'unknown-item')],
-    execute: () => { throw new Error('connection lost after sending'); } });
+test('uncertain delivery returns an error and allows choosing another action', async (t) => {
+  const h = harness(t, { response: (n) => n === 1 ? [call('reply', {}, 'unknown', 'unknown-item')]
+    : [call('stop', {}, 'stop', 'stop-item')],
+    execute: ({name}) => { if (name === 'reply') throw new Error('connection lost after sending');
+      return success('stopped', {terminate:true}); } });
   await h.initialize('group-a', ['reply', 'stop'].map(tool), { requireDelivery: true });
   const result = await h.prompt();
-  assert.equal(result.paused, true);
-  assert.equal(h.wires.length, 1);
-  assert.equal(h.calls.length, 1);
+  assert.equal(result.paused, false);
+  assert.equal(result.error, null);
+  assert.equal(h.wires.length, 2);
+  assert.deepEqual(h.calls.map((c) => c.name), ['reply', 'stop']);
+  assert.ok(JSON.stringify(h.wires[1]).includes('connection lost after sending'));
+});
+
+test('lost tool ACK uses the durable host receipt without retrying delivery', async (t) => {
+  const h = harness(t, {
+    response: () => [call('reply', {text:'one message'}, 'send', 'send-item')],
+    execute: () => { throw new Error('tool ACK lost'); },
+    authorize: ({toolCallId}) => toolCallId ? {allowed:true,toolResult:success('sent receipt', {isError:false,finishTurn:true})}
+      : {allowed:true},
+  });
+  await h.initialize('group-a', [tool('reply')], {requireDelivery:true});
+  const result=await h.prompt();
+  assert.equal(result.paused,false); assert.equal(result.error,null);
+  assert.equal(result.deliveryStatus,'sent'); assert.equal(h.calls.length,1); assert.equal(h.wires.length,1);
 });
 
 test('research sessions keep plain conclusions even when their catalog contains a reply tool', async (t) => {
@@ -332,27 +349,21 @@ test('wait/stop terminates without extra request, preserves pending FIFO and blo
   prefixes(h.wires);
 });
 
-test('known failed tool result persists and continues; unknown effect pauses and receipt recovery never re-executes', async (t) => {
+test('callback errors persist as tool results and allow inference after restart', async (t) => {
   const h = harness(t, { response: (n) => n === 1 ? [call('send', {}, 'a', 'fa')] : undefined,
     execute: async () => { throw new Error('acknowledgement lost after side effect'); } });
   await h.initialize('group-a', [tool('send')]);
-  const paused = await h.prompt();
-  assert.equal(h.wires.length, 1); assert.equal(paused.paused, true);
-  assert.equal(paused.messages.find((m) => m.toolCallId === 'a|fa').isError, true);
-  await assert.rejects(h.prompt('must wait'), { code: 'UNRESOLVED_TOOL_CALLS' });
-  await h.handle('close', { sessionId: 'group-a' }); await h.initialize('group-a', [tool('send')]);
-  assert.equal((await h.state()).paused, true);
-  await h.handle('resolve_tools', { sessionId: 'group-a', results: [{ role: 'toolResult', toolCallId: 'a|fa', toolName: 'send',
-    content: [{ type: 'text', text: 'confirmed durable receipt' }], isError: false, timestamp: 2 }] });
+  const result = await h.prompt();
+  assert.equal(h.wires.length, 2); assert.equal(result.paused, false);
+  const failed = result.messages.find((m) => m.toolCallId === 'a|fa');
+  assert.equal(failed.isError, true); assert.equal(failed.details.execution_outcome, 'unknown');
+  await h.handle('close', {sessionId:'group-a'}); await h.initialize('group-a', [tool('send')]);
   await h.prompt('resume');
   assert.equal(h.calls.length, 1);
+  assert.equal((await h.state()).paused, false);
   assert.equal((await h.state()).messages.filter((m) => m.role === 'toolResult' && m.toolCallId === 'a|fa').length, 1);
-  assert.ok(JSON.stringify(h.wires[1]).includes('confirmed durable receipt'));
+  assert.ok(JSON.stringify(h.wires[1]).includes('acknowledgement lost after side effect'));
   prefixes(h.wires);
-  const known = harness(t, { response: (n) => n === 1 ? [call('search', {})] : undefined,
-    execute: () => success('not found', { isError: true }) });
-  await known.initialize('group-a', [tool('search')]);
-  assert.equal((await known.prompt()).paused, false); assert.equal(known.wires.length, 2);
 });
 
 test('cancellation during effect preserves unknown outcome and does not authorize another provider request', async (t) => {
@@ -571,7 +582,7 @@ test('lost tool callback ACK recovery retains image receipt content without dupl
   assert.ok(recovered.messages.find((message) => message.customType === 'maibot.receipt_reconciled').content.some((part) => part.data === image.data));
   assert.equal(recovered.messages.filter((message) => message.role === 'toolResult').length, 1);
   await h.prompt('read confirmed image');
-  assert.ok(JSON.stringify(h.wires[1]).includes('data:image/png;base64,aGVsbG8='));
+  assert.ok(JSON.stringify(h.wires.at(-1)).includes('data:image/png;base64,aGVsbG8='));
   assert.equal(h.calls.length, 1);
 });
 

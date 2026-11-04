@@ -35,7 +35,7 @@ from src.maisaka.context.messages import (
 )
 
 from .bridge import PiBridge, PiBridgeError
-from .business_store import BusinessStore, LedgerConflict
+from .business_store import BusinessStore
 from .evidence import DurableEvidenceStore, READ_THREAD_ARCHIVE_TOOL_DEFINITION
 from .references import build_references
 from .observer import PiObserver
@@ -63,6 +63,45 @@ def user_message(text: str, event_id: str) -> Dict[str, Any]:
         "timestamp": int(time.time() * 1000),
         "hostEventId": event_id,
     }
+
+
+def retry_safe_tool(name: str, binding: Dict[str, Any], arguments: Dict[str, Any]) -> bool:
+    """Use the frozen execution contract to identify reads and local controls."""
+    safety = binding.get("safety") or {}
+    owner = binding.get("provider_name"), binding.get("provider_type")
+    return (
+        owner == ("maibot_pi_internal", "builtin")
+        or (owner == ("maisaka_builtin", "builtin") and name in READ_ONLY_TOOL_NAMES | {"stop", "wait"})
+        or (safety.get("read_only") is True and safety.get("destructive") is not True)
+        or (owner == ("local.gpt-web-search", "plugin") and name in {"gpt_web_search", "gpt_read_search_result"})
+        or (owner == ("mcp", "mcp") and name == "browser_navigate"
+            and binding.get("routing", {}).get("server_name") == "playwright"
+            and binding.get("routing", {}).get("registry_original_name") == name
+            and str(arguments.get("url", "")).startswith(("https://", "http://")))
+    )
+
+
+def tool_error(call_id: str, name: str, text: str, outcome: str = "failed") -> Dict[str, Any]:
+    """Return an ordinary tool result so the same Agent can choose its next step."""
+    return {
+        "content": [{"type": "text", "text": text}],
+        "details": {"hostReceipt": {"callId": call_id, "success": False}, "execution_outcome": outcome},
+        "isError": True, "terminate": False, "finishTurn": False,
+    }
+
+
+def pending_observation(call_id: str, name: str, value: Any) -> Dict[str, Any]:
+    """Preserve unknown delivery as an observation, including legacy receipts."""
+    if isinstance(value, dict) and isinstance(value.get("content"), list):
+        return {**value, "isError": True, "terminate": False, "finishTurn": False,
+                "details": {**value.get("details", {}), "execution_outcome": "unknown"}}
+    previous = str(value.get("content", "")) if isinstance(value, dict) else ""
+    result = tool_error(call_id, name, previous + f"\n工具 {name} 的上次执行结果尚未确认；先核对已有结果，再决定后续操作。", "unknown")
+    if isinstance(value, dict):
+        metadata = value.get("metadata", value)
+        if metadata.get("sent_message_ids"):
+            result["details"]["sent_message_ids"] = metadata["sent_message_ids"]
+    return result
 
 
 async def history_message(history: Any, event_id: str) -> Dict[str, Any]:
@@ -254,51 +293,7 @@ class PiGroupRunner:
             taskName="planner",
             requireDelivery=True,
         )
-        results = []
-        for call in state.get("unresolvedToolCalls", []):
-            receipt = await self._db("lookup_tool_execution", self.session_id, call["id"])
-            binding = self._bindings.get(call["name"], {})
-            if (
-                receipt is not None
-                and receipt.status in {"executing", "unknown"}
-                and call["name"] == "stop"
-                and json.loads(receipt.intent_json).get("name") == "stop"
-                and binding.get("provider_name") == "maisaka_builtin"
-                and binding.get("provider_type") == "builtin"
-            ):
-                # stop only ends the local turn. An interrupted receipt cannot
-                # imply an uncertain QQ send; settle it as interrupted without
-                # redispatching it. All external-effect tools retain their fence.
-                receipt = await self._db(
-                    "record_tool_outcome",
-                    self.session_id,
-                    call["id"],
-                    {
-                        "content": [{
-                            "type": "text",
-                            "text": "The previous local stop was interrupted; no control was replayed.",
-                        }],
-                        "isError": True,
-                        "terminate": True,
-                    },
-                    status="failed",
-                )
-                logger.warning(f"[{self.session_id}] 已核对中断的本地 stop，保留失败回执并解除停顿: {call['id']}")
-            if receipt is not None and receipt.status in {"succeeded", "failed"}:
-                value = receipt.result
-                results.append(
-                    {
-                        "role": "toolResult",
-                        "toolCallId": call["id"],
-                        "toolName": call["name"],
-                        "content": value["content"],
-                        "details": value.get("details", {}),
-                        "isError": value["isError"],
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-        if results:
-            state = await self.bridge.request("resolve_tools", sessionId=self.session_id, results=results)
+        await self._recover_tool_results(state)
         self._initialized = True
         await self.subagents.recover(self.session_id)
         pending = await self._db("pending_inputs", self.session_id)
@@ -316,14 +311,43 @@ class PiGroupRunner:
         if turn is None:
             return
         state = await self.bridge.request("state", sessionId=self.session_id)
-        try:
-            await self._db("assert_no_unresolved_executions", self.session_id)
-            if state.get("unresolvedToolCalls"):
-                raise LedgerConflict("Native tool outcome needs reconciliation")
-        except LedgerConflict:
-            logger.error(f"[{self.session_id}] 未完成轮次包含结果未知的工具，保留待核对，不自动重发")
-        else:
-            self._wake_for_recovery(turn["turn_id"], turn["source_ids"])
+        await self._recover_tool_results(state)
+        self._wake_for_recovery(turn["turn_id"], turn["source_ids"])
+
+    async def _recover_tool_results(self, state: Dict[str, Any]) -> None:
+        """Complete interrupted native calls with observations, never redispatch them."""
+        results = []
+        missing = {call["id"] for call in state.get("unresolvedToolCalls", [])}
+        calls = {call["id"]: call for call in [*state.get("pendingToolObservations", []), *state.get("unresolvedToolCalls", [])]}
+        for call in calls.values():
+            receipt = await self._db("lookup_tool_execution", self.session_id, call["id"])
+            if receipt is not None and receipt.status in {"succeeded", "failed"}:
+                value = receipt.result
+            else:
+                intent = json.loads(receipt.intent_json) if receipt is not None else {}
+                safe = retry_safe_tool(call["name"], self._bindings.get(call["name"], {}), intent.get("arguments", {}))
+                if receipt is None or receipt.status == "prepared" or safe:
+                    value = tool_error(call["id"], call["name"],
+                                       f"工具 {call['name']} 的上次调用已中断，可根据当前情况重新选择操作。",
+                                       "not_executed" if receipt is None or receipt.status == "prepared" else "failed")
+                    if receipt is not None:
+                        if receipt.status == "prepared":
+                            await self._db("claim_tool_execution", self.session_id, call["id"])
+                        await self._db("record_tool_outcome", self.session_id, call["id"], value, status="failed")
+                else:
+                    if call["id"] not in missing and receipt.status == "unknown":
+                        continue
+                    value = pending_observation(call["id"], call["name"], receipt.result)
+                    await self._db("mark_tool_execution_unknown", self.session_id, call["id"], observation=value)
+                    if call["id"] not in missing:
+                        # This observation is already in the native context.
+                        # Keep checking for a future confirmed receipt without reinjecting it.
+                        continue
+            results.append({"role": "toolResult", "toolCallId": call["id"], "toolName": call["name"],
+                            "content": value["content"], "details": value.get("details", {}),
+                            "isError": value["isError"], "timestamp": int(time.time() * 1000)})
+        if results:
+            await self.bridge.request("resolve_tools", sessionId=self.session_id, results=results)
 
     def _wake_for_recovery(self, turn_id: str, source_ids: List[str]) -> None:
         task_id = "pi-recover:" + turn_id
@@ -410,7 +434,6 @@ class PiGroupRunner:
         await self._interrupt_context_maintenance()
         async with self._orchestration_lock:
             await self.ensure_initialized()
-            await self._db("assert_no_unresolved_executions", self.session_id)
             state = await self.bridge.request("state", sessionId=self.session_id)
             arguments = {"sessionId": self.session_id, "expectedRevision": state["revision"]}
             if summary is not None:
@@ -492,7 +515,7 @@ class PiGroupRunner:
         await self._interrupt_context_maintenance()
         async with self._orchestration_lock:
             await self.ensure_initialized()
-            await self._db("assert_no_unresolved_executions", self.session_id)
+            await self._recover_tool_results(await self.bridge.request("state", sessionId=self.session_id))
             turn = await self._db(
                 "begin_turn", self.session_id, [str(message.message_id) for message in source_messages]
             )
@@ -502,7 +525,6 @@ class PiGroupRunner:
                 if focus_group is not None
                 else None
             )
-            await self._db("assert_no_unresolved_executions", self.session_id)
             from src.services.daily_topics.service import daily_topic_service
 
             daily_references = await daily_topic_service.reference(self.session_id)
@@ -560,9 +582,14 @@ class PiGroupRunner:
         session_id = params["sessionId"]
         if session_id != self.session_id and session_id not in self._children:
             raise PermissionError("Pi callback belongs to an unknown session")
-        if method in {"authorize", "tool"}:
-            await self._db("assert_no_unresolved_executions", session_id)
         if method == "authorize":
+            # A lost IPC ACK does not mean the external tool failed. Supply a
+            # durable receipt before the SDK turns a bridge error into a retry.
+            if params.get("toolCallId"):
+                receipt = await self._db("lookup_tool_execution", session_id, params["toolCallId"])
+                if (receipt is not None and receipt.status in {"succeeded", "failed"}
+                        and json.loads(receipt.intent_json).get("name") == params.get("name")):
+                    return {"allowed": True, "toolResult": receipt.result}
             return {"allowed": True}
         if method == "tool":
             return await self._tool(params)
@@ -599,19 +626,22 @@ class PiGroupRunner:
         child = self._children.get(params["sessionId"])
         name, call_id, arguments = params["name"], params["toolCallId"], params["arguments"]
         if name not in self._tools or name not in self._bindings:
-            raise PermissionError("Tool is not bound to this durable Pi thread")
+            return tool_error(call_id, name, "Tool is not bound to this durable Pi thread; nothing was executed.", "not_executed")
         binding = self._bindings[name]
         if binding["provider_name"] != "maibot_pi_internal":
             current_specs = await self.runtime._tool_registry.list_tools(self.engine._build_tool_availability_context())
             matches = [spec for spec in current_specs if spec.name == name]
             if len(matches) != 1:
-                raise PermissionError("Frozen tool dispatch target is missing or ambiguous")
+                return tool_error(call_id, name, "Tool is missing or ambiguous; nothing was executed.", "not_executed")
             current = matches[0]
             if pi_tool(current.to_llm_definition()) != self._tools[name] or current.execution_contract() != binding:
                 # Rejected before claiming an effect; this is not an unknown send.
-                raise PermissionError("Frozen tool schema or provider ownership changed")
+                return tool_error(call_id, name, "Tool schema or provider changed; nothing was executed.", "not_executed")
         if child:
-            PiSubagentService.assert_tool_allowed(name, child["tools"])
+            try:
+                PiSubagentService.assert_tool_allowed(name, child["tools"])
+            except PermissionError as exc:
+                return tool_error(call_id, name, str(exc), "not_executed")
         session_id = params["sessionId"]
         intent = {"name": name, "arguments": arguments}
         receipt = await self._db("prepare_tool_execution", session_id, call_id, intent)
@@ -619,13 +649,24 @@ class PiGroupRunner:
             if receipt.result.get("terminate"):
                 self._terminated_sessions.add(session_id)
             return receipt.result
+        if receipt.status in {"executing", "unknown"}:
+            return pending_observation(call_id, name, receipt.result)
         if not await self._db("claim_tool_execution", session_id, call_id):
-            raise RuntimeError("Tool outcome is uncertain; reconcile before continuing: " + call_id)
+            return tool_error(call_id, name, "这次工具调用已经开始执行，请先核对已有结果。", "unknown")
+        if not retry_safe_tool(name, binding, arguments):
+            pending = await self._db("find_pending_effect", session_id, call_id, intent)
+            if pending is not None:
+                result = tool_error(call_id, name, "相同操作此前的执行结果尚未确认，本次未重复执行；可以继续其他操作。", "not_executed")
+                result["details"]["pendingCallId"] = pending.call_id
+                await self._db("record_tool_outcome", session_id, call_id, result, status="failed")
+                return result
         media_content = []
         media_event_ids = []
         search_observation = None
         post_execution = None
         finish_turn = False
+        uncertain = False
+        provider_result = None
         try:
             if name == "subagent":
                 value = await self.subagents.delegate(
@@ -683,7 +724,7 @@ class PiGroupRunner:
                 except (PermissionError, ValueError, KeyError) as exc:
                     # These readers have no external effects. A known invalid
                     # handle/argument is a normal failed result, not unknown send.
-                    text, success = "Evidence read rejected: " + type(exc).__name__, False
+                    text, success = f"Evidence read rejected: {type(exc).__name__}: {exc}", False
                 terminate = False
             elif (
                 child is not None
@@ -730,48 +771,13 @@ class PiGroupRunner:
                         self.engine._build_tool_execution_context(""),
                         expected_contract=binding,
                     )
-                # Classify failures from the same frozen contract checked by
-                # dispatch, not a mutable provider-owned ToolSpec after its await.
-                safety = binding.get("safety") or {}
-                readonly = (
-                    name in READ_ONLY_TOOL_NAMES
-                    and binding.get("provider_name") == "maisaka_builtin"
-                    and binding.get("provider_type") == "builtin"
-                ) or (safety.get("read_only") is True and safety.get("destructive") is not True)
-                readonly = readonly or (
-                    name in {"gpt_web_search", "gpt_read_search_result"}
-                    and binding.get("provider_name") == "local.gpt-web-search"
-                    and binding.get("provider_type") == "plugin"
-                    and binding.get("routing", {}).get("plugin_id") == "local.gpt-web-search"
+                provider_result = result
+                # Providers return ordinary failures for model self-correction.
+                # Retain explicit uncertainty/partial sends only as operation-level receipts.
+                uncertain = not result.success and not retry_safe_tool(name, binding, arguments) and (
+                    result.metadata.get("execution_outcome") == "unknown"
+                    or bool(result.metadata.get("sent_message_ids"))
                 )
-                # Navigation can change the browser's current page, but a failed
-                # page read need not pause research like an uncertain send or
-                # form submission. Keep the failed receipt and let the Agent
-                # choose its next step; do not replay the navigation here.
-                recoverable_navigation = (
-                    name == "browser_navigate"
-                    and binding.get("provider_name") == "mcp"
-                    and binding.get("provider_type") == "mcp"
-                    and binding.get("routing", {}).get("server_name") == "playwright"
-                    and binding.get("routing", {}).get("registry_original_name") == "browser_navigate"
-                    and str(arguments.get("url", "")).startswith(("https://", "http://"))
-                )
-                rejected_before_dispatch = result.metadata.get("execution_outcome") == "not_executed" and (
-                    result.metadata.get("host_contract_rejected") is True
-                    or (
-                        name in {"reply", "remember_memory"}
-                        and binding.get("provider_name") == "maisaka_builtin"
-                        and binding.get("provider_type") == "builtin"
-                    )
-                )
-                if not result.success and not readonly and not recoverable_navigation and not rejected_before_dispatch:
-                    await self._db(
-                        "mark_tool_execution_unknown",
-                        session_id,
-                        call_id,
-                        observation={"content": result.get_history_content(), "metadata": result.metadata},
-                    )
-                    raise RuntimeError("Mutating tool failure has an uncertain outcome; thread paused")
                 evidence_handle = await self.evidence.capture(
                     self.session_id, result, child_namespace=session_id if child else ""
                 )
@@ -824,11 +830,18 @@ class PiGroupRunner:
                 "terminate": terminate,
                 "finishTurn": finish_turn,
             }
-            if terminate:
-                self._terminated_sessions.add(session_id)
-            await self._db(
-                "record_tool_outcome", session_id, call_id, callback_result, status="succeeded" if success else "failed"
-            )
+            if uncertain:
+                callback_result["content"].append({"type": "text", "text": "本次执行结果尚未确认；先核对已有结果，再决定后续操作。"})
+                callback_result["details"]["execution_outcome"] = "unknown"
+                if result.metadata.get("sent_message_ids"):
+                    callback_result["details"]["sent_message_ids"] = result.metadata["sent_message_ids"]
+                await self._db("mark_tool_execution_unknown", session_id, call_id, observation=callback_result)
+            else:
+                if terminate:
+                    self._terminated_sessions.add(session_id)
+                await self._db(
+                    "record_tool_outcome", session_id, call_id, callback_result, status="succeeded" if success else "failed"
+                )
             if post_execution is not None:
                 try:
                     await self.engine._record_tool_execution_effects(*post_execution)
@@ -837,11 +850,51 @@ class PiGroupRunner:
                     # they cannot turn its durable receipt into an unknown send.
                     logger.exception(f"[{session_id}] 工具回执已保存，后台后处理失败: {name} {call_id}")
             return callback_result
-        except BaseException:
+        except asyncio.CancelledError:
             receipt = await asyncio.shield(self._db("lookup_tool_execution", session_id, call_id))
             if receipt is not None and receipt.status in {"executing", "unknown"}:
                 await asyncio.shield(self._db("mark_tool_execution_unknown", session_id, call_id))
             raise
+        except Exception as exc:
+            receipt = await self._db("lookup_tool_execution", session_id, call_id)
+            if receipt is not None and receipt.status in {"succeeded", "failed"}:
+                return receipt.result
+            if provider_result is not None:
+                # Evidence/media bookkeeping cannot change a known provider
+                # outcome into an uncertain send or cause an already sent reply to retry.
+                success = provider_result.success
+                value = {
+                    "content": [{"type": "text", "text": provider_result.get_history_content()}, *media_content],
+                    "details": {"hostReceipt": {"callId": call_id, "success": success},
+                                "hostMediaEventIds": media_event_ids},
+                    "isError": not success,
+                    "terminate": provider_result.stop_after_execution or bool(provider_result.metadata.get("pause_execution")),
+                    "finishTurn": success and name == "reply"
+                    and binding.get("provider_name") == "maisaka_builtin" and binding.get("provider_type") == "builtin"
+                    and provider_result.metadata.get("finish_turn") is True,
+                }
+                if provider_result.metadata.get("sent_message_ids"):
+                    value["details"]["sent_message_ids"] = provider_result.metadata["sent_message_ids"]
+                if not success and not retry_safe_tool(name, binding, arguments) and (
+                    provider_result.metadata.get("execution_outcome") == "unknown"
+                    or bool(provider_result.metadata.get("sent_message_ids"))
+                ):
+                    value["details"]["execution_outcome"] = "unknown"
+                    await self._db("mark_tool_execution_unknown", session_id, call_id, observation=value)
+                else:
+                    await self._db("record_tool_outcome", session_id, call_id, value,
+                                   status="succeeded" if success else "failed")
+                logger.exception(f"[{session_id}] 工具结果已保留，附加资料处理失败: {name} {call_id}")
+                return value
+            value = tool_error(call_id, name, f"工具 {name} 调用失败：{type(exc).__name__}: {exc}",
+                               "failed" if retry_safe_tool(name, binding, arguments) else "unknown")
+            if value["details"]["execution_outcome"] == "unknown":
+                value["content"].append({"type": "text", "text": "本次执行结果尚未确认；先核对已有结果，再决定后续操作。"})
+                await self._db("mark_tool_execution_unknown", session_id, call_id, observation=value)
+            else:
+                await self._db("record_tool_outcome", session_id, call_id, value, status="failed")
+            logger.exception(f"[{session_id}] 工具失败已返回 Agent 继续处理: {name} {call_id}")
+            return value
 
     async def _run_child(
         self, child_id: str, parent: str, task: str, tools: List[Any], on_event: Any

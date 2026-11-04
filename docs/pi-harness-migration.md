@@ -44,9 +44,13 @@ automatically replayed after restart.
 Reply targets absent from the process-local business mirror are resolved from
 the message repository using the current real chat ID. A retained Pi message
 therefore remains a valid reply target across host cache eviction/restart.
-Known built-in reply validation failures before dispatch are failed tool results,
-not uncertain send outcomes. Partial/unknown delivery remains paused for receipt
-reconciliation; it is never automatically resent.
+Tool failures return concrete error results to the same Agent for self-correction.
+Explicitly unknown or partial delivery remains in the business ledger; only a
+repeat of that pending operation is rejected. Other tools, new chat replies and
+later turns remain available. Interrupted native calls receive their saved
+receipt or an honest uncertainty observation on recovery, without replaying the
+original operation. Persistence corruption and incompatible session contracts
+remain explicit initialization errors.
 One-shot text/VLM and known single-turn context callers use `retain_replay=False`;
 context APIs retain scoped handles by default for real multi-turn work. Release
 retained results explicitly with `release_response` / `release_responses`. Reusing

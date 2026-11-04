@@ -302,32 +302,39 @@ class BusinessStore:
             return receipt
 
     def claim_tool_execution(self, stream_id: str, call_id: str) -> bool:
-        """Only the caller obtaining True may dispatch. Never retry executing/unknown.
-
-        A crash after this durable transition is an uncertain effect, even if the
-        process died before dispatch. Reconciliation, not automatic retry, is
-        required. Exactly-once delivery to arbitrary external tools is impossible.
-        """
+        """Claim this call once; an unrelated pending effect does not lock the chat."""
         _require_id(stream_id, "stream_id")
         _require_id(call_id, "call_id")
         with self._transaction(write=True) as connection:
-            # Close the gap between a callback's read-only fence and its claim.
-            # Pi tools are sequential within a stream; child streams remain
-            # independently runnable. An uncertain effect cannot be evaded by
-            # proposing a fresh call id in the same host thread.
-            if (
-                connection.execute(
-                    "SELECT 1 FROM tool_executions WHERE stream_id = ? AND status IN ('executing', 'unknown') LIMIT 1",
-                    (stream_id,),
-                ).fetchone()
-                is not None
-            ):
-                return False
             cursor = connection.execute(
                 "UPDATE tool_executions SET status = 'executing' WHERE stream_id = ? AND call_id = ? AND status = 'prepared'",
                 (stream_id, call_id),
             )
             return cursor.rowcount == 1
+
+    def find_pending_effect(self, stream_id: str, call_id: str, intent: Dict[str, Any]) -> Optional[ToolExecution]:
+        """Find the same pending operation, including attempts with a new call ID.
+
+        Keep the real target and payload in the comparison. Reply finish_turn is
+        scheduling metadata, so changing it does not authorize a duplicate send.
+        """
+        def effect(value: Dict[str, Any]) -> str:
+            arguments = dict(value.get("arguments", {}))
+            if value.get("name") == "reply":
+                arguments.pop("finish_turn", None)
+            return _json_text({"name": value.get("name"), "arguments": arguments})
+
+        expected = effect(intent)
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM tool_executions WHERE stream_id=? AND call_id!=? "
+                "AND status IN ('executing','unknown') ORDER BY rowid",
+                (stream_id, call_id),
+            ).fetchall()
+        for row in rows:
+            if effect(json.loads(row["intent_json"])) == expected:
+                return self._execution(row)
+        return None
 
     def mark_tool_execution_unknown(
         self,
