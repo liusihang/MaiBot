@@ -1286,6 +1286,48 @@ async def test_local_search_timeout_is_failed_receipt_and_allows_reply(monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("not_executed", [True, False])
+async def test_memory_validation_can_continue_but_uncertain_write_stays_paused(monkeypatch, tmp_path, not_executed):
+    from src.maisaka.builtin_tool.remember_memory import get_tool_spec
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([
+        ("remember_memory", {"content": "note", "evidence_message_ids": ["m1"], "subject_name": "unknown"}),
+        ("reply", {"text": "need a valid subject"}),
+    ]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        host._runtime._tool_registry.list_tools.return_value.append(get_tool_spec())
+
+        async def invoke(invocation, context, **kwargs):
+            invoked.append(invocation)
+            if invocation.tool_name == "remember_memory":
+                return ToolExecutionResult("remember_memory", False, error_message="subject not found",
+                    metadata={"execution_outcome": "not_executed"} if not_executed else {})
+            return ToolExecutionResult("reply", True, content="reply sent")
+
+        host._runtime._tool_registry.invoke = invoke
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            if not_executed:
+                await runner.run([])
+                receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+                assert receipt.status == "failed"
+                assert receipt.result["isError"] is True
+                assert receipt.result["content"][0]["text"] == "subject not found"
+                await runner._db("assert_no_unresolved_executions", runner.session_id)
+                assert [item.tool_name for item in invoked] == ["remember_memory", "reply"]
+            else:
+                with pytest.raises(RuntimeError, match="paused"):
+                    await runner.run([])
+                receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+                assert receipt.status == "unknown"
+                assert [item.tool_name for item in invoked] == ["remember_memory"]
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
 async def test_child_browser_navigation_timeout_returns_error_and_keeps_research_running(monkeypatch, tmp_path):
     from src.core.tooling import ToolAnnotation
 

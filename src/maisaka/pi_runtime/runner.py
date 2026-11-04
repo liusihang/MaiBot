@@ -513,6 +513,7 @@ class PiGroupRunner:
             self.engine._active_logical_turn_id = uuid.uuid4().hex
             self.runtime._start_planner_continuation()
             self._model_running = True
+            self.runtime._update_stage_status("思考中", "等待主 Agent 响应")
             try:
                 state = await self.bridge.request(
                     "prompt",
@@ -758,7 +759,7 @@ class PiGroupRunner:
                 rejected_before_dispatch = result.metadata.get("execution_outcome") == "not_executed" and (
                     result.metadata.get("host_contract_rejected") is True
                     or (
-                        name == "reply"
+                        name in {"reply", "remember_memory"}
                         and binding.get("provider_name") == "maisaka_builtin"
                         and binding.get("provider_type") == "builtin"
                     )

@@ -7,6 +7,7 @@ import asyncio
 from src.config.config import global_config
 from src.core.tooling import ToolSpec
 from src.common.message_repository import find_messages
+from src.common.person_names import person_name_records
 from src.person_info.person_info import get_person_id
 from src.chat.utils.utils import is_bot_self
 from src.services.memory_service import memory_service
@@ -20,7 +21,7 @@ def get_tool_spec():
             "保存你判断值得长期保留的称呼、人物信息或群聊语境。查询已有记忆使用 query_memory。"
             "正文直接记录具体发言、对象和后续互动；后续如何回应由你结合当前语境判断。"
             "evidence_message_ids 填写当前群支持该内容的真实用户消息ID。"
-            "subject_name 填该人的群名片或QQ昵称；aliases 填原话明确给出的该人别名。"
+            "subject_name 优先填人物画像中的主称呼，其次填QQ昵称；aliases 填原话明确给出的该人别名。"
             "群友称呼、第三方评价和本人偏好按各自发言归属保存。"
             "返回 saved、stored_ids 和 alias_saved；成功回执后确认已保存，失败按具体原因处理。"
         ),
@@ -44,7 +45,7 @@ def get_tool_spec():
                 "subject_name": {
                     "type": "string",
                     "default": "",
-                    "description": "人物信息的对象，填该人真实QQ昵称或群名片；群内名单/一般约定留空",
+                    "description": "人物信息的对象，优先主称呼，其次QQ昵称；群内名单/一般约定留空",
                 },
                 "aliases": {
                     "type": "array",
@@ -72,10 +73,15 @@ async def handle_tool(tool_ctx, invocation, context=None):
     def fail(message: str, payload=None):
         return tool_ctx.build_failure_result("remember_memory", message, structured_content=payload)
 
+    def reject(message: str):
+        return tool_ctx.build_failure_result(
+            "remember_memory", message, metadata={"execution_outcome": "not_executed"},
+        )
+
     if not content or len(content) > 2000 or not isinstance(ids, list) or not 1 <= len(ids) <= 8:
-        return fail("需要1–8个真实用户消息ID和不超过2000字的 content。")
+        return reject("需要1–8个真实用户消息ID和不超过2000字的 content。")
     if not isinstance(aliases, list) or any(not isinstance(a, str) or not 1 <= len(a.strip()) <= 40 for a in aliases):
-        return fail("aliases 必须是原话中的简短别名列表。")
+        return reject("aliases 必须是原话中的简短别名列表。")
     rt = tool_ctx.runtime
     sid = rt.session_id
     stream = rt.chat_stream
@@ -84,30 +90,38 @@ async def handle_tool(tool_ctx, invocation, context=None):
         rows = await asyncio.to_thread(find_messages, session_id=sid, message_id=str(mid), limit=1)
         m = rows[0] if rows else rt.find_source_message_by_id(str(mid))
         if m is None or message_identity(m)[0] != sid:
-            return fail(f"消息 {mid} 不在当前聊天中，请使用真实消息ID。")
+            return reject(f"消息 {mid} 不在当前聊天中，请使用真实消息ID。")
         if is_bot_self(m.platform, message_identity(m)[2]) or not user_text(m):
-            return fail(f"消息 {mid} 是机器人或没有用户原文，不能作为记忆依据。")
+            return reject(f"消息 {mid} 是机器人或没有用户原文，不能作为记忆依据。")
         evidence.append(m)
     body = "\n".join(user_text(m) for m in evidence)
     person_id = ""
     if aliases and not subject:
-        return fail("保存人物别名时请提供该人的真实 subject_name。")
+        return reject("保存人物别名时请提供该人的真实 subject_name。")
     if subject:
+        candidates = await asyncio.to_thread(find_messages, session_id=sid, limit=5000)
+        names = await asyncio.to_thread(
+            person_name_records, platform=evidence[0].platform,
+            user_ids={str(m.message_info.user_info.user_id) for m in candidates},
+        )
+        primary_names = {record["user_id"]: record["primary_name"] for record in names.values()}
         matches = {}
-        for m in await asyncio.to_thread(find_messages, session_id=sid, limit=5000):
+        for m in candidates:
             info = m.message_info.user_info
-            if subject in {str(info.user_nickname or ""), str(info.user_cardname or "")} and not is_bot_self(
+            if subject in {
+                primary_names.get(str(info.user_id), ""), str(info.user_nickname or ""), str(info.user_cardname or ""),
+            } and not is_bot_self(
                 m.platform, info.user_id
             ):
                 matches[str(info.user_id)] = m
         if len(matches) != 1:
-            return fail("subject_name 未唯一匹配当前群成员；请用其真实群名片/QQ昵称，或先把内容作为群内约定保存。")
+            return reject("subject_name 未唯一匹配当前群成员；请用其主称呼或QQ昵称，或先把内容作为群内约定保存。")
         uid, target = next(iter(matches.items()))
         if not any(message_identity(m)[2] == uid for m in evidence) and subject not in body:
-            return fail("证据原话没有明确指出该对象；补充含对象名字的消息，或先保存为群内约定。")
+            return reject("证据原话没有明确指出该对象；补充含对象名字的消息，或先保存为群内约定。")
         person_id = get_person_id(target.platform, uid)
         if any(a.strip() not in body for a in aliases):
-            return fail("某个别名未出现在用户原话中，请删除推测别名。")
+            return reject("某个别名未出现在用户原话中，请删除推测别名。")
     actual_ids = [str(m.message_id) for m in evidence]
     evidence_rows = [
         {

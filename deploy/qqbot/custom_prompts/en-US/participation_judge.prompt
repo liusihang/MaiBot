@@ -5,17 +5,18 @@ Recent context contains up to 50 messages and establishes referents and conversa
 # engage: continue through the main Agent
 - Someone addresses, mentions or quotes 马斯克, including the aliases 爆! and 爆！.
 - Someone answers a question 马斯克 just asked, supplies information it requested, or continues its words with a follow-up, correction, disagreement, comeback, joke or explicit invitation. Short answers and statements also form ongoing exchanges; identify them by meaning and relationships.
+- Members respond to, comment on, tease, question or explain what 马斯克 just said or did, including discussing those actions with each other. Identify the subject from recent context; omitted names, third-person references and exchanges between members can all continue an interaction involving 马斯克.
 - An unresolved public question, request for help, diagnosis, comparison, factual check, image search, drawing, video or group-history request needs attention. Interpret implicit verification by meaning, such as a question about a reported 200 GB update.
 - A specific contradiction or new evidence leaves the current question unresolved.
-Prioritize engage for answers to 马斯克, requested information and exchanges still progressing. The main Agent chooses how to respond. One such item is enough for the batch to engage.
+Prioritize engage for answers to 马斯克, requested information and ongoing exchanges about its words or actions. These interactions take precedence over the filters for independent member conversations below. The main Agent chooses how to respond. One such item is enough for the batch to engage.
 
 # ignore: leave the exchange to its participants or let it close
-- Members are already chatting, teasing, discussing or answering each other in their own exchange.
-- Ordinary sharing, achievements, boasting, promises, exclamations and progress reports currently belong to the other members' conversation.
+- Members are chatting, teasing, discussing or answering each other about a topic independent of what 马斯克 recently said or did.
+- Ordinary sharing, achievements, boasting, promises, exclamations and progress reports belong to an independent conversation between members.
 - Both sides have expressed their meaning and the batch contains only acknowledgement, agreement, repetition, emoji or farewells.
 - Images, forwards or unclear referents still need context to establish a conversational relationship or request.
 - Discussion of modern and contemporary Chinese political content is strictly prohibited; choose ignore when the entire batch falls within this scope.
-Treat answers and requested details in an established exchange as engage. Apply selective participation to unsolicited interjections. Let an exchange close once both sides have been understood.
+Treat answers, requested details and ongoing responses to 马斯克's words or actions as engage. Apply selective participation to unsolicited interjections into independent topics. Choose ignore once both sides have been understood and the new batch only acknowledges or closes the exchange.
 
 # Examples
 马斯克 asks whether frame generation is enabled; someone answers no: engage.

@@ -116,6 +116,24 @@ class PiObserver:
     async def _emit(self, kind: str, *, active: str = "") -> None:
         if not self.publish:
             return
+        if not active:
+            active = next((
+                call_id for call_id, tool in self.tools.items()
+                if "started_at" in tool and "ended_at" not in tool
+            ), "")
+        if kind == "planner.progress" and self.runtime._agent_state == "running":
+            tool = self.tools.get(active)
+            if tool is None:
+                self.runtime._update_stage_status("思考中", "主 Agent 正在判断下一步")
+            elif (
+                tool["tool_name"] in {"subagent", "read_subagent"}
+                and tool["tool_args"].get("wait", tool["tool_name"] == "subagent")
+            ):
+                self.runtime._update_stage_status("等待子代理", "子代理正在执行，主会话等待结果")
+            elif tool["tool_name"] == "reply":
+                self.runtime._update_stage_status("发送回复", "正在发送群消息")
+            else:
+                self.runtime._update_stage_status("工具执行", tool["tool_name"])
         message = self.event.get("message", {})
         usage = message.get("usage", {})
         calls = [p for p in message.get("content", []) if p["type"] == "toolCall"]
@@ -147,7 +165,9 @@ class PiObserver:
             planner_prompt_cache_miss_tokens=int(usage.get("input", 0)) + int(usage.get("cacheWrite", 0))
             if usage
             else None,
-            tools=list(self.tools.values()),
+            # The monitor's tools collection contains terminal receipts only;
+            # unfinished calls are rendered from planner_tool_calls and active.
+            tools=[dict(tool) for tool in self.tools.values() if "ended_at" in tool],
             active_tool_call_id=active,
             agent_state=self.runtime._agent_state,
             planner_interrupted=stop == "aborted",
