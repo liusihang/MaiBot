@@ -26,6 +26,7 @@ from src.common.data_models.message_component_data_model import (
     TextComponent,
 )
 from src.common.logger import get_logger
+from src.common.message_repository import find_messages
 from src.config.config import global_config
 from src.core.tooling import ToolExecutionResult
 from src.core.local_operator import MAISAKA_CLI_BOT_ID
@@ -274,7 +275,7 @@ class BuiltinToolRuntimeContext:
             )
         ]
 
-    def _resolve_at_attachment(self, raw_target: Any) -> AtComponent:
+    async def _resolve_at_attachment(self, raw_target: Any) -> AtComponent:
         """把 attach_at 参数解析为对目标消息发送者的 at 组件。"""
 
         if isinstance(raw_target, dict):
@@ -288,6 +289,16 @@ class BuiltinToolRuntimeContext:
             return AtComponent(target_user_id=target_user_id)
 
         target_message = self.runtime.find_source_message_by_id(target_message_id)
+        if target_message is None and target_message_id:
+            # Pi retains original messages beyond the runtime mirror and across restarts.
+            # Resolve the sender only from this chat, as for the reply target itself.
+            matches = await asyncio.to_thread(
+                find_messages,
+                session_id=self.runtime.session_id,
+                message_id=target_message_id,
+                limit=1,
+            )
+            target_message = matches[0] if matches else None
         if target_message is None:
             raise ValueError(f"无法解析 at 目标消息：msg_id={to_display_message_id(target_message_id)}")
 
@@ -413,7 +424,7 @@ class BuiltinToolRuntimeContext:
             raise ValueError("新表情包发送逻辑未开启，请使用 send_emoji 工具。")
 
         at_components = [
-            self._resolve_at_attachment(raw_target)
+            await self._resolve_at_attachment(raw_target)
             for raw_target in self._normalize_attachment_list(attachment_args.get("attach_at"), "attach_at")
         ]
         image_components = [

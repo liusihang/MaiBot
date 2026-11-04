@@ -1287,22 +1287,30 @@ async def test_local_search_timeout_is_failed_receipt_and_allows_reply(monkeypat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("not_executed", [True, False])
-async def test_memory_validation_can_continue_but_uncertain_write_stays_paused(monkeypatch, tmp_path, not_executed):
-    from src.maisaka.builtin_tool.remember_memory import get_tool_spec
+@pytest.mark.parametrize("name", ["remember_memory", "reply"])
+async def test_builtin_validation_can_continue_but_uncertain_write_stays_paused(monkeypatch, tmp_path, not_executed, name):
+    from src.maisaka.builtin_tool.remember_memory import get_tool_spec as memory_spec
+    from src.maisaka.builtin_tool.reply import get_tool_spec as reply_spec
+    from src.core.tooling import ToolAvailabilityContext
 
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     with wire_server([
-        ("remember_memory", {"content": "note", "evidence_message_ids": ["m1"], "subject_name": "unknown"}),
-        ("reply", {"text": "need a valid subject"}),
+        (name, {"content": "note", "evidence_message_ids": ["m1"], "subject_name": "unknown"} if name == "remember_memory"
+         else {"msg_id": "m1", "text": "command", "attach_at": ["missing-at"]}),
+        ("reply", {"msg_id": "m1", "text": "need a valid target"}),
     ]) as (config, requests):
         monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
         host, invoked = engine()
-        host._runtime._tool_registry.list_tools.return_value.append(get_tool_spec())
+        specs = host._runtime._tool_registry.list_tools.return_value
+        specs[:] = [spec for spec in specs if spec.name != name]
+        specs.append(memory_spec() if name == "remember_memory" else reply_spec(
+            ToolAvailabilityContext(is_group_chat=True)
+        ))
 
         async def invoke(invocation, context, **kwargs):
             invoked.append(invocation)
-            if invocation.tool_name == "remember_memory":
-                return ToolExecutionResult("remember_memory", False, error_message="subject not found",
+            if invocation.call_id == "call-1":
+                return ToolExecutionResult(name, False, error_message="target not found",
                     metadata={"execution_outcome": "not_executed"} if not_executed else {})
             return ToolExecutionResult("reply", True, content="reply sent")
 
@@ -1314,15 +1322,15 @@ async def test_memory_validation_can_continue_but_uncertain_write_stays_paused(m
                 receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
                 assert receipt.status == "failed"
                 assert receipt.result["isError"] is True
-                assert receipt.result["content"][0]["text"] == "subject not found"
+                assert receipt.result["content"][0]["text"] == "target not found"
                 await runner._db("assert_no_unresolved_executions", runner.session_id)
-                assert [item.tool_name for item in invoked] == ["remember_memory", "reply"]
+                assert [item.tool_name for item in invoked] == [name, "reply"]
             else:
                 with pytest.raises(RuntimeError, match="paused"):
                     await runner.run([])
                 receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
                 assert receipt.status == "unknown"
-                assert [item.tool_name for item in invoked] == ["remember_memory"]
+                assert [item.tool_name for item in invoked] == [name]
         finally:
             await runner.close()
 

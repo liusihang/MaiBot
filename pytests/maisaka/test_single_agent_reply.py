@@ -38,7 +38,7 @@ class DirectReplyTests(unittest.IsolatedAsyncioTestCase):
             return SimpleNamespace(kwargs=kwargs)
 
         self.ctx.get_runtime_manager = lambda: SimpleNamespace(invoke_hook=hook)
-        self.ctx._resolve_at_attachment = lambda key: AtComponent(target_user_id="test-user")
+        self.ctx._resolve_at_attachment = AsyncMock(return_value=AtComponent(target_user_id="test-user"))
         image = object.__new__(ImageComponent)
         image.content = "测试图片"
         image.binary_data = b"test"
@@ -100,6 +100,42 @@ class DirectReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.metadata["execution_outcome"], "not_executed")
         self.assertFalse(self.sent)
+
+    async def test_at_resolves_a_persisted_message_outside_the_runtime_mirror(self):
+        self.ctx._resolve_at_attachment = BuiltinToolRuntimeContext._resolve_at_attachment.__get__(self.ctx)
+        older = SimpleNamespace(
+            message_id="older-message",
+            message_info=SimpleNamespace(
+                user_info=SimpleNamespace(user_id="other-user", user_nickname="群友乙", user_cardname="旧群名片")
+            ),
+        )
+        with patch("src.maisaka.builtin_tool.context.find_messages", return_value=[older], create=True) as find:
+            result = await self.invoke(text="测试指令", attach_at=["older-message"])
+        self.assertTrue(result.success, result.error_message)
+        find.assert_called_once_with(
+            session_id="single-agent-acceptance", message_id="older-message", limit=1
+        )
+        mention = self.sent[0]["message_sequence"].components[0]
+        self.assertIsInstance(mention, AtComponent)
+        self.assertEqual(mention.target_user_id, "other-user")
+        self.assertEqual(mention.target_user_nickname, "群友乙")
+        self.assertIs(self.sent[0]["reply_message"], self.target)
+
+    async def test_missing_at_is_a_known_failure_and_never_sends(self):
+        self.ctx._resolve_at_attachment = BuiltinToolRuntimeContext._resolve_at_attachment.__get__(self.ctx)
+        with patch("src.maisaka.builtin_tool.context.find_messages", return_value=[], create=True):
+            result = await self.invoke(attach_at=["missing-at"])
+        self.assertFalse(result.success)
+        self.assertIn("missing-at", result.error_message)
+        self.assertEqual(result.metadata["execution_outcome"], "not_executed")
+        self.send.assert_not_called()
+
+    async def test_cached_at_needs_no_database_lookup(self):
+        self.ctx._resolve_at_attachment = BuiltinToolRuntimeContext._resolve_at_attachment.__get__(self.ctx)
+        with patch("src.maisaka.builtin_tool.context.find_messages", create=True) as find:
+            result = await self.invoke(text="测试消息", attach_at=["test-target"])
+        self.assertTrue(result.success, result.error_message)
+        find.assert_not_called()
 
     async def test_schema_and_options(self):
         schema = reply.get_tool_spec().parameters_schema
@@ -164,6 +200,7 @@ class DirectReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.metadata["sent_message_ids"], ["intercepted-first"])
         self.assertEqual([x["success"] for x in result.metadata["send_results"]], [True, False])
         self.assertEqual(self.send.await_count, 2)
+        self.assertNotIn("execution_outcome", result.metadata)
         reply.replyer_manager.get_replyer.assert_not_called()
 
     async def test_send_exception_preserves_receipts(self):
@@ -175,6 +212,7 @@ class DirectReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.metadata["sent_message_ids"], ["intercepted-first"])
         self.assertEqual(self.send.await_count, 2)
+        self.assertNotIn("execution_outcome", result.metadata)
 
     async def test_wrapped_arguments(self):
         result = await reply.handle_tool(

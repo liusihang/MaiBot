@@ -622,6 +622,10 @@ async def execute_reply(
         reply_result.monitor_detail = build_reply_monitor_detail(reply_result)
         reply_metadata = _build_monitor_metadata(reply_result, extension_execution.reply_id)
         logger.exception(f"{tool_ctx.runtime.log_prefix} 解析回复附件失败: {exc}")
+        # No transport call has occurred. With no reply extension dispatched,
+        # this is a known unsent result, so Pi may correct the attachment and continue.
+        if not extension_execution.targets:
+            reply_metadata["execution_outcome"] = "not_executed"
         return tool_ctx.build_failure_result(
             "reply",
             f"解析回复附件失败：{exc}",
