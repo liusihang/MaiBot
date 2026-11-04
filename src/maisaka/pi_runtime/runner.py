@@ -26,6 +26,7 @@ from src.core.tooling import ToolInvocation
 from src.llm_models.payload_content.context_item import ContextImagePart, ContextTextPart, UserMessageItem
 from src.llm_models.payload_content.tool_option import ToolCall
 from src.maisaka.builtin_tool.read_tool_result import get_tool_spec as read_tool_result_spec
+from src.maisaka.memory.result_view import format_evidence_page
 from src.maisaka.context.messages import (
     ContentContextMessage,
     SessionBackedMessage,
@@ -667,7 +668,12 @@ class PiGroupRunner:
                             arguments.get("max_chars", 2000),
                             arguments.get("keyword", ""),
                         )
-                    text = format_subagent_result(value) if name == "read_subagent" else json.dumps(value, ensure_ascii=False)
+                    if name == "read_subagent":
+                        text = format_subagent_result(value)
+                    elif name == "read_tool_result":
+                        text = format_evidence_page(value, arguments["result_id"])
+                    else:
+                        text = json.dumps(value, ensure_ascii=False)
                     success = True
                 except PiBridgeError as exc:
                     if exc.code not in {"ARCHIVE_NOT_FOUND", "INVALID_ARCHIVE_QUERY", "INVALID_PAGINATION"}:
@@ -737,6 +743,18 @@ class PiGroupRunner:
                     and binding.get("provider_type") == "plugin"
                     and binding.get("routing", {}).get("plugin_id") == "local.gpt-web-search"
                 )
+                # Navigation can change the browser's current page, but a failed
+                # page read need not pause research like an uncertain send or
+                # form submission. Keep the failed receipt and let the Agent
+                # choose its next step; do not replay the navigation here.
+                recoverable_navigation = (
+                    name == "browser_navigate"
+                    and binding.get("provider_name") == "mcp"
+                    and binding.get("provider_type") == "mcp"
+                    and binding.get("routing", {}).get("server_name") == "playwright"
+                    and binding.get("routing", {}).get("registry_original_name") == "browser_navigate"
+                    and str(arguments.get("url", "")).startswith(("https://", "http://"))
+                )
                 rejected_before_dispatch = result.metadata.get("execution_outcome") == "not_executed" and (
                     result.metadata.get("host_contract_rejected") is True
                     or (
@@ -745,7 +763,7 @@ class PiGroupRunner:
                         and binding.get("provider_type") == "builtin"
                     )
                 )
-                if not result.success and not readonly and not rejected_before_dispatch:
+                if not result.success and not readonly and not recoverable_navigation and not rejected_before_dispatch:
                     await self._db(
                         "mark_tool_execution_unknown",
                         session_id,
@@ -856,7 +874,9 @@ class PiGroupRunner:
                 "prompt", sessionId=child_id, additions=[user_message(task, "child-task:" + child_id)]
             )
             if state.get("paused") or state.get("error"):
-                raise RuntimeError("Child Pi execution paused without a completed conclusion")
+                unresolved = ", ".join(call["name"] for call in state.get("unresolvedToolCalls", []))
+                reason = state.get("error") or "Unresolved child tool outcome: " + unresolved
+                raise PiBridgeError(str(reason), code="CHILD_EXECUTION_FAILED")
             return {**state, "sources": list(self._children[child_id]["sources"])}
         finally:
             try:

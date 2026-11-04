@@ -224,9 +224,10 @@ def test_build_references_real_endpoint_shapes_and_strict_raw_scope(monkeypatch)
             build_chat_external_ref=lambda **kwargs: "chat:group-1:new:0",
         ),
     )
-    runtime = SimpleNamespace(session_id="group-1", chat_stream=SimpleNamespace(user_id="", group_id="1"))
+    runtime = SimpleNamespace(session_id="group-1", chat_stream=SimpleNamespace(user_id="", group_id="1", platform="qq"))
     message = SimpleNamespace(
-        processed_plain_text="Hiking weekend plan", message_id="new", raw_message=SimpleNamespace(components=[])
+        processed_plain_text="Hiking weekend plan", message_id="new", raw_message=SimpleNamespace(components=[]),
+        message_info=SimpleNamespace(user_info=SimpleNamespace(user_id="test-user")),
     )
     result = asyncio.run(references.build_references(runtime, [message]))
     assert {item.source_id for item in result} == {"m1", "p1", "i1"}

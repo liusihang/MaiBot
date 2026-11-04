@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import asyncio
+
 from src.A_memorix.host_service import a_memorix_host_service
 from src.common.logger import get_logger
 
@@ -360,6 +362,9 @@ class MemoryService:
                 "get_person_profile",
                 {"person_id": clean_person_id, "chat_id": chat_id, "limit": max(1, int(limit))},
             )
+            from src.common.person_names import profile_display_names
+
+            payload = await asyncio.to_thread(profile_display_names, payload)
             return self._coerce_profile_result(payload)
         except Exception as exc:
             logger.warning(f"获取人物画像失败: {exc}")
@@ -431,7 +436,10 @@ class MemoryService:
 
     async def profile_admin(self, *, action: str, **kwargs) -> Dict[str, Any]:
         try:
-            return await self._invoke_admin("memory_profile_admin", action=action, **kwargs)
+            from src.common.person_names import profile_display_names
+
+            payload = await self._invoke_admin("memory_profile_admin", action=action, **kwargs)
+            return await asyncio.to_thread(profile_display_names, payload)
         except Exception as exc:
             logger.warning(f"画像管理调用失败: {exc}")
             return {"success": False, "error": str(exc)}

@@ -213,7 +213,8 @@ class EpisodeSegmentationService:
             "1) paragraph_indices are the 1-based numbers shown in the input.\n"
             "   You may omit irrelevant paragraphs and reuse a paragraph across related episodes.\n"
             '   Return {"episodes": []} if there are no meaningful events.\n'
-            "2) title and summary must be non-empty.\n"
+            "2) title and summary must be non-empty. Narrate who said or did what directly, "
+            "with the times and conditions that affect the event. End with the event itself.\n"
             "3) keep participants/keywords concise and deduplicated.\n"
             "4) if uncertain, still provide best effort confidence values.\n"
             "\n"

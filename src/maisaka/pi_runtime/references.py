@@ -269,7 +269,19 @@ async def build_references(runtime: Any, source_messages: Sequence[Any]) -> List
                 )
     records.extend(await _image_records(session_id, source_messages))
     # Productive language use is an explicit intent query, never arbitrary habit injection.
-    return select_references(records, current_text)
+    from src.common.person_names import person_name_records
+    from src.chat.utils.utils import is_bot_self
+
+    users = [message.message_info.user_info.user_id for message in source_messages]
+    names = await asyncio.to_thread(person_name_records, platform=session.platform, user_ids=users)
+    identities = [make_reference(
+        "person-name", person_id,
+        "平台：" + name["platform"] + "\n用户ID：" + name["user_id"] + "\n主称呼："
+        + (name["primary_name"] or name["qq_name"] or name["user_id"]),
+        {"person_id": person_id, "platform": name["platform"], "user_id": name["user_id"]},
+        nature="person_display_name",
+    ) for person_id, name in names.items() if not is_bot_self(name["platform"], name["user_id"])]
+    return identities + select_references(records, current_text)
 
 
 async def _image_records(session_id: str, source_messages: Sequence[Any]) -> List[ReferenceRecord]:

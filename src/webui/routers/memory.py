@@ -3472,7 +3472,7 @@ async def _profile_list(limit: int) -> dict:
         for item in payload["items"]
         if isinstance(item, dict)
     ]
-    identities = _get_person_identities(profile_person_ids)
+    identities = await asyncio.to_thread(_get_person_identities, profile_person_ids)
 
     items = []
     for item in payload["items"]:
@@ -3482,7 +3482,9 @@ async def _profile_list(limit: int) -> dict:
         enriched = dict(item)
         person_id = str(enriched.get("person_id", "") or "").strip()
         identity = identities.get(person_id, {})
-        enriched["person_name"] = identity.get("person_name", "")
+        enriched["person_name"] = (
+            identity.get("person_name") or identity.get("user_nickname") or enriched.get("person_name", "")
+        )
         enriched["user_nickname"] = identity.get("user_nickname", "")
         enriched["group_cardname_list"] = identity.get("group_cardname_list", [])
         items.append(enriched)

@@ -416,10 +416,11 @@ class PersonProfileService:
             group_nicks = self._parse_group_nicks(record.group_cardname)
             memory_traits = self._parse_memory_traits(record.memory_points)
 
-            primary_name = primary_name or (
+            # MaiBot's ID-bound person record owns the maintained display name.
+            # The identity catalog still retains earlier names as search aliases.
+            primary_name = (
                 person_name
                 or nickname
-                or next((item for item in group_nicks if item), "")
                 or str(record.user_id or "").strip()
                 or person_id
             )

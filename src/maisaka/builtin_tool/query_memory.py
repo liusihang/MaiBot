@@ -10,6 +10,7 @@ import re
 from src.common.logger import get_logger
 from src.config.config import global_config
 from src.core.tooling import ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
+from src.maisaka.memory.result_view import memory_result_preview
 from src.maisaka.tool_result_store import tool_result_store
 from src.maisaka.utils.tool_post_execution import with_memory_feedback_task
 from src.person_info.person_info import resolve_person_id_for_memory
@@ -261,37 +262,12 @@ def _build_result_preview(raw: Dict[str, Any], *, result_id: str, total_chars: i
     return preview
 
 
-def _build_success_content(structured_content: Dict[str, Any], *, max_chars: int = MEMORY_PREVIEW_MAX_CHARS) -> str:
-    """构造带状态、来源和回读入口的有限预览。"""
-    status = structured_content["status"]
-    if status == "filtered":
-        lines = ["当前请求被聊天过滤策略跳过，未执行长期记忆检索。"]
-    elif status == "no_match":
-        lines = ["未找到满足当前人物、时间和聊天范围的长期记忆；未自动扩大检索范围。"]
-    else:
-        lines = [f"长期记忆命中 {structured_content['hit_count']} 条（有限预览，仅供核对，不代表事实已证实）。"]
-    if structured_content["mode"] != structured_content["effective_mode"]:
-        lines.append(f"为保留时间条件，实际模式：{structured_content['effective_mode']}。")
-    if structured_content["candidate_only_count"]:
-        lines.append(f"另有 {structured_content['candidate_only_count']} 条候选未达到可用证据要求，不作为答案依据。")
-    for index, hit in enumerate(structured_content["hits"], start=1):
-        source = (
-            "来源见原文"
-            if "metadata.source" in hit["omitted_fields"]
-            else hit["metadata"].get("source") or hit["source"] or "未标注来源"
-        )
-        source_id = hit["hash"] or hit["episode_id"] or "ID见原文"
-        lines.append(f"{index}. [{hit['type']} | {source} | {source_id}] {hit['content']}")
-    pointer = f'\n[原始结果 {structured_content["result_id"]}；需要细节时调用 read_tool_result(result_id="{structured_content["result_id"]}")]'
-    return _clip_text("\n".join(lines), max_chars - len(pointer)) + pointer
-
-
-def _build_replyer_memory_reference(structured_content: Dict[str, Any]) -> str:
+def _build_replyer_memory_reference(raw: Dict[str, Any], result_id: str) -> str:
     """构造自动透传给 replyer 的长期记忆参考。"""
-    if structured_content.get("status") != "matched" or not structured_content.get("hits"):
+    if raw.get("status") != "matched" or not raw.get("hits"):
         return ""
     prefix = REPLYER_MEMORY_REFERENCE_MARKER + "\n"
-    return prefix + _build_success_content(structured_content, max_chars=MEMORY_REFERENCE_MAX_CHARS - len(prefix))
+    return prefix + memory_result_preview(raw, result_id, max_chars=MEMORY_REFERENCE_MAX_CHARS - len(prefix))
 
 
 async def handle_tool(
@@ -430,6 +406,9 @@ async def handle_tool(
         "effective_scope": {**requested_scope, "mode": effective_mode},
         "scope_policy": "真实聊天及其已配置共享范围；未移除人物或时间条件。",
     }
+    from src.common.person_names import memory_people
+
+    raw_content["people"] = await asyncio.to_thread(memory_people, raw_content)
     raw_text = await asyncio.to_thread(json.dumps, raw_content, ensure_ascii=False, default=str)
     result_id = tool_result_store.save(session_id, invocation.tool_name, raw_text)
     structured_content = _build_result_preview(raw_content, result_id=result_id, total_chars=len(raw_text))
@@ -450,10 +429,10 @@ async def handle_tool(
             metadata=metadata,
         )
 
-    content = _build_success_content(structured_content)
+    content = memory_result_preview(raw_content, result_id, max_chars=MEMORY_PREVIEW_MAX_CHARS)
     if evidence_hits:
         metadata = with_memory_feedback_task(metadata)
-    replyer_memory_reference = _build_replyer_memory_reference(structured_content)
+    replyer_memory_reference = _build_replyer_memory_reference(raw_content, result_id)
     if replyer_memory_reference:
         metadata["replyer_memory_reference"] = replyer_memory_reference
 

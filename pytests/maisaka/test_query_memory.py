@@ -118,7 +118,7 @@ async def test_person_and_time_miss_is_no_match_without_second_search(monkeypatc
     assert receipt["effective_scope"]["person_id"] == "person-a"
     assert "replyer_memory_reference" not in result.metadata
     assert "memory_feedback_task" not in result.metadata
-    assert "未自动扩大" in result.content
+    assert result.content == "当前条件下未找到相关记忆。"
 
 
 @pytest.mark.asyncio
@@ -195,7 +195,9 @@ async def test_large_result_is_bounded_and_raw_evidence_remains_session_scoped(m
     assert receipt["preview_hit_count"] <= query_memory.MEMORY_PREVIEW_MAX_HITS
     assert receipt["truncated"] and result.metadata["bounded_preview"]
     assert result.metadata["reader_tool"] == "read_tool_result"
-    assert source in result.content and "paragraph-0" in result.content
+    assert "群聊摘要" in result.content
+    assert source not in result.content and "paragraph-0" not in result.content
+    assert "opaque_metadata" not in result.content
     raw = result_store.get("chat-a", receipt["result_id"])
     payload = json.loads(raw.content)
     assert payload["hits"] == [hit.to_dict() for hit in hits]
@@ -392,7 +394,7 @@ async def test_long_provenance_ids_are_omitted_not_fabricated(monkeypatch, resul
     assert hit["hash"] == hit["episode_id"] == hit["source"] == ""
     assert hit["metadata"]["person_ids"] == hit["metadata"]["evidence_message_ids"] == []
     assert "metadata.source" in hit["omitted_fields"] and "source" not in hit["metadata"]
-    assert "来源见原文" in result.content
+    assert source in result.content and identifier not in result.content
     assert receipt["person_id"] is None and "person_id" in receipt["omitted_fields"]
     assert receipt["effective_scope"]["person_id"] is None
     assert "person_id" in receipt["effective_scope"]["omitted_fields"]

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-from src.A_memorix.core.retrieval import RetrievalScope
+import asyncio
+import json
+
+from src.A_memorix.core.retrieval import RetrievalScope, TemporalQueryOptions
+from src.A_memorix.core.retrieval.score_calibration import fuse_score_maps
+from src.A_memorix.core.utils.episode_retrieval_service import EpisodeRetrievalService
 from src.A_memorix.core.utils.search_execution_service import (
     SearchExecutionRequest,
     SearchExecutionResult,
@@ -126,18 +131,122 @@ class MemorySearchService(KernelServiceBase):
             return {"summary": "", "hits": [], "filtered": True, **self._search_status_fields()}
 
         hits = [self._retrieval_result_hit(item) for item in result.results]
-        filtered = self._filter_hits(hits, request.person_id)
-        filtered = self._filter_user_visible_hits(filtered)
-        filtered = self._filter_hits_by_retrieval_scope(filtered, scope)
-        if request.respect_filter:
-            filtered = self._filter_hits_by_retrieval_type_scope(
-                filtered,
-                current_stream_id=request.chat_id,
-                current_group_id=request.group_id,
-                current_user_id=request.user_id,
+        if mode in {"search", "hybrid"}:
+            # 事实使用已投影的有效段落进入；实体用于定位支撑正文，避免重复返回空壳。
+            entity_hits = await asyncio.to_thread(
+                type(self)._entity_evidence_hits, self, query, request, time_window, scope
             )
-        filtered = filtered[:limit]
-        return await self._finalize_search_response(filtered)
+            filtered = type(self)._visible_search_hits(self, hits + entity_hits, request, scope)
+            episodes = await asyncio.to_thread(
+                type(self)._related_episode_hits, self, query, filtered, request, time_window, scope
+            )
+            episode_hits = type(self)._visible_search_hits(self, episodes, request, scope)
+            visible_ids = {type(self)._hit_identity(item) for item in filtered}
+            # 实体投影补齐候选，不把同一段落的实体链接当作第二份独立检索证据。
+            paragraphs = {}
+            for item in hits + entity_hits:
+                identity = type(self)._hit_identity(item)
+                if identity in visible_ids:
+                    paragraphs.setdefault(identity, item)
+            branches = [list(paragraphs.values()), episode_hits]
+            # 从过滤后的记录回填正文，不能把已失效的原始事实重新带回结果。
+            visible = {type(self)._hit_identity(item): item for item in filtered + episode_hits}
+            ranked = type(self)._rank_unified_hits(branches)
+            filtered = [visible[type(self)._hit_identity(item)] for item in ranked]
+        else:
+            filtered = type(self)._visible_search_hits(self, hits, request, scope)
+        return await self._finalize_search_response(filtered[:limit])
+
+    @staticmethod
+    def _hit_identity(hit: Dict[str, Any]) -> str:
+        return str(hit.get("type", "")) + ":" + str(hit.get("episode_id") or hit.get("hash") or "")
+
+    def _visible_search_hits(
+        self, hits: List[Dict[str, Any]], request: KernelSearchRequest, scope: Optional[RetrievalScope]
+    ) -> List[Dict[str, Any]]:
+        # 先从数据库投影正文和人物归属，再执行定向人物过滤。
+        hits = self._filter_user_visible_hits(hits)
+        hits = self._filter_hits(hits, request.person_id)
+        hits = self._filter_hits_by_retrieval_scope(hits, scope)
+        if request.respect_filter:
+            hits = self._filter_hits_by_retrieval_type_scope(
+                hits, current_stream_id=request.chat_id,
+                current_group_id=request.group_id, current_user_id=request.user_id,
+            )
+        return hits
+
+    @staticmethod
+    def _rank_unified_hits(branches: List[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """按已通过证据过滤的通道名次融合不同记忆类型，不为相对分设置相关度门槛。"""
+        records: Dict[str, Dict[str, Any]] = {}
+        scores: Dict[str, Dict[str, float]] = {}
+        for index, branch in enumerate(branches):
+            channel = str(index)
+            scores[channel] = {}
+            for rank, hit in enumerate(branch, 1):
+                identity = MemorySearchService._hit_identity(hit)
+                records.setdefault(identity, hit)
+                scores[channel].setdefault(identity, -float(rank))
+        fused, _ = fuse_score_maps(scores, {channel: 1.0 for channel in scores}, method="weighted_rrf")
+        return [records[key] for key in sorted(fused, key=lambda key: (-fused[key], key))]
+
+    def _entity_evidence_hits(
+        self, query: str, request: KernelSearchRequest,
+        window: _NormalizedSearchTimeWindow, scope: Optional[RetrievalScope],
+    ) -> List[Dict[str, Any]]:
+        entities = self.metadata_store.query(
+            "SELECT hash, name FROM entities WHERE COALESCE(is_deleted,0)=0 "
+            "AND LENGTH(TRIM(name))>=2 AND INSTR(LOWER(?), LOWER(TRIM(name)))>0 "
+            "AND (? IS NULL OR hash IN (SELECT value FROM json_each(?))) "
+            "ORDER BY LENGTH(name) DESC, name ASC LIMIT 8",
+            (query, None if scope is None else scope.key,
+             json.dumps(sorted(scope.entity_ids)) if scope else "[]"),
+        )
+        if not entities:
+            return []
+        paragraphs = self.metadata_store.get_paragraphs_by_entity_hashes([row["hash"] for row in entities])
+        temporal = TemporalQueryOptions(time_from=window.numeric_start, time_to=window.numeric_end)
+        hits: Dict[str, Dict[str, Any]] = {}
+        for entity in entities:
+            for row in paragraphs.get(entity["hash"], []):
+                if scope is not None and row["hash"] not in scope.paragraph_ids:
+                    continue
+                if (window.numeric_start is not None or window.numeric_end is not None) and not self.retriever._is_temporal_match(row, temporal):
+                    continue
+                metadata = dict(row.get("metadata") or {})
+                metadata["retrieval_evidence"] = {"passed": True, "backfilled": False, "entity_match": entity["name"]}
+                hits.setdefault(row["hash"], {
+                    "hash": row["hash"], "type": "paragraph", "content": row["content"],
+                    "source": row.get("source", ""), "metadata": metadata, "score": 1.0,
+                })
+                if len(hits) >= 80:
+                    return list(hits.values())
+        return list(hits.values())
+
+    def _related_episode_hits(
+        self, query: str, hits: List[Dict[str, Any]], request: KernelSearchRequest,
+        window: _NormalizedSearchTimeWindow, scope: Optional[RetrievalScope],
+    ) -> List[Dict[str, Any]]:
+        bounds = {"time_from": window.numeric_start, "time_to": window.numeric_end,
+                  "person": request.person_id or None}
+        lexical = self.metadata_store.query_episodes(
+            query=query, limit=max(20, request.limit * 4),
+            allowed_episode_ids=scope.episode_ids if scope else None, **bounds,
+        )
+        paragraph_ids = [item["hash"] for item in hits if item.get("type") == "paragraph"]
+        projected = self.metadata_store.get_episode_rows_by_paragraph_hashes(paragraph_ids, **bounds)
+        if scope is not None:
+            projected = [item for item in projected if item["episode_id"] in scope.episode_ids]
+        evidence_ranks = {hash_value: rank for rank, hash_value in enumerate(paragraph_ids)}
+        projected.sort(key=lambda item: min(
+            (evidence_ranks.get(value, len(paragraph_ids)) for value in item.get("matched_paragraph_hashes", [])),
+            default=len(paragraph_ids),
+        ))
+        # 复用 Episode 的词法与证据名次融合，不再为同一问题重复执行向量查询。
+        rows = EpisodeRetrievalService(metadata_store=self.metadata_store)._fuse_branches(
+            {"lexical": lexical, "paragraph_evidence": projected}, top_k=max(20, request.limit * 4)
+        )
+        return [self._episode_hit(row) for row in rows]
 
     async def _finalize_search_response(self, hits: List[Dict[str, Any]]) -> Dict[str, Any]:
         """只为最终返回且实际采用的关系命中提交一次 ACCESS。"""
@@ -290,6 +399,7 @@ class MemorySearchService(KernelServiceBase):
                 source=source,
                 use_threshold=True,
                 enable_ppr=bool(self._cfg("retrieval.enable_ppr", True)),
+                hybrid_rrf=caller == "sdk_memory_kernel" and query_type in {"search", "hybrid"},
             ),
             enforce_chat_filter=enforce_chat_filter,
         )

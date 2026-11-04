@@ -181,6 +181,7 @@ def _rank(
     context: str = "",
 ) -> List[Dict[str, Any]]:
     cosine = {}
+    intent_cosine = {}
     situations = {}
     if query_vector is not None:
         for index, document in enumerate(documents):
@@ -190,6 +191,9 @@ def _rank(
             target = jargon_query_vector if records[index]["kind"] == "jargon" and jargon_query_vector is not None else query_vector
             if len(vector) != len(target):
                 raise ValueError("Language cached vector dimension does not match query")
+            score = sum(a * b for a, b in zip(vector, query_vector, strict=True))
+            if math.isfinite(score):
+                intent_cosine[index] = score
             score = sum(a * b for a, b in zip(vector, target, strict=True))
             if math.isfinite(score):
                 cosine[index] = score
@@ -198,17 +202,17 @@ def _rank(
                 score = sum(a * b for a, b in zip(vectors[situation], query_vector, strict=True))
                 if math.isfinite(score):
                     situations[index] = score
-    # Apply eligibility to both routes: keyword overlap cannot rescue a measured
-    # weak semantic match. Missing vectors permit only explicit phrase matches.
+    # Both routes require the intended meaning to fit. Topic context can help
+    # rank matching jargon, but cannot create a hit from background alone.
+    # Missing vectors permit only explicit phrases in the intended meaning.
     eligible = set()
     for index, record in enumerate(records):
         if index not in cosine:
-            literal_query = query + ("\n" + context if record["kind"] == "jargon" and context else "")
-            if _literal_match(record, literal_query):
+            if _literal_match(record, query):
                 eligible.add(index)
             continue
         minimum = MIN_EXPRESSION_SIMILARITY if record["kind"] == "expression" else MIN_SEMANTIC_SIMILARITY
-        if cosine[index] < minimum:
+        if intent_cosine.get(index, -1) < minimum or cosine[index] < minimum:
             continue
         if situation_document(record) and situations.get(index, -1) < MIN_SITUATION_SIMILARITY:
             continue
@@ -236,6 +240,7 @@ def _rank(
                     "semantic_rank": semantic_ranks.get(index),
                     "bm25_score": lexical[index],
                     "cosine_score": cosine.get(index),
+                    "intent_score": intent_cosine.get(index),
                     "situation_score": situations.get(index),
                     "rrf_score": fused[index],
                 },

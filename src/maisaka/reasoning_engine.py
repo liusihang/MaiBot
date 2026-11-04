@@ -1166,6 +1166,9 @@ class MaisakaReasoningEngine:
     ) -> Optional[LLMContextMessage]:
         """根据真实消息构造对应的上下文消息。"""
 
+        from src.common.person_names import project_message_names
+
+        message = await asyncio.to_thread(project_message_names, message)
         source_sequence = message.raw_message
         visible_text = self._build_legacy_visible_text(message, source_sequence, source_kind=source_kind)
         include_chat_id = self._runtime._is_focus_mode_active_for_current_chat()

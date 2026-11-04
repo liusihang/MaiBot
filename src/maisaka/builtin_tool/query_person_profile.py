@@ -17,7 +17,7 @@ def get_tool_spec(*, enabled: bool = True) -> ToolSpec:
 
     return ToolSpec(
         name="query_person_profile",
-        description="查询人物画像。当需要查询与某人的关系时使用。",
+        description="查询人物的主称呼、已知别名、背景与关系。身份按人物 ID 关联。",
         parameters_schema={
             "type": "object",
             "properties": {

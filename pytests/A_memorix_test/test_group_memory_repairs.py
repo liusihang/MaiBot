@@ -233,6 +233,7 @@ class RememberTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertTrue(result.success)
         self.assertTrue(result.structured_content["saved"])
+        self.assertEqual(writer.call_args.kwargs["text"], "甲喜欢喝茶\n\n来源：\n甲：我喜欢喝茶")
         self.assertEqual(writer.call_args.kwargs["metadata"]["evidence"][0]["text"], "我喜欢喝茶")
         self.assertEqual(writer.call_args.kwargs["group_id"], "test-group")
 

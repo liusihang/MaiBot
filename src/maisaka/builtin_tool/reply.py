@@ -785,7 +785,12 @@ async def execute_reply(
         target_user_name = ""
         reply_receipt = f'"{bot_name}"已生成并向当前会话发送了回复"{combined_reply_text}"'
     else:
-        target_user_name = target_user_info.user_cardname or target_user_info.user_nickname or target_user_info.user_id
+        from src.common.person_names import display_name
+
+        target_user_name = await asyncio.to_thread(
+            display_name, tool_ctx.runtime.chat_stream.platform, target_user_info.user_id,
+            target_user_info.user_nickname or "",
+        )
         reply_receipt = f'"{bot_name}"已生成并向"{target_user_name}"发送了回复"{combined_reply_text}"'
 
     if tool_ctx.runtime.chat_stream.platform == CLI_PLATFORM_NAME:

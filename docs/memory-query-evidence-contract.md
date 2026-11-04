@@ -30,7 +30,14 @@ characters, the replyer reference at most 2,200, and the structured receipt at m
 provenance IDs/URIs are kept whole or explicitly omitted with `omitted_fields`,
 never shortened into a different apparent identifier. JSON escaping counts
 against structured preview budgets.
-`read_tool_result` can page/search that JSON in the same session. This is not a
+The complete JSON remains available to host diagnostics. Model-visible output
+contains readable memory text, source labels, event times when available, and a
+continuation handle. `read_tool_result` projects stored memory receipts into the
+same readable view before paging. Keyword searches match titles and content,
+returning complete matching entries within the page budget; oversized entries
+use continuation offsets. Query echoes, scores, internal identities, scope
+receipts and diagnostic metadata are not searched or sent to the model. Legacy
+stored memory receipts use the same projection on their next read. This is not a
 lossless dump of the full raw retrieval candidate set. Existing
 store eviction/restart semantics apply. Filtered/failed responses never store or
 forward accompanying hits. No-match responses supply no replyer memory reference
@@ -44,9 +51,29 @@ The small edits to `core/retrieval/threshold.py` and
 compatibility fix under `src/A_memorix/MODIFICATION_POLICY.md`: MaiBot needs a
 fail-closed person filter and a preserved backfill/evidence distinction before
 its explicit tool can safely present scoped evidence. No global threshold,
-recall count, retrieval algorithm, or stored-memory schema is changed. Equivalent
+recall count or stored-memory schema is changed by that initial repair. Equivalent
 changes should be reconciled with upstream `A-Dawn/A_memorix` `MaiBot_branch`
 before the next subtree sync. This work does not modify or publish upstream.
+
+The 2026-11-03 compatibility repair also updates the SDK `search/hybrid` path:
+it executes vector and BM25 recall together and uses weighted reciprocal rank
+fusion for ordering. Relevance uses pre-fusion semantic evidence and actual
+lexical matches rather than applying cosine thresholds to reciprocal-rank scores.
+Matching entities contribute their visible supporting paragraphs; valid fact
+paragraphs and related episodes are included through the same scoped entry point.
+The same SDK route is used by automatic recall. Stored SQLite metadata is decoded
+at the scope-resolution boundary so person-fact paragraphs retain their actual
+chat ownership. Person/time/deletion/current-state filters remain in force.
+These changes belong to the synchronized A_Memorix implementation and should be
+reconciled with its upstream MaiBot_branch before the next subtree update.
+
+The 2026-11-04 deployed compatibility patch makes MaiBot's ID-bound
+`PersonInfo.person_name` authoritative when deriving profile display names,
+falling back to the QQ nickname and then the user ID. Existing catalog names
+remain searchable aliases. The small episode-generation prompt adjustment
+narrates concrete speakers, actions and relevant conditions. These local
+changes keep the deployed name resolver and derived memory records consistent;
+their A_Memorix portions should also be reconciled with upstream MaiBot_branch.
 
 Regression coverage includes strict person filtering, low-score real retrieval
 results through projection and host coercion into explicit tool receipts,

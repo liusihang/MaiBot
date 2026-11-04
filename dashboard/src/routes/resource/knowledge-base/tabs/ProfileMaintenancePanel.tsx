@@ -41,6 +41,10 @@ export function ProfileMaintenancePanel({ profile }: ProfileMaintenancePanelProp
     activePersonId,
     selectedPersonId,
     selectedDisplayName,
+    primaryName,
+    setPrimaryName,
+    primaryNameSaving,
+    savePrimaryName,
     currentProfileEvidence,
     evidenceLoading,
     evidenceLimit,
@@ -68,6 +72,25 @@ export function ProfileMaintenancePanel({ profile }: ProfileMaintenancePanelProp
 
   return (
     <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle>主称呼</CardTitle>
+          <CardDescription>按平台和用户 ID 关联人物，后台和模型统一使用主称呼；留空时使用 QQ 昵称。</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <Label htmlFor="profile-primary-name">{selectedDisplayName}</Label>
+          <div className="flex gap-2">
+            <Input id="profile-primary-name" value={primaryName} maxLength={255}
+              disabled={!hasPersonTarget || primaryNameSaving}
+              onChange={(event) => setPrimaryName(event.target.value)} placeholder="留空使用 QQ 昵称" />
+            <Button type="button" disabled={!hasPersonTarget || primaryNameSaving}
+              onClick={() => void savePrimaryName()}>
+              <Save className="mr-2 h-4 w-4" />保存主称呼
+            </Button>
+          </div>
+          <p className="text-muted-foreground text-xs break-all">人物 ID：{activePersonId || '请选择人物'}</p>
+        </CardContent>
+      </Card>
       <Card>
         <CardHeader>
           <CardTitle>支撑证据</CardTitle>

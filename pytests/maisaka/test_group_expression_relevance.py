@@ -46,6 +46,57 @@ def test_relevance_filter_returns_fewer_than_limit():
     assert [row["id"] for row in result] == ["jargon:1"]
 
 
+def test_topic_context_cannot_create_a_jargon_hit_without_intent_relevance():
+    record = item("jargon:1", "靶场战神")
+    assert search._rank(
+        [record], ["document"], [100], {"document": [0, 1]}, [1, 0], 6,
+        query="澄清假设题没有指具体的人", jargon_query_vector=[0, 1], context="游戏测试题",
+    ) == []
+
+
+def test_topic_context_can_rank_jargon_that_already_matches_intent():
+    records = [item("jargon:1", "甲"), item("jargon:2", "乙")]
+    ranked = search._rank(
+        records, ["a", "b"], [0, 0],
+        {"a": [0.75, 0.6614378278], "b": [0.65, 0.7599342077]},
+        [1, 0], 6, query="核心含义", jargon_query_vector=[0, 1], context="话题领域",
+    )
+    assert [row["id"] for row in ranked] == ["jargon:2", "jargon:1"]
+
+
+def test_missing_jargon_vector_requires_literal_intent_not_only_background():
+    record = item("jargon:1", "靶场战神")
+    assert search._rank(
+        [record], ["document"], [100], {}, None, 6,
+        query="澄清假设题", context="之前有人说过靶场战神",
+    ) == []
+    assert search._rank(
+        [record], ["document"], [100], {}, None, 6,
+        query="靶场战神", context="游戏",
+    )[0]["id"] == "jargon:1"
+
+
+@pytest.mark.asyncio
+async def test_search_checks_jargon_against_intent_before_context(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from src.common.data_models.embedding_service_data_models import EmbeddingResult
+
+    record = item("jargon:1", "靶场战神")
+    query, context = "澄清假设题没有指具体的人", "游戏测试题"
+    document = search.semantic_document(record)
+    values = {query: [1, 0], query + "\n" + context: [0, 1], document: [0, 1]}
+    monkeypatch.setattr(search, "load_group_expression_catalog", AsyncMock(return_value=[record]))
+    monkeypatch.setattr(search.vector_cache, "_space", lambda result: result.model_name)
+    client = SimpleNamespace(embed_text=AsyncMock(side_effect=lambda text, **_: EmbeddingResult(
+        embedding=values[text], model_name="test", model_identifier="test", api_provider="test",
+    )))
+    index = search.vector_cache.EmojiDescriptionIndex(tmp_path / "vectors.sqlite")
+    result = await search.search_group_expressions("chat", query, context, client=client, index=index)
+    assert result["coverage"]["complete"]
+    assert result["candidates"] == []
+
+
 def test_missing_vectors_require_actual_phrase_not_meaning_overlap():
     records = [item("jargon:1", "轮椅"), item("jargon:2", "脑测")]
     result = search._rank(records, ["a", "b"], [1, 10000], {}, None, 6, query="用轮椅形容轻松过关")

@@ -420,6 +420,7 @@ class DualPathRetriever:
         temporal: Optional[TemporalQueryOptions] = None,
         enable_ppr: Optional[bool] = None,
         scope: Optional[RetrievalScope] = None,
+        hybrid_rrf: bool = False,
     ) -> List[RetrievalResult]:
         """
         执行检索（异步方法）
@@ -450,6 +451,13 @@ class DualPathRetriever:
 
         if temporal and not (query or "").strip():
             return self._retrieve_temporal_only(temporal, top_k, scope=scope)
+
+        # 显式统一记忆查询始终运行词法和向量两路；自动回忆保留原策略。
+        if hybrid_rrf:
+            return await self._retrieve_dual_vector_pools(
+                query, top_k, temporal=temporal, relation_intent=relation_intent_ctx,
+                scope=scope, enable_ppr=False, hybrid_rrf=True,
+            )
 
         # 根据策略执行检索
         if strategy == RetrievalStrategy.PARA_ONLY:
@@ -2136,6 +2144,7 @@ class DualPathRetriever:
         relation_intent: Optional[Dict[str, Any]] = None,
         enable_ppr: bool = True,
         scope: Optional[RetrievalScope] = None,
+        hybrid_rrf: bool = False,
     ) -> List[RetrievalResult]:
         relation_intent = relation_intent or {}
         semantic_weight, sparse_weight, graph_weight, graph_top_k = self._dual_pool_weights(relation_intent)
@@ -2211,7 +2220,7 @@ class DualPathRetriever:
             logger.warning("embedding 不可用，跳过双向量池向量召回")
 
         sparse_para_results: List[RetrievalResult] = []
-        if self._should_use_sparse(embedding_ok, list(candidates.values())):
+        if hybrid_rrf or self._should_use_sparse(embedding_ok, list(candidates.values())):
             sparse_para_results = self._search_paragraphs_sparse(
                 query=query,
                 top_k=max(top_k * 2, self.config.sparse.candidate_k),
@@ -2242,6 +2251,9 @@ class DualPathRetriever:
                         if key not in {"score_breakdown", "evidence_items"}
                     }
                 )
+            if hybrid_rrf:
+                # BM25 的绝对值和向量相似度不同标度；词法命中独立作为召回证据。
+                candidate.metadata["keyword_match"] = True
 
         results = list(candidates.values())
         configured_semantic_weight = semantic_weight
@@ -2254,6 +2266,9 @@ class DualPathRetriever:
             graph_weight=graph_weight,
             scan_limit=max(10, top_k * 2),
         )
+        if hybrid_rrf:
+            # 两路排名各占一票；图谱已用于扩展候选，不再为同一段落重复加权。
+            semantic_weight, sparse_weight, graph_weight = 0.5, 0.5, 0.0
         score_maps: Dict[str, Dict[str, float]] = {
             "semantic": {},
             "sparse": {},
@@ -2270,6 +2285,7 @@ class DualPathRetriever:
             )
             if graph_score > 0.0:
                 score_maps["graph"][item.hash_value] = graph_score
+        calibration_method = "weighted_rrf" if hybrid_rrf else self.config.vector_pools.score_calibration_method
         final_scores, calibrated_score_maps = fuse_score_maps(
             score_maps,
             {
@@ -2277,7 +2293,7 @@ class DualPathRetriever:
                 "sparse": sparse_weight,
                 "graph": graph_weight,
             },
-            method=self.config.vector_pools.score_calibration_method,
+            method=calibration_method,
             rrf_k=self.config.vector_pools.score_calibration_rrf_k,
         )
         for item in results:
@@ -2297,7 +2313,7 @@ class DualPathRetriever:
                     "calibrated_semantic": calibrated_semantic_score,
                     "calibrated_sparse": calibrated_sparse_score,
                     "calibrated_graph": calibrated_graph_score,
-                    "score_calibration_method": self.config.vector_pools.score_calibration_method,
+                    "score_calibration_method": calibration_method,
                     "semantic_weight": semantic_weight,
                     "sparse_weight": sparse_weight,
                     "graph_weight": graph_weight,
@@ -3028,6 +3044,15 @@ class DualPathRetriever:
             return True
         target = person.strip().lower()
         if not target:
+            return True
+        paragraph = self.metadata_store.get_paragraph(paragraph_hash)
+        metadata = coerce_metadata_dict(paragraph.get("metadata")) if paragraph else {}
+        person_ids = metadata.get("person_ids", [])
+        if isinstance(person_ids, (list, tuple, set)) and target in {
+            str(value).strip().lower() for value in person_ids
+        }:
+            return True
+        if str(metadata.get("person_id", "")).strip().lower() == target:
             return True
         para_entities = self.metadata_store.get_paragraph_entities(paragraph_hash)
         for ent in para_entities:

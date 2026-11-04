@@ -476,8 +476,9 @@ class Person:
                     record.platform = self.platform
                     record.user_id = self.user_id
                     record.user_nickname = self.nickname
-                    record.person_name = self.person_name
-                    record.name_reason = self.name_reason
+                    # Receiving a nickname/card update must preserve the maintained primary name.
+                    self.person_name = record.person_name
+                    self.name_reason = record.name_reason
                     record.know_counts = self.know_times
                     record.first_known_time = first_known_time
                     record.last_known_time = last_known_time

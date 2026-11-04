@@ -4,6 +4,7 @@ from typing import Any, List, Optional
 import re
 
 from src.core.tooling import ToolExecutionContext, ToolExecutionResult, ToolInvocation, ToolSpec
+from src.maisaka.memory.result_view import format_evidence_page, memory_result_page, parse_memory_result
 from src.maisaka.tool_result_store import StoredToolResult, tool_result_store
 
 from .context import BuiltinToolRuntimeContext
@@ -161,6 +162,10 @@ async def handle_tool(
     max_chars = min(
         max(_coerce_int(invocation.arguments.get("max_chars"), READ_DEFAULT_MAX_CHARS), 1), READ_MAX_CHARS_LIMIT
     )
+    memory = parse_memory_result(stored_result.content) if stored_result.tool_name == "query_memory" else None
+    if memory is not None:
+        page = memory_result_page(memory, max(offset, 0), max_chars, keyword)
+        return tool_ctx.build_success_result(invocation.tool_name, format_evidence_page(page, result_id))
     content = (
         _read_by_keyword(stored_result, keyword, offset, max_chars)
         if keyword

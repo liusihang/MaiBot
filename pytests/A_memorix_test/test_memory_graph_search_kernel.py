@@ -100,9 +100,15 @@ class _ScopedSearchMetadataStore:
                 for relation_hash, paragraphs in self.relation_paragraphs.items()
                 for paragraph in paragraphs
             ]
-        if "from paragraph_entities" in sql_token or "from episode_paragraphs" in sql_token:
+        if "from paragraph_entities" in sql_token or "from episode_paragraphs" in sql_token or "from entities" in sql_token:
             return []
         raise AssertionError(f"unexpected query: {sql_token}")
+
+    def query_episodes(self, **kwargs: Any) -> list[dict[str, Any]]:
+        return []
+
+    def get_episode_rows_by_paragraph_hashes(self, paragraph_hashes, **kwargs: Any) -> list[dict[str, Any]]:
+        return []
 
     def get_paragraphs_by_hashes(self, paragraph_hashes: list[str]) -> dict[str, dict[str, Any]]:
         return {
@@ -196,6 +202,7 @@ class _ScopedSearchRetriever:
         temporal: Any,
         enable_ppr: bool,
         scope: RetrievalScope | None = None,
+        hybrid_rrf: bool = False,
     ) -> list[RetrievalResult]:
         del query, enable_ppr
         self.top_k_values.append(top_k)
@@ -260,6 +267,7 @@ class _RetrievalTypeFilterSearchRetriever:
         temporal: Any,
         enable_ppr: bool,
         scope: RetrievalScope | None = None,
+        hybrid_rrf: bool = False,
     ) -> list[RetrievalResult]:
         del query, temporal, enable_ppr
         results = [

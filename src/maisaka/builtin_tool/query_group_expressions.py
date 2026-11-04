@@ -11,7 +11,7 @@ def get_tool_spec() -> ToolSpec:
     return ToolSpec(
         name="query_group_expressions",
         description=(
-            "每次发言前调用：按你想表达的意思和当前语境，融合检索当前会话可用的表达、黑话和群梗。"
+            "每次发言前调用：按核心意思检索当前会话可用的表达、黑话和群梗，按需用话题线索辅助选择。"
             "表达与黑话合计最多返回6条，包含相应情景或含义及真实例句。有合适的就选择借鉴，再自行组织最终回复；"
             "没有合适的、结果为空或查询失败时，按自己的想法说。"
         ),
@@ -22,12 +22,12 @@ def get_tool_spec() -> ToolSpec:
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 1000,
-                    "description": "你想表达的含义，例如：轻松祝贺对方终于通关。",
+                    "description": "本次想表达的核心意思或态度，用具体的语义关键词或简短短语概括。",
                 },
                 "context": {
                     "type": "string",
                     "maxLength": 2000,
-                    "description": "可选：当前对话、对象关系和语气；不要提供其他群的私人内容。",
+                    "description": "可选：影响表达用法的话题领域、对象类别或词义线索；无需补充时留空。",
                 },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 6, "default": 6},
             },

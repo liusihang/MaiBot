@@ -9,6 +9,28 @@ from src.maisaka.pi_runtime.evidence import DurableEvidenceStore, public_archive
 from src.maisaka.tool_result_store import ToolResultStore
 
 
+def test_memory_keyword_read_ignores_query_echo_and_hides_diagnostics(tmp_path):
+    async def run():
+        source = ToolResultStore()
+        service = DurableEvidenceStore(str(tmp_path / "memory.sqlite"), source)
+        raw = {
+            "query": "马斯克 顺之利刃 称号",
+            "status": "matched",
+            "requested_scope": {"chat_id": "PRIVATE_SESSION"},
+            "hits": [{"content": "几十块钱的通行证要什么自行车", "score": 0.52, "hash": "PRIVATE_HASH"}],
+        }
+        handle = source.save("parent", "query_memory", json.dumps(raw, ensure_ascii=False))
+        await service.capture("parent", SimpleNamespace(metadata={"result_id": handle}))
+        page = await service.read("parent", handle, keyword="顺之利刃")
+        assert page["matched"] is False
+        assert page["text"] == ""
+        body = await service.read("parent", handle)
+        assert "通行证" in body["text"]
+        assert "PRIVATE_HASH" not in body["text"] and "requested_scope" not in body["text"]
+
+    asyncio.run(run())
+
+
 def test_full_raw_survives_memory_eviction_and_restart_with_parent_child_scope(tmp_path):
     async def run():
         source = ToolResultStore()

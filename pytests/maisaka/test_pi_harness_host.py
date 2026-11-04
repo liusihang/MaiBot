@@ -663,6 +663,37 @@ async def test_bad_evidence_handle_is_known_failed_result_not_unknown_effect(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("keyword", ["", "顺之利刃"])
+async def test_memory_reader_sends_only_public_body_to_the_real_model_wire(monkeypatch, tmp_path, keyword):
+    from src.maisaka.tool_result_store import tool_result_store
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    raw = json.dumps({
+        "query": "马斯克 顺之利刃 称号", "status": "matched",
+        "requested_scope": {"chat_id": "PRIVATE_SESSION"},
+        "hits": [{"content": "几十块钱的通行证要什么自行车", "hash": "PRIVATE_HASH", "score": 0.52}],
+    }, ensure_ascii=False)
+    handle = tool_result_store.save("real-chat", "query_memory", raw)
+    with wire_server([("read_tool_result", {"result_id": handle, "keyword": keyword})]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, invoked = engine()
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner._ensure_storage()
+            await runner.evidence.capture("real-chat", SimpleNamespace(metadata={"result_id": handle}))
+            await runner.run([])
+            visible = "\n".join(str(m.get("content", "")) for m in requests[-1]["messages"] if m["role"] == "tool")
+            assert ("通行证" in visible) is (not keyword)
+            if keyword:
+                assert "没有这个关键词" in visible
+            for field in ("PRIVATE_HASH", "PRIVATE_SESSION", "requested_scope", "source_session", "matched", "score"):
+                assert field not in visible
+            assert not invoked
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["schema", "provider"])
 async def test_real_restored_frozen_tool_contract_rebinding_fails_closed(monkeypatch, tmp_path, change):
     with wire_server() as (config, requests):
@@ -1252,3 +1283,85 @@ async def test_local_search_timeout_is_failed_receipt_and_allows_reply(monkeypat
             assert [item.tool_name for item in invoked] == [name, "reply"]
         finally:
             await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_child_browser_navigation_timeout_returns_error_and_keeps_research_running(monkeypatch, tmp_path):
+    from src.core.tooling import ToolAnnotation
+
+    monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
+    with wire_server([
+        ("subagent", {"task": "Verify match schedule"}),
+        ("browser_navigate", {"url": "https://lolesports.com/schedule"}),
+        {"text": "Browser timed out; previously retrieved official evidence remains available."},
+        None,
+    ]) as (config, requests):
+        monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
+        host, _ = engine()
+        host._runtime._tool_registry.list_tools.return_value.append(ToolSpec(
+            name="browser_navigate", description="Navigate to a URL",
+            parameters_schema={"type": "object", "properties": {"url": {"type": "string"}}},
+            provider_name="mcp", provider_type="mcp",
+            annotation=ToolAnnotation(read_only=False, destructive=True),
+            metadata={"server_name": "playwright", "registry_original_name": "browser_navigate"},
+        ))
+
+        async def invoke(invocation, context, **kwargs):
+            return ToolExecutionResult(invocation.tool_name, False, error_message=
+                "MCP browser_navigate timed out after 120 seconds")
+
+        host._runtime._tool_registry.invoke = invoke
+        runner = PiGroupRunner(host, data_dir=tmp_path)
+        try:
+            await runner.run([])
+            parent_receipt = await runner._db("lookup_tool_execution", runner.session_id, "call-1")
+            visible = parent_receipt.result["content"][0]["text"]
+            handle = re.search(r'handle="(pi-child-[^\"]+)"', visible)[1]
+            child = await asyncio.to_thread(runner.subagents._summary, runner.session_id, handle)
+            assert child["status"] == "completed", child
+            assert "previously retrieved official evidence" in child["conclusion"]
+            assert len(requests) == 4
+            with runner.subagents._connect() as connection:
+                child_id = connection.execute("SELECT child FROM pi_children WHERE handle=?", (handle,)).fetchone()[0]
+            receipt = await runner._db("lookup_tool_execution", child_id, "call-2")
+            assert receipt.status == "failed"
+            assert receipt.result["isError"] is True
+            assert "120 seconds" in receipt.result["content"][0]["text"]
+            assert "120 seconds" in json.dumps(requests[2]["messages"])
+        finally:
+            await runner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,server,url", [
+    ("browser_evaluate", "playwright", "https://example.org"),
+    ("browser_navigate", "other-server", "https://example.org"),
+    ("browser_navigate", "playwright", "javascript:submitForm()"),
+])
+async def test_navigation_recovery_does_not_cover_scripts_or_other_providers(tmp_path, name, server, url):
+    from src.core.tooling import ToolAnnotation
+    from src.maisaka.pi_runtime.runner import pi_tool
+
+    host, _ = engine()
+    spec = ToolSpec(
+        name=name, description=name, parameters_schema={"type": "object"},
+        provider_name="mcp", provider_type="mcp",
+        annotation=ToolAnnotation(read_only=False, destructive=True),
+        metadata={"server_name": server, "registry_original_name": name},
+    )
+    host._runtime._tool_registry.list_tools.return_value = [spec]
+    host._runtime._tool_registry.invoke = AsyncMock(return_value=ToolExecutionResult(name, False, error_message="timeout"))
+    runner = PiGroupRunner(host, data_dir=tmp_path)
+    child = runner.session_id + "/child/failed-action"
+    try:
+        await runner._ensure_storage()
+        runner._tools = {name: pi_tool(spec.to_llm_definition())}
+        runner._bindings = {name: spec.execution_contract()}
+        runner._children[child] = {"tools": [name]}
+        with pytest.raises(RuntimeError, match="uncertain outcome"):
+            await runner._tool({"sessionId": child, "name": name, "toolCallId": "action-1", "arguments": {"url": url}})
+        receipt = await runner._db("lookup_tool_execution", child, "action-1")
+        assert receipt.status == "unknown"
+    finally:
+        runner._children.clear()
+        await runner.close()

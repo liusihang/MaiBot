@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.common.logger import get_logger
@@ -60,6 +60,7 @@ class SearchExecutionRequest:
     use_threshold: bool = True
     enable_ppr: bool = True
     scope: Optional[RetrievalScope] = None
+    hybrid_rrf: bool = False
 
 
 @dataclass
@@ -220,9 +221,42 @@ class SearchExecutionService:
             "candidate_top_k": int(resolved_candidate_top_k),
             "use_threshold": bool(request.use_threshold),
             "enable_ppr": bool(request.enable_ppr),
+            "hybrid_rrf": bool(request.hybrid_rrf),
         }
         payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         return hashlib.sha1(payload_json.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _filter_hybrid_evidence(
+        results: List[RetrievalResult], threshold_filter: Optional[Any]
+    ) -> List[RetrievalResult]:
+        """融合名次仅用于排序；相关性按融合前语义分和真实词法命中判断。"""
+        semantic = []
+        for item in results:
+            breakdown = coerce_metadata_dict(item.metadata).get("score_breakdown", {})
+            if isinstance(breakdown, dict) and "semantic" in breakdown:
+                semantic.append(replace(item, score=float(breakdown["semantic"])))
+            elif not breakdown:
+                # 兼容其他 RetrievalResult 提供者保留的原始语义分。
+                semantic.append(item)
+        accepted = threshold_filter.filter(semantic) if threshold_filter is not None else semantic
+        semantic_ids = {
+            item.hash_value for item in accepted
+            if coerce_metadata_dict(item.metadata).get("retrieval_evidence", {}).get("backfilled") is not True
+            and coerce_metadata_dict(item.metadata).get("retrieval_evidence", {}).get("passed") is not False
+        }
+        output = []
+        for item in results:
+            metadata = coerce_metadata_dict(item.metadata)
+            if item.hash_value not in semantic_ids and metadata.get("keyword_match") is not True:
+                continue
+            output.append(replace(item, metadata={
+                **metadata,
+                "retrieval_evidence": {"passed": True, "backfilled": False,
+                                       "semantic_passed": item.hash_value in semantic_ids,
+                                       "keyword_match": metadata.get("keyword_match") is True},
+            }))
+        return output
 
     @staticmethod
     async def execute(
@@ -320,6 +354,8 @@ class SearchExecutionService:
             }
             if request.scope is not None:
                 retrieve_kwargs["scope"] = request.scope
+            if request.hybrid_rrf:
+                retrieve_kwargs["hybrid_rrf"] = True
             retrieved = await retriever.retrieve(**retrieve_kwargs)
 
             should_apply_threshold = bool(request.use_threshold) and threshold_filter is not None
@@ -336,10 +372,14 @@ class SearchExecutionService:
             ):
                 should_apply_threshold = False
 
-            if should_apply_threshold:
+            if request.hybrid_rrf:
+                retrieved = SearchExecutionService._filter_hybrid_evidence(
+                    list(retrieved), threshold_filter if should_apply_threshold else None
+                )
+            elif should_apply_threshold:
                 retrieved = threshold_filter.filter(retrieved)
 
-            if query_type == "search":
+            if query_type == "search" and not request.hybrid_rrf:
                 graph_store = SearchExecutionService._resolve_runtime_component(
                     plugin_config, plugin_instance, "graph_store"
                 )

@@ -9,6 +9,7 @@ import json
 import sqlite3
 
 from src.maisaka.tool_result_store import ToolResultStore, tool_result_store
+from src.maisaka.memory.result_view import memory_result_page, parse_memory_result
 
 
 READ_THREAD_ARCHIVE_TOOL_DEFINITION = {
@@ -172,5 +173,8 @@ class DurableEvidenceStore:
         child_namespace: Optional[str] = None,
     ) -> Dict[str, Any]:
         row = await asyncio.to_thread(self._read, parent_session_id, handle, child_namespace)
-        page = await asyncio.to_thread(_page, row["raw"], offset, limit, keyword)
+        memory = parse_memory_result(row["raw"]) if row["tool_name"] == "query_memory" else None
+        page = await asyncio.to_thread(memory_result_page, memory, offset, limit, keyword) if memory is not None else (
+            await asyncio.to_thread(_page, row["raw"], offset, limit, keyword)
+        )
         return {"result_id": handle, "tool_name": row["tool_name"], "metadata": json.loads(row["metadata"]), **page}

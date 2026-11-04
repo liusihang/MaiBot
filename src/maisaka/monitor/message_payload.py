@@ -165,6 +165,8 @@ def build_monitor_reply_preview(
 
         return {
             "message_id": target_message_id,
+            "user_id": component.target_message_sender_id or "",
+            "qq_name": component.target_message_sender_nickname or "",
             "sender_name": target_sender or "未知用户",
             "content": target_content or "原消息已无法访问",
         }

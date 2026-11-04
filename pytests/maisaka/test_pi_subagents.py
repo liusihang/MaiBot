@@ -210,3 +210,19 @@ async def test_restart_recovers_unnotified_completion_and_marks_interrupted_acti
     assert restarted._tasks == {}
     await restarted.recover("group")
     assert len(notifications) == 2
+
+
+@pytest.mark.asyncio
+async def test_safe_child_failure_reason_survives_delegate_and_evidence_read(tmp_path):
+    from src.maisaka.pi_runtime.bridge import PiBridgeError
+
+    async def runner(*args):
+        raise PiBridgeError("Unresolved child tool outcome: browser_evaluate", code="CHILD_EXECUTION_FAILED")
+
+    service = PiSubagentService(tmp_path / "children.sqlite", runner)
+    result = await service.delegate("group", "research", [])
+    assert result["status"] == "failed"
+    assert result["error"] == "CHILD_EXECUTION_FAILED: Unresolved child tool outcome: browser_evaluate"
+    assert "browser_evaluate" in format_subagent_result(result)
+    page = await service.read("group", result["handle"])
+    assert "CHILD_EXECUTION_FAILED" in page["text"]

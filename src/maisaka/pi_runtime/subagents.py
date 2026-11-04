@@ -13,6 +13,8 @@ import json
 import sqlite3
 import uuid
 
+from .bridge import PiBridgeError
+
 
 READ_ONLY_TOOL_NAMES = frozenset(
     {
@@ -221,7 +223,8 @@ class PiSubagentService:
             await asyncio.shield(asyncio.to_thread(self._finish, handle, "cancelled", None))
             raise
         except Exception as exc:
-            await asyncio.to_thread(self._finish, handle, "failed", None, type(exc).__name__)
+            error = f"{exc.code}: {exc}" if isinstance(exc, PiBridgeError) else type(exc).__name__
+            await asyncio.to_thread(self._finish, handle, "failed", None, error)
         finally:
             if background and not self._closing:
                 await asyncio.shield(self._notify(parent, handle))

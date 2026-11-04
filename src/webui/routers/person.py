@@ -270,6 +270,12 @@ def update_person(
     try:
         # 只更新提供的字段
         update_data = request.model_dump(exclude_unset=True)
+        if "person_name" in update_data:
+            name = str(update_data["person_name"] or "").strip()
+            if len(name) > 255:
+                raise HTTPException(status_code=422, detail="主称呼最多 255 个字符")
+            update_data["person_name"] = name
+            update_data.setdefault("name_reason", "后台维护主称呼")
 
         if not update_data:
             raise HTTPException(status_code=400, detail="未提供任何需要更新的字段")

@@ -25,6 +25,8 @@ def build_planner_prefix(
     include_message_id: bool = True,
     include_chat_id: bool = False,
     is_self_message: bool = False,
+    user_id: str = "",
+    platform: str = "",
 ) -> str:
     """构造 Maisaka 规划器使用的统一消息前缀。
 
@@ -44,6 +46,10 @@ def build_planner_prefix(
     """
 
     message_attrs: list[str] = []
+    if user_id:
+        message_attrs.append(f'user_id="{escape(user_id, quote=True)}"')
+    if platform:
+        message_attrs.append(f'platform="{escape(platform, quote=True)}"')
     if include_message_id:
         message_attrs.append(f'msg_id="{escape(to_display_message_id(message_id), quote=True)}"')
 
@@ -132,7 +138,8 @@ def build_planner_user_prefix_from_session_message(
     return build_planner_prefix(
         timestamp=message.timestamp,
         user_name=user_name,
-        group_card=user_info.user_cardname or "",
+        user_id=user_info.user_id,
+        platform=message.platform,
         message_id=message.message_id,
         chat_id=message.session_id,
         quote_ids=extract_quote_ids_from_message_sequence(message.raw_message),

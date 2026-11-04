@@ -275,6 +275,10 @@ def _record_to_replay_event(record: MaisakaMonitorEventRecord) -> dict[str, Any]
         raise TypeError(f"麦麦观察事件 payload 不是字典: event_id={record.event_id}")
     payload.setdefault("event_id", record.event_id)
     payload.setdefault("schema_version", record.schema_version)
+    if record.event_type.startswith("message."):
+        from src.common.person_names import monitor_display_names
+
+        payload = monitor_display_names(payload)
     return {
         "event": record.event_type,
         "data": payload,

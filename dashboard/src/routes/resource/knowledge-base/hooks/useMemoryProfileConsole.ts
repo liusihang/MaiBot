@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { useToast } from '@/hooks/use-toast'
+import { getPersonDetail, updatePerson } from '@/lib/person-api'
 import {
   correctMemoryProfileEvidence,
   deleteMemoryProfileAliases,
@@ -87,6 +88,10 @@ export interface UseMemoryProfileConsoleResult {
   selectedProfile: MemoryProfileItemPayload | null
   selectedDisplayName: string
   activePersonId: string
+  primaryName: string
+  setPrimaryName: React.Dispatch<React.SetStateAction<string>>
+  primaryNameSaving: boolean
+  savePrimaryName: () => Promise<void>
   queryResult: MemoryProfileQueryPayload | null
   profileEvidence: MemoryProfileEvidencePayload | null
   currentProfileEvidence: MemoryProfileEvidencePayload | null
@@ -132,6 +137,8 @@ export function useMemoryProfileConsole({
   const [profiles, setProfiles] = useState<MemoryProfileItemPayload[]>([])
   const [profileListMode, setProfileListMode] = useState<'library' | 'search'>('library')
   const [selectedPersonId, setSelectedPersonId] = useState('')
+  const [primaryName, setPrimaryName] = useState('')
+  const [primaryNameSaving, setPrimaryNameSaving] = useState(false)
   const [queryKeyword, setQueryKeyword] = useState('')
   const [queryPlatform, setQueryPlatform] = useState('')
   const [queryUserId, setQueryUserId] = useState('')
@@ -209,6 +216,19 @@ export function useMemoryProfileConsole({
   useEffect(() => {
     setOverrideText(stringifyOverride(selectedProfile?.manual_override))
   }, [selectedProfile])
+
+  useEffect(() => {
+    let current = true
+    setPrimaryName('')
+    if (activePersonId) {
+      void getPersonDetail(activePersonId).then((person) => {
+        if (current) setPrimaryName(person.person_name ?? '')
+      }).catch((error: unknown) => {
+        if (current) toast({ title: '读取主称呼失败', description: String(error), variant: 'destructive' })
+      })
+    }
+    return () => { current = false }
+  }, [activePersonId, toast])
 
   const loadProfileEvidence = useCallback(
     async (personId: string, options?: { forceRefresh?: boolean }) => {
@@ -674,6 +694,23 @@ export function useMemoryProfileConsole({
     [activePersonId, evidenceLimit, loadProfileEvidence, loadProfiles, toast]
   )
 
+  const savePrimaryName = useCallback(async () => {
+    if (!activePersonId) return
+    setPrimaryNameSaving(true)
+    try {
+      const person = await updatePerson(activePersonId, { person_name: primaryName.trim() })
+      setPrimaryName(person.person_name ?? '')
+      await loadProfiles()
+      setQueryResult(null)
+      await loadProfileEvidence(activePersonId)
+      toast({ title: '主称呼已保存', description: '后台和后续模型输入使用此称呼；留空时使用 QQ 昵称。' })
+    } catch (error) {
+      toast({ title: '保存主称呼失败', description: String(error), variant: 'destructive' })
+    } finally {
+      setPrimaryNameSaving(false)
+    }
+  }, [activePersonId, primaryName, loadProfiles, loadProfileEvidence, toast])
+
   return {
     // 查询参数与模式
     queryMode,
@@ -699,6 +736,10 @@ export function useMemoryProfileConsole({
     selectedProfile,
     selectedDisplayName,
     activePersonId,
+    primaryName,
+    setPrimaryName,
+    primaryNameSaving,
+    savePrimaryName,
     queryResult,
     profileEvidence,
     currentProfileEvidence,

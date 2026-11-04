@@ -376,7 +376,11 @@ async def _broadcast(event: str, data: Dict[str, Any]) -> None:
     try:
         from src.webui.routers.websocket.manager import websocket_manager
 
+        from src.common.person_names import monitor_display_names
+
         data = _enrich_session_identity(data)
+        if event.startswith("message."):
+            data = await asyncio.to_thread(monitor_display_names, data)
         # 写库分配 event_id 与广播须在同一临界区内完成，保证前端按 event_id 递增收到事件；
         # 否则并发广播可能乱序，前端补发游标越过尚未送达的事件，断线重连后该事件永久丢失。
         async with _get_broadcast_lock():
@@ -540,6 +544,7 @@ async def emit_message_ingested(
     received_at: Optional[float] = None,
     platform: str = "",
     user_id: str = "",
+    qq_name: str = "",
     group_id: str = "",
     reply_to: Optional[Dict[str, Any]] = None,
     media: Optional[list[Dict[str, Any]]] = None,
@@ -553,6 +558,7 @@ async def emit_message_ingested(
         "message_id": message_id,
         "platform": platform,
         "user_id": user_id,
+        "qq_name": qq_name,
         "group_id": group_id,
         "reply_to": _normalize_payload_value(reply_to) if reply_to else None,
         "media": _normalize_payload_value(media) if media else [],
@@ -571,6 +577,7 @@ async def emit_message_sent(
     *,
     platform: str = "",
     user_id: str = "",
+    qq_name: str = "",
     group_id: str = "",
     reply_to: Optional[Dict[str, Any]] = None,
     media: Optional[list[Dict[str, Any]]] = None,
@@ -585,6 +592,7 @@ async def emit_message_sent(
         "source_kind": source_kind,
         "platform": platform,
         "user_id": user_id,
+        "qq_name": qq_name,
         "group_id": group_id,
         "reply_to": _normalize_payload_value(reply_to) if reply_to else None,
         "media": _normalize_payload_value(media) if media else [],
@@ -603,6 +611,7 @@ async def emit_message_updated(
     received_at: Optional[float] = None,
     platform: str = "",
     user_id: str = "",
+    qq_name: str = "",
     group_id: str = "",
     reply_to: Optional[Dict[str, Any]] = None,
     media: Optional[list[Dict[str, Any]]] = None,
@@ -617,6 +626,7 @@ async def emit_message_updated(
         "source_kind": source_kind,
         "platform": platform,
         "user_id": user_id,
+        "qq_name": qq_name,
         "group_id": group_id,
         "reply_to": _normalize_payload_value(reply_to) if reply_to else None,
         "media": _normalize_payload_value(media) if media else [],

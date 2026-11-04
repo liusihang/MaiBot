@@ -327,6 +327,15 @@ class MemorySearchHitProcessingService(KernelServiceBase):
             (allowed_chat_ids_json,),
         )
         for paragraph in paragraph_rows:
+            # query() 返回原始 SQLite JSON 字段；先解码再解释范围，人物事实没有
+            # chat_summary 来源前缀，不能因此丢掉其 metadata 中真实的聊天归属。
+            raw_metadata = paragraph.get("metadata")
+            if isinstance(raw_metadata, str):
+                try:
+                    decoded_metadata = json.loads(raw_metadata)
+                except (TypeError, ValueError):
+                    decoded_metadata = {}
+                paragraph = {**paragraph, "metadata": coerce_metadata_dict(decoded_metadata)}
             scope_kind, paragraph_chat_ids = self._paragraph_scope_identity(paragraph)
             if scope_kind == "global" or (scope_kind == "chat" and paragraph_chat_ids & allowed_chat_ids):
                 paragraph_hash = str(paragraph.get("hash", "") or "").strip()
