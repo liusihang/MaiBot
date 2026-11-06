@@ -29,8 +29,11 @@ MAX_INDEX_ITEMS_PER_QUERY = 8
 INDEX_SECONDS_PER_QUERY = 8.0
 # Calibrated on the deployed Qwen3-VL text embedding space; re-evaluate on model changes.
 MIN_SEMANTIC_SIMILARITY = 0.62
-MIN_EXPRESSION_SIMILARITY = 0.64
-MIN_SITUATION_SIMILARITY = 0.70
+MIN_EXPRESSION_SIMILARITY = 0.72
+MIN_SITUATION_SIMILARITY = 0.76
+MIN_KEYWORD_EXPRESSION_SIMILARITY = 0.64
+MIN_KEYWORD_SITUATION_SIMILARITY = 0.74
+MIN_JARGON_MEANING_SIMILARITY = 0.72
 INDEX_REFRESH_SECONDS = 30.0
 
 
@@ -70,11 +73,10 @@ def semantic_document(record: Dict[str, Any]) -> str:
     return "\n".join(parts)[:MAX_DOCUMENT_CHARS]
 
 
-def situation_document(record: Dict[str, Any]) -> str:
+def usage_document(record: Dict[str, Any]) -> str:
     """Compare the speaker's purpose independently of topical phrase overlap."""
-    if record["kind"] == "expression":
-        return str(record.get("situation", "")).strip()[:600]
-    return ""
+    field = "situation" if record["kind"] == "expression" else "meaning"
+    return str(record.get(field, "")).strip()[:600]
 
 
 def bm25_scores(documents: Sequence[str], query: str) -> List[float]:
@@ -120,7 +122,7 @@ def _prepare(records: List[Dict[str, Any]], query: str, context: str = "") -> Tu
     breadth = sorted(range(len(records)), key=lambda index: sha256(records[index]["id"].encode()).hexdigest())
     order = list(dict.fromkeys(value for pair in zip(relevant, breadth, strict=True) for value in pair))
     ordered = list(dict.fromkeys(
-        document for index in order for document in (documents[index], situation_document(records[index])) if document
+        document for index in order for document in (documents[index], usage_document(records[index])) if document
     ))
     return documents, lexical, ordered
 
@@ -168,6 +170,24 @@ def _literal_match(record: Dict[str, Any], query: str) -> bool:
     return False
 
 
+def _usage_keyword_support(records: List[Dict[str, Any]], query: str) -> set[int]:
+    """Specific usage words can support a moderate semantic match.
+
+    Require at least half the query terms to occur in the usage description,
+    including a term present in at most one fifth of the catalog. Broad words
+    shared by many entries therefore cannot lower semantic admission thresholds.
+    """
+    query_terms = set(tokenize(query))
+    if not query_terms:
+        return set()
+    usages = [set(tokenize(record.get("situation" if record["kind"] == "expression" else "meaning", "")))
+              for record in records]
+    frequencies = Counter(term for usage in usages for term in usage)
+    return {index for index, usage in enumerate(usages)
+            if len(usage & query_terms) / len(query_terms) >= 0.5
+            and any(frequencies[term] <= max(1, len(records) / 5) for term in usage & query_terms)}
+
+
 def _rank(
     records: List[Dict[str, Any]],
     documents: List[str],
@@ -197,7 +217,7 @@ def _rank(
             score = sum(a * b for a, b in zip(vector, target, strict=True))
             if math.isfinite(score):
                 cosine[index] = score
-            situation = situation_document(records[index])
+            situation = usage_document(records[index])
             if situation and situation in vectors:
                 score = sum(a * b for a, b in zip(vectors[situation], query_vector, strict=True))
                 if math.isfinite(score):
@@ -206,15 +226,24 @@ def _rank(
     # rank matching jargon, but cannot create a hit from background alone.
     # Missing vectors permit only explicit phrases in the intended meaning.
     eligible = set()
+    keyword_supported = _usage_keyword_support(records, query)
     for index, record in enumerate(records):
         if index not in cosine:
             if _literal_match(record, query):
                 eligible.add(index)
             continue
-        minimum = MIN_EXPRESSION_SIMILARITY if record["kind"] == "expression" else MIN_SEMANTIC_SIMILARITY
-        if intent_cosine.get(index, -1) < minimum or cosine[index] < minimum:
+        if record["kind"] == "expression":
+            semantic_fit = (cosine[index] >= MIN_EXPRESSION_SIMILARITY
+                            and (not usage_document(record)
+                                 or situations.get(index, -1) >= MIN_SITUATION_SIMILARITY))
+            keyword_fit = (index in keyword_supported and cosine[index] >= MIN_KEYWORD_EXPRESSION_SIMILARITY
+                           and situations.get(index, -1) >= MIN_KEYWORD_SITUATION_SIMILARITY)
+            if semantic_fit or keyword_fit:
+                eligible.add(index)
             continue
-        if situation_document(record) and situations.get(index, -1) < MIN_SITUATION_SIMILARITY:
+        if intent_cosine.get(index, -1) < MIN_SEMANTIC_SIMILARITY or cosine[index] < MIN_SEMANTIC_SIMILARITY:
+            continue
+        if usage_document(record) and situations.get(index, -1) < MIN_JARGON_MEANING_SIMILARITY:
             continue
         eligible.add(index)
     lexical_order = sorted(
@@ -241,7 +270,8 @@ def _rank(
                     "bm25_score": lexical[index],
                     "cosine_score": cosine.get(index),
                     "intent_score": intent_cosine.get(index),
-                    "situation_score": situations.get(index),
+                    **({"situation_score": situations.get(index)} if records[index]["kind"] == "expression"
+                       else {"meaning_score": situations.get(index)}),
                     "rrf_score": fused[index],
                 },
             }
@@ -278,6 +308,7 @@ def _coverage(total: int, indexed: int, *, space: Optional[str] = None, error: O
         "semantic_similarity_floor": MIN_SEMANTIC_SIMILARITY,
         "expression_similarity_floor": MIN_EXPRESSION_SIMILARITY,
         "situation_similarity_floor": MIN_SITUATION_SIMILARITY,
+        "jargon_meaning_similarity_floor": MIN_JARGON_MEANING_SIMILARITY,
     }
 
 
@@ -413,7 +444,7 @@ async def warm_group_expression_index(
 
 def _indexed_count(records: List[Dict[str, Any]], documents: List[str], vectors: Dict[str, List[float]]) -> int:
     return sum(
-        document in vectors and (not situation_document(record) or situation_document(record) in vectors)
+        document in vectors and (not usage_document(record) or usage_document(record) in vectors)
         for record, document in zip(records, documents, strict=True)
     )
 

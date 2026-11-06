@@ -181,6 +181,7 @@ class PiSubagentService:
         tools: Sequence[Dict[str, Any]],
         *,
         wait: bool = True,
+        call_id: str = "",
     ) -> Dict[str, Any]:
         if not parent_session_id.strip() or not task.strip():
             raise ValueError("A real parent session ID and a non-empty task are required")
@@ -189,7 +190,7 @@ class PiSubagentService:
         child_id = parent_session_id + "/child/" + uuid.uuid4().hex
         grants = self.allowed_tool_names(tools)
         await asyncio.to_thread(self._create, handle, parent_session_id, child_id, task, grants, not wait)
-        execution = asyncio.create_task(self._execute(handle, child_id, parent_session_id, task, list(tools), not wait))
+        execution = asyncio.create_task(self._execute(handle, child_id, parent_session_id, task, list(tools), not wait, call_id))
         self._tasks[handle] = execution
 
         def completed(task: asyncio.Task) -> None:
@@ -203,11 +204,16 @@ class PiSubagentService:
         return {"handle": handle, "status": "running"}
 
     async def _execute(
-        self, handle: str, child_id: str, parent: str, task: str, tools: List[Dict[str, Any]], background: bool
+        self, handle: str, child_id: str, parent: str, task: str, tools: List[Dict[str, Any]], background: bool, call_id: str
     ) -> Dict[str, Any]:
+        from .observer import PiSubagentObserver
+
+        monitor = PiSubagentObserver(parent, handle)
+        await monitor.start(task, self.allowed_tool_names(tools), background, call_id)
 
         async def on_event(event: Mapping[str, Any]) -> None:
             await asyncio.to_thread(self._append, handle, event)
+            await monitor.handle(event)
 
         try:
             raw_result = await self.run_child(child_id, parent, task, tools, on_event)
@@ -226,6 +232,8 @@ class PiSubagentService:
             error = f"{exc.code}: {exc}" if isinstance(exc, PiBridgeError) else type(exc).__name__
             await asyncio.to_thread(self._finish, handle, "failed", None, error)
         finally:
+            summary = await asyncio.shield(asyncio.to_thread(self._summary, parent, handle))
+            await asyncio.shield(monitor.finish(summary))
             if background and not self._closing:
                 await asyncio.shield(self._notify(parent, handle))
         return await asyncio.to_thread(self._summary, parent, handle)

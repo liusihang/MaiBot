@@ -52,7 +52,7 @@ def test_chinese_bigrams_and_bm25():
 def test_rrf_uses_independent_ranks_not_raw_scores():
     records = [record("expression:1", "a"), record("jargon:2", "b"), record("jargon:3", "c")]
     ranked = search._rank(
-        records, ["a", "b", "c"], [1000000, 1, 0], {"a": [0.65, 0.759934], "b": [1, 0], "c": [0.8, 0.6]}, [1, 0], 3
+        records, ["a", "b", "c"], [1000000, 1, 0], {"a": [0.75, 0.661438], "b": [1, 0], "c": [0.8, 0.6]}, [1, 0], 3
     )
     # b: lexical rank2 + semantic rank1 beats a: lexical rank1 + semantic rank3.
     assert ranked[0]["id"] == "jargon:2"
@@ -65,7 +65,7 @@ async def test_full_hybrid_finds_intent_without_literal_overlap_and_preserves_ex
     records[0]["examples"] = [{"message_id": "m1", "text": "这操作逆天", "sender_id": "u", "time": 1}]
     query = "unbelievable"
     docs = [search.semantic_document(item) for item in records]
-    client, index, loader = setup(records, {query: [1, 0], docs[0]: [1, 0], docs[1]: [0, 1]})
+    client, index, loader = setup(records, {query: [1, 0], docs[0]: [1, 0], docs[1]: [0, 1], records[1]["meaning"]: [0, 1]})
     result = await search.search_group_expressions("chat-A", query, client=client, index=index)
     assert loader.await_count == 2
     loader.assert_awaited_with("chat-A")

@@ -1,6 +1,7 @@
 """A top-k rank is not evidence that language material fits the requested intent."""
 
 import pytest
+import math
 
 from src.services import group_expression_search as search
 
@@ -30,6 +31,74 @@ def test_weak_semantics_cannot_be_rescued_by_large_keyword_score():
         query="严肃介绍数据库索引",
     )
     assert result == []
+
+
+@pytest.mark.parametrize("phrase,situation,score,usage_score", [
+    ("用工程步骤描述离谱操作", "调侃把人物当作资源", 0.696, 0.732),
+    ("用剥夺讨论权开玩笑", "调侃缺乏挑战精神", 0.674, 0.709),
+    ("承认刚才随口乱说", "自嘲收回先前的判断", 0.719, 0.783),
+])
+def test_deployed_embedding_near_misses_can_return_empty(phrase, situation, score, usage_score):
+    """Observed Qwen scores for generic banter and a mismatched speech act."""
+    record = item("expression:1", phrase)
+    record["situation"] = situation
+    document = search.semantic_document(record)
+    vectors = {document: [score, math.sqrt(1 - score * score)],
+               situation: [usage_score, math.sqrt(1 - usage_score * usage_score)]}
+    assert search._rank([record], [document], [100], vectors, [1, 0], 6, query="随口答应 万能回复") == []
+
+
+@pytest.mark.parametrize("score,usage_score", [(0.789, 0.905), (0.766, 0.773), (0.732, 0.935), (0.752, 0.994)])
+def test_deployed_clear_expression_matches_survive_calibration(score, usage_score):
+    record = item("expression:1", "可借鉴的说法")
+    record["situation"] = "与表达目的相符的场景"
+    document = search.semantic_document(record)
+    vectors = {document: [score, math.sqrt(1 - score * score)],
+               record["situation"]: [usage_score, math.sqrt(1 - usage_score * usage_score)]}
+    assert search._rank([record], [document], [0], vectors, [1, 0], 6)
+
+
+def test_specific_usage_words_preserve_a_moderate_semantic_match():
+    record = item("expression:1", "用云玩家还锐评上了调侃")
+    record["situation"] = "吐槽纸上谈兵时"
+    document = search.semantic_document(record)
+    vectors = {document: [0.698, math.sqrt(1 - 0.698 ** 2)],
+               record["situation"]: [0.767, math.sqrt(1 - 0.767 ** 2)]}
+    assert search._rank([record], [document], [10], vectors, [1, 0], 6, query="没玩过 装懂 纸上谈兵")
+    assert search._rank([record], [document], [10], vectors, [1, 0], 6, query="顺着群友的话调侃一句") == []
+
+
+def test_common_banter_words_are_not_specific_usage_support():
+    records = [item(f"expression:{i}", "一句说法") for i in range(12)]
+    for record in records:
+        record["situation"] = "调侃对方"
+    assert search._usage_keyword_support(records, "调侃") == set()
+    records[0]["situation"] = "调侃纸上谈兵"
+    assert search._usage_keyword_support(records, "纸上谈兵") == {0}
+
+
+def test_jargon_semantic_near_miss_without_meaning_support_is_empty():
+    record = item("jargon:1", "康康")
+    record["meaning"] = "看看的谐音，用来轻松表示准备查看"
+    document = search.semantic_document(record)
+    assert search._rank([record], [document], [0], {document: [0.630, math.sqrt(1 - 0.630 ** 2)], record["meaning"]: [0.4, math.sqrt(1 - 0.4 ** 2)]},
+                        [1, 0], 6, query="万能回复") == []
+
+
+def test_jargon_specific_meaning_words_preserve_a_borderline_match():
+    record = item("jargon:1", "靶场战神")
+    record["meaning"] = "调侃靶场测试很好，实战却不一定好用的武器或配置"
+    document = search.semantic_document(record)
+    assert search._rank([record], [document], [10], {document: [0.631, math.sqrt(1 - 0.631 ** 2)], record["meaning"]: [1, 0]},
+                        [1, 0], 6, query="测试强 实战差")
+
+
+def test_jargon_missing_meaning_vector_is_not_semantically_ready():
+    record = item("jargon:1", "刮痧")
+    record["meaning"] = "攻击伤害低"
+    document = search.semantic_document(record)
+    assert search._rank([record], [document], [100], {document: [1, 0]}, [1, 0], 6, query="伤害低") == []
+    assert search._indexed_count([record], [document], {document: [1, 0]}) == 0
 
 
 def test_relevance_filter_returns_fewer_than_limit():
@@ -144,7 +213,7 @@ def test_topic_match_cannot_override_an_incompatible_communicative_situation():
     record = item("expression:1", "没交互，纯等他出破绽")
     record["situation"] = "吐槽战斗玩法单调"
     document = search.semantic_document(record)
-    situation = search.situation_document(record)
+    situation = search.usage_document(record)
     result = search._rank(
         [record], [document], [10000],
         {document: [0.95, 0.3122], situation: [0.4, 0.9165]},

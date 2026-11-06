@@ -84,6 +84,10 @@ async def test_interrupted_builtin_stop_recovers_without_redispatch(monkeypatch,
 
 @pytest.mark.asyncio
 async def test_default_child_can_search_and_read_using_the_real_sdk(monkeypatch, tmp_path):
+    from src.maisaka.monitor import events
+
+    broadcast = AsyncMock()
+    monkeypatch.setattr(events, "_broadcast", broadcast)
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     monkeypatch.setattr(observer.PiObserver, "handle", AsyncMock())
     calls = [
@@ -118,6 +122,15 @@ async def test_default_child_can_search_and_read_using_the_real_sdk(monkeypatch,
             assert child_tools == {item["function"]["name"] for item in requests[0]["tools"]}
             assert "send_web_image" not in child_tools
             assert "supported conclusion" in str(requests[-1])
+            child_events = [(call.args[0], call.args[1]) for call in broadcast.await_args_list]
+            started = next(data for name, data in child_events if name == "subagent.started")
+            finished = next(data for name, data in child_events if name == "subagent.finished")
+            assert started["call_id"] == "call-1"
+            assert started["task_id"] == finished["task_id"]
+            assert started["session_id"] == runner.session_id
+            assert finished["status"] == "completed"
+            assert finished["tool_usage"] == {"gpt_web_search": 1, "gpt_read_search_result": 1}
+            assert sum(name == "subagent.round" for name, _ in child_events) == 3
         finally:
             await runner.close()
 

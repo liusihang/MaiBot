@@ -160,7 +160,7 @@ function TaskListItem({
       </div>
       <div className="text-muted-foreground flex min-w-0 items-center gap-1.5 text-[10px]">
         <span className="shrink-0">
-          第 {Math.min(task.rounds.length, task.maxRounds)} / {task.maxRounds} 轮
+          第 {task.rounds.length}{task.maxRounds > 0 ? ` / ${task.maxRounds}` : ''} 轮
         </span>
         <span className="truncate">{formatToolUsage(task.toolUsage)}</span>
       </div>

@@ -4,17 +4,88 @@ These are observations. They never edit SDK history, replay or provider input.
 """
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Awaitable, Callable, Dict, List
 
 import time
 
 from src.common.logger import get_logger
 from src.maisaka.monitor.events import emit_planner_snapshot
+from src.maisaka.monitor import events as monitor_events
 from src.services.llm_cache_stats import record_llm_cache_usage
 from src.services.pi_harness.accounting import record_pi_usage
 from src.services.pi_harness.config import export_harness_config
 
 logger = get_logger("pi_observer")
+
+
+class PiSubagentObserver:
+    """Publish public child activity to its own sidebar, separate from parent rounds."""
+
+    def __init__(self, parent: str, task_id: str) -> None:
+        self.parent, self.task_id = parent, task_id
+        self.started = time.monotonic()
+        self.round_index = 0
+        self.tools: Dict[str, Dict[str, Any]] = {}
+        self.tool_usage: Dict[str, int] = {}
+        self.finished = False
+
+    async def _emit(self, emit: Callable[..., Awaitable[None]], **payload: Any) -> None:
+        try:
+            await emit(session_id=self.parent, task_id=self.task_id, **payload)
+        except Exception:
+            # A dashboard outage cannot change the outcome of a child operation.
+            logger.exception("Pi 子代理监控记录失败: session=%s task=%s", self.parent, self.task_id)
+
+    async def start(self, description: str, tools: List[str], background: bool, call_id: str) -> None:
+        await self._emit(monitor_events.emit_subagent_started, call_id=call_id, description=description,
+                         granted_tools=tools, background=background, max_rounds=0)
+
+    async def handle(self, event: Dict[str, Any]) -> None:
+        try:
+            await self._handle(event)
+        except Exception:
+            logger.exception("Pi 子代理事件投影失败: session=%s task=%s", self.parent, self.task_id)
+
+    async def _handle(self, event: Dict[str, Any]) -> None:
+        message = event.get("message", {})
+        if event.get("type") == "message_end" and message.get("role") == "assistant":
+            self.round_index += 1
+            content = message.get("content", [])
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            calls = [{"id": p["id"], "name": p["name"], "arguments": p.get("arguments", {})}
+                     for p in content if p.get("type") == "toolCall"]
+            for call in calls:
+                self.tools[call["id"]] = {"name": call["name"], "round": self.round_index}
+            await self._emit(monitor_events.emit_subagent_round, round_index=self.round_index,
+                             content="\n".join(p["text"] for p in content if p.get("type") == "text"),
+                             tool_calls=calls)
+        elif event.get("type") == "tool_execution_start":
+            tool = self.tools.get(event["toolCallId"])
+            if tool is not None:
+                tool["started"] = time.monotonic()
+        elif event.get("type") == "message_end" and message.get("role") == "toolResult":
+            call_id = message.get("toolCallId", "")
+            tool = self.tools.get(call_id)
+            if tool is None or tool.get("finished"):
+                return
+            tool["finished"] = True
+            self.tool_usage[tool["name"]] = self.tool_usage.get(tool["name"], 0) + 1
+            content = message.get("content", [])
+            text = content if isinstance(content, str) else "\n".join(p["text"] for p in content if p.get("type") == "text")
+            await self._emit(monitor_events.emit_subagent_tool_result, round_index=tool["round"], call_id=call_id,
+                             tool_name=tool["name"], success=not message.get("isError", False),
+                             summary=text,
+                             duration_ms=max(0, time.monotonic() - tool.get("started", time.monotonic())) * 1000)
+
+    async def finish(self, result: Dict[str, Any]) -> None:
+        if self.finished:
+            return
+        self.finished = True
+        await self._emit(monitor_events.emit_subagent_finished,
+                         status={"cancelled": "stopped", "interrupted": "stopped"}.get(result["status"], result["status"]),
+                         conclusion=result.get("conclusion", ""), error_message=result.get("error") or "",
+                         tool_usage=self.tool_usage, duration_ms=max(0, time.monotonic() - self.started) * 1000)
 
 
 class PiObserver:

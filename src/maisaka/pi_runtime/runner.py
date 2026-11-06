@@ -670,7 +670,8 @@ class PiGroupRunner:
         try:
             if name == "subagent":
                 value = await self.subagents.delegate(
-                    self.session_id, arguments["task"], list(self._tools.values()), wait=arguments.get("wait", True)
+                    self.session_id, arguments["task"], list(self._tools.values()),
+                    wait=arguments.get("wait", True), call_id=call_id,
                 )
                 text = format_subagent_result(value)
                 success, terminate = value["status"] in {"completed", "running"}, False
