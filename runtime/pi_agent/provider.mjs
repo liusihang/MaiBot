@@ -23,6 +23,27 @@ const canonical = (value) => JSON.stringify(value, (_, item) => item && typeof i
 const fingerprint = (value) => createHash('sha256').update(canonical(value)).digest('hex');
 const error = (code, message) => Object.assign(new Error(message), { code });
 
+/** Pi omits aborted/errored assistant responses during protocol conversion.
+ * Their recovered receipts must remain observations, not orphan function outputs.
+ * Adapt only the outgoing context; the native transcript and receipts stay intact.
+ */
+function replayInterruptedToolResults(context) {
+  const interrupted = new Set();
+  const messages = context.messages.map((message) => {
+    if (message.role === 'assistant') {
+      for (const part of message.content) if (part.type === 'toolCall') {
+        if (['aborted', 'error'].includes(message.stopReason)) interrupted.add(part.id);
+        else interrupted.delete(part.id);
+      }
+    } else if (message.role === 'toolResult' && interrupted.has(message.toolCallId)) {
+      return { role: 'user', timestamp: message.timestamp,
+        content: [{ type: 'text', text: `Tool observation for interrupted ${message.toolName} call:` }, ...message.content] };
+    }
+    return message;
+  });
+  return { ...context, messages };
+}
+
 // Pi 1.4's Google adapter only accepts global fetch; @google/genai has no injectable
 // transport. AsyncLocalStorage scopes this compatibility bridge to its own request,
 // retaining official Pi conversion/replay and never mixing simultaneous credentials.
@@ -273,6 +294,7 @@ export async function createHostModelRuntime(config, { fetch: fetchImpl } = {}) 
         for (const message of context.messages) for (const tool of message.toolsAdded ?? []) {
           if (tool.constrainedSampling?.strict === 'prefer') throw error('UNSUPPORTED_SCHEMA_FALLBACK', 'Use required strict schemas or explicit non-strict schemas; automatic schema fallback is not permitted');
         }
+        const replayContext = replayInterruptedToolResults(context);
         const taskOptions = model.hostRequestOptions ?? {};
         const dispatch = createProviderFetch(provider, extra, fetchImpl);
         const transport = async (input, init = {}) => {
@@ -349,10 +371,10 @@ export async function createHostModelRuntime(config, { fetch: fetchImpl } = {}) 
             return url.origin === base.origin && url.pathname.startsWith(`${base.pathname.replace(/\/$/, '')}/`)
               && url.pathname.endsWith(':streamGenerateContent');
           } };
-          return googleTransport.run(scope, () => streamSimple(model, context, effective));
+          return googleTransport.run(scope, () => streamSimple(model, replayContext, effective));
         }
         effective.fetch = transport;
-        return streamSimple(model, context, effective);
+        return streamSimple(model, replayContext, effective);
       },
     });
     // AuthStorage is in-memory. Dummy auth supports authenticated-by-header and local services.

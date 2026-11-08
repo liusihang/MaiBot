@@ -13,6 +13,35 @@ const response = () => new Response([
   'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","model":"exact-terra-route","status":"completed","output":[],"usage":{"input_tokens":4,"output_tokens":0,"total_tokens":4}}}\n\n',
 ].join(''), { headers: { 'content-type': 'text/event-stream' } });
 
+for (const stopReason of ['aborted', 'error']) test(`interrupted ${stopReason} tool receipt replays as an observation without an orphan output`, async () => {
+  let wire;
+  const runtime = await createHostModelRuntime(config(), { fetch: async (_, init) => {
+    wire = JSON.parse(init.body);
+    const calls = new Set(wire.input.filter((item) => item.type === 'function_call').map((item) => item.call_id));
+    const orphan = wire.input.find((item) => item.type === 'function_call_output' && !calls.has(item.call_id));
+    if (orphan) return new Response(JSON.stringify({ error: { message: `No tool call found for function call output with call_id ${orphan.call_id}.` } }), { status: 400 });
+    return response();
+  } });
+  const route = resolveTaskModel(runtime, 'main');
+  const messages = [
+    { role: 'user', content: 'continue the conversation', timestamp: 1 },
+    { role: 'assistant', api: route.model.api, provider: route.model.provider, model: route.model.id,
+      stopReason, errorMessage: 'Request was aborted', timestamp: 2,
+      content: [{ type: 'toolCall', id: 'call_interrupted|fc_interrupted', name: 'stop', arguments: {} }] },
+    { role: 'toolResult', toolCallId: 'call_interrupted|fc_interrupted', toolName: 'stop', isError: true,
+      content: [{ type: 'text', text: 'The previous stop was interrupted and was not executed.' }], timestamp: 3 },
+    { role: 'user', content: 'a newer group message', timestamp: 4 },
+  ];
+  const original = structuredClone(messages);
+  const result = await runtime.completeSimple(route.model, { messages }, { reasoning: route.thinkingLevel });
+  assert.equal(result.stopReason, 'stop', result.errorMessage);
+  assert.deepEqual(messages, original, 'Native interrupted messages and receipts must remain unchanged');
+  assert.equal(wire.input.some((item) => item.type === 'function_call_output'), false);
+  const serialized = JSON.stringify(wire.input);
+  assert.ok(serialized.includes('The previous stop was interrupted and was not executed.'));
+  assert.ok(serialized.includes('a newer group message'));
+});
+
 for (const deepseek of [true, false]) test(`DeepSeek gateway reasoning alias round-trips through native SDK (deepseek=${deepseek})`, async () => {
   const cfg = config(); cfg.api_providers[0].client_type = 'openai';
   cfg.models[0].extra_params = { reasoning_effort: 'max', pi: { compat: {

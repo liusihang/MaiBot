@@ -548,6 +548,40 @@ test('real orphan call accepts only matching known receipt; pending references w
   assert.equal(h.calls.length, 0); assert.equal(h.wires.length, 0);
 });
 
+for (const stopReason of ['aborted', 'error']) test(`recovered ${stopReason} tool call survives restart without replaying its effect or sending an orphan output`, async (t) => {
+  const h = harness(t, { response: (_n, wire) => {
+    const calls = new Set(wire.input.filter((item) => item.type === 'function_call').map((item) => item.call_id));
+    assert.equal(wire.input.some((item) => item.type === 'function_call_output' && !calls.has(item.call_id)), false);
+    return [answer('resumed')];
+  } });
+  await h.initialize('group-a', [tool('stop')]);
+  const owned = h.runtime.sessions.get('group-a');
+  owned.manager.appendMessage({ role: 'assistant',
+    content: [{ type: 'toolCall', id: 'call_interrupted|fc_interrupted', name: 'stop', arguments: {} }],
+    api: owned.resolved.model.api, provider: owned.resolved.model.provider, model: owned.resolved.model.id,
+    stopReason, errorMessage: 'interrupted provider response', timestamp: 2,
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 } });
+  await h.handle('close', { sessionId: 'group-a' });
+  const reopened = await h.initialize('group-a', [tool('stop')]);
+  assert.equal(reopened.unresolvedToolCalls.length, 1);
+  await h.handle('resolve_tools', { sessionId: 'group-a', results: [{ role: 'toolResult',
+    toolCallId: 'call_interrupted|fc_interrupted', toolName: 'stop',
+    content: [{ type: 'text', text: 'Interrupted stop was not executed; choose the next action.' }],
+    isError: true, timestamp: 3 }] });
+  const prefix = readFileSync(h.runtime.sessions.get('group-a').manager.getSessionFile());
+  await h.handle('close', { sessionId: 'group-a' });
+  await h.initialize('group-a', [tool('stop')]);
+  const result = await h.prompt('new message after recovery');
+  assert.equal(result.error, null);
+  assert.equal(result.paused, false);
+  assert.equal(h.calls.length, 0, 'Recovery must never redispatch the interrupted business tool');
+  assert.ok(JSON.stringify(h.wires[0]).includes('Interrupted stop was not executed'));
+  const restored = h.runtime.sessions.get('group-a');
+  assert.ok(readFileSync(restored.manager.getSessionFile()).subarray(0, prefix.length).equals(prefix));
+  assert.ok(rows(restored).some((row) => row.message?.stopReason === stopReason));
+  assert.equal(rows(restored).filter((row) => row.message?.toolCallId === 'call_interrupted|fc_interrupted').length, 1);
+});
+
 test('unexpected writer-lock subprocess loss poisons live session before another write or wire', async (t) => {
   const h = harness(t); await h.initialize();
   const owned = h.runtime.sessions.get('group-a');
