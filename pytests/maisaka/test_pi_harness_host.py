@@ -888,7 +888,20 @@ async def test_host_explicit_sdk_compaction_and_archive_remain_reachable(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_slow_post_reply_maintenance_yields_to_the_next_main_turn(monkeypatch, tmp_path):
+async def test_restored_idle_session_schedules_maintenance_without_waking_chat(monkeypatch, tmp_path):
+    host, _ = engine()
+    runner = PiGroupRunner(host, data_dir=tmp_path)
+    monkeypatch.setattr(runner, "ensure_initialized", AsyncMock())
+    monkeypatch.setattr(runner, "_db", AsyncMock(return_value=None))
+    schedule = Mock()
+    monkeypatch.setattr(runner, "_schedule_context_maintenance", schedule)
+    await runner.restore_pending_turn()
+    schedule.assert_called_once()
+    host._runtime._queue_proactive_turn.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_slow_post_reply_maintenance_continues_during_the_next_main_turn(monkeypatch, tmp_path):
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
     entered, release, interrupted = asyncio.Event(), asyncio.Event(), asyncio.Event()
     host, effects = engine()
@@ -913,9 +926,11 @@ async def test_slow_post_reply_maintenance_yields_to_the_next_main_turn(monkeypa
             await first
             host._runtime._chat_history.append(history("next real question", "next-question"))
             await asyncio.wait_for(runner.run([]), 10)
-            assert interrupted.is_set()
+            assert not interrupted.is_set()
             assert [item.arguments["text"] for item in effects] == ["first answer", "second answer"]
             assert len(requests) == 4
+            release.set()
+            await runner._maintenance_task
         finally:
             release.set()
             await first
@@ -923,7 +938,7 @@ async def test_slow_post_reply_maintenance_yields_to_the_next_main_turn(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_ingress_interrupts_real_sdk_summary_without_replaying_delivery(monkeypatch, tmp_path):
+async def test_ingress_and_new_reply_complete_before_real_sdk_summary_preserving_all_new_history(monkeypatch, tmp_path):
     from src.config.config import global_config
 
     monkeypatch.setattr("src.maisaka.pi_runtime.runner.build_references", AsyncMock(return_value=[]))
@@ -936,7 +951,7 @@ async def test_ingress_interrupts_real_sdk_summary_without_replaying_delivery(mo
         assert "Summarize this group conversation faithfully" in json.dumps(request)
         entered.set()
         release.wait(20)
-        return {"text": "late summary must not replace the conversation"}
+        return {"text": "completed old conversation summary"}
 
     with wire_server([
         ("reply", {"text": "first answer"}), None, slow_summary,
@@ -944,19 +959,19 @@ async def test_ingress_interrupts_real_sdk_summary_without_replaying_delivery(mo
     ], prompt_tokens=52000) as (config, requests):
         config["model_task_config"]["memory"] = {"model_list": ["mock"], "max_tokens": 1000}
         monkeypatch.setattr("src.maisaka.pi_runtime.runner.export_harness_config", lambda: config)
-        host._runtime._chat_history.append(history("original source preserved across cancellation", "old-source"))
+        host._runtime._chat_history.append(history("original source summarized from fixed snapshot", "old-source"))
         runner = PiGroupRunner(host, data_dir=tmp_path)
         try:
             await runner.run([])
             assert await asyncio.to_thread(entered.wait, 10)
             summary_task = runner._maintenance_task
             state = await runner.bridge.request("state", sessionId=runner.session_id)
-            assert state["isCompacting"]
+            assert not state["isCompacting"]
+            assert state["backgroundCompaction"]["status"] == "summarizing"
             await asyncio.wait_for(runner.record_pending(original_source_message()), 5)
-            assert summary_task.cancelled()
+            assert not summary_task.done()
             assert runner._failed_compaction_head is None
             state = await runner.bridge.request("state", sessionId=runner.session_id)
-            assert not state["isCompacting"]
             assert state["unresolvedToolCalls"] == []
             assert runner.ledger.pending_turn(runner.session_id) is None
 
@@ -965,10 +980,20 @@ async def test_ingress_interrupts_real_sdk_summary_without_replaying_delivery(mo
             await asyncio.wait_for(runner.run([]), 10)
             assert not release.is_set(), "Main reply waited for the old summary provider"
             assert [item.arguments["text"] for item in effects] == ["first answer", "new answer"]
-            assert "original source preserved across cancellation" in json.dumps(requests[3])
+            assert "original source summarized from fixed snapshot" in json.dumps(requests[3])
             assert "new question while summarizing" in json.dumps(requests[3])
-            assert "late summary must not replace" not in json.dumps(requests[3])
-            schedule.assert_called_once()  # The next completed turn retries maintenance.
+            assert "completed old conversation summary" not in json.dumps(requests[3])
+            before = await runner.bridge.request("state", sessionId=runner.session_id)
+            schedule.assert_called_once()
+            release.set()
+            await asyncio.wait_for(summary_task, 10)
+            after = await runner.bridge.request("state", sessionId=runner.session_id)
+            assert after["revision"] > before["revision"]
+            assert after["backgroundCompaction"] is None
+            assert after["contextTokens"] < 51200
+            assert len(requests) == 5, "New messages must not restart the summary request"
+            assert len(effects) == 2, "Applying a summary must not replay any reply"
+            assert runner.ledger.pending_turn(runner.session_id) is None
         finally:
             release.set()
             await runner.close()
@@ -1022,7 +1047,7 @@ async def test_post_reply_summary_failure_keeps_the_delivered_turn_complete(monk
             failed_calls = []
 
             async def request(method, **params):
-                if method == "compact":
+                if method == "start_compaction":
                     assert len(effects) == 1
                     assert runner.ledger.pending_turn(runner.session_id) is None
                     failed_calls.append(params)
@@ -1053,15 +1078,15 @@ async def test_maintenance_uses_sdk_token_pressure_not_serialized_bytes(monkeypa
     monkeypatch.setattr(global_config.chat, "context_prompt_token_high_watermark", 51200)
     host, _ = engine()
     runner = PiGroupRunner(host, data_dir=tmp_path)
-    runner.bridge.request = AsyncMock(
-        return_value={"contextTokens": tokens, "visibleChars": 2_000_000, "archive": {"head": "head"}, "revision": 3}
-    )
+    state = {"contextTokens": tokens, "visibleChars": 2_000_000, "archive": {"head": "head"}, "revision": 3}
+    runner.bridge.request = AsyncMock(side_effect=[state, {"started": True, "jobId": "job"}, {"ready": True}, state])
     await runner._maintain_context()
-    assert runner.bridge.request.await_count == (2 if should_compact else 1)
+    assert runner.bridge.request.await_count == (4 if should_compact else 1)
     if should_compact:
-        assert runner.bridge.request.await_args.kwargs["preserveUnprocessed"] is True
-        assert runner.bridge.request.await_args.kwargs["summaryTaskName"] == "memory"
-        assert runner.bridge.request.await_args.kwargs["summaryTimeoutMs"] == 300000
+        started = runner.bridge.request.await_args_list[1]
+        assert started.kwargs["preserveUnprocessed"] is True
+        assert started.kwargs["summaryTaskName"] == "memory"
+        assert started.kwargs["summaryTimeoutMs"] == 300000
 
 
 @pytest.mark.asyncio

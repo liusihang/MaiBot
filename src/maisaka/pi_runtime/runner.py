@@ -225,7 +225,6 @@ class PiGroupRunner:
                 self.evidence = DurableEvidenceStore(self.data_dir / "evidence.sqlite3")
 
     async def record_pending(self, message: Any) -> None:
-        await self._interrupt_context_maintenance()
         await self._ensure_storage()
         event_id = "input:source:" + str(message.message_id)
         async with self._ingress_lock:
@@ -309,6 +308,9 @@ class PiGroupRunner:
         await self.ensure_initialized()
         turn = await self._db("pending_turn", self.session_id)
         if turn is None:
+            # The last reply may predate a service restart. Its completed
+            # boundary can still be summarized without waking the chat model.
+            self._schedule_context_maintenance()
             return
         state = await self.bridge.request("state", sessionId=self.session_id)
         await self._recover_tool_results(state)
@@ -367,7 +369,6 @@ class PiGroupRunner:
         self.runtime._queue_proactive_turn(self.runtime._build_proactive_trigger_message(task_id, "子 Agent 任务完成"))
 
     async def _deliver_child_completion(self, result: Dict[str, Any]) -> None:
-        await self._interrupt_context_maintenance()
         event_id = "child-complete:" + result["handle"]
         if not await self._db("has_input", self.session_id, event_id):
             payload = user_message(
@@ -380,7 +381,6 @@ class PiGroupRunner:
             self._wake_for_child_completion()
 
     async def ingest(self, *, source_message_ids: set[str] | None = None) -> None:
-        await self._interrupt_context_maintenance()
         await self.ensure_initialized()
         learning_sources = []
         # Existing host mirror remains for QQ quoting/UI, not assistant replay.
@@ -445,17 +445,18 @@ class PiGroupRunner:
                 raise
 
     async def _interrupt_context_maintenance(self) -> None:
-        """New conversation work takes priority over the idle summary request."""
+        """Explicit compaction/shutdown cancels only the background summarizer."""
         async with self._maintenance_cancel_lock:
             task = self._maintenance_task
             if task is None:
                 return
             if not task.done() and not task.cancelling():
                 task.cancel()
-            # Cancellation waits for the SDK summary to settle before another
-            # main run acquires the session. Concurrent intake must not cancel
-            # that cleanup a second time or abort a later main model request.
+            # Settle the independent summary before closing its transport. This
+            # must never abort a concurrently running main conversation.
             await asyncio.shield(asyncio.gather(task, return_exceptions=True))
+            if self._initialized and self.bridge.is_running:
+                await self.bridge.request("cancel_compaction", sessionId=self.session_id)
             if self._maintenance_task is task:
                 self._maintenance_task = None
 
@@ -466,53 +467,59 @@ class PiGroupRunner:
             )
 
     async def _run_context_maintenance(self) -> None:
-        async with self._orchestration_lock:
-            if self.runtime._has_pending_messages():
-                return
-            try:
-                await self._maintain_context()
-            except PiBridgeError as exc:
-                if exc.code in {"SUMMARY_FAILED", "INVALID_SUMMARY", "REVISION_CONFLICT"} or (
-                    "Pi summary request did not complete" in str(exc)
-                ):
-                    logger.warning(f"[{self.session_id}] 本轮已完成；上下文摘要未完成，原始历史保留: {exc}")
-                else:
-                    logger.exception(f"[{self.session_id}] 后台上下文压缩失败，原始历史保留")
-            except Exception:
+        try:
+            await self._maintain_context()
+        except PiBridgeError as exc:
+            if exc.code in {"SUMMARY_FAILED", "INVALID_SUMMARY", "REVISION_CONFLICT"} or (
+                "Pi summary request did not complete" in str(exc)
+            ):
+                logger.warning(f"[{self.session_id}] 本轮已完成；上下文摘要未完成，原始历史保留: {exc}")
+            else:
                 logger.exception(f"[{self.session_id}] 后台上下文压缩失败，原始历史保留")
+        except Exception:
+            logger.exception(f"[{self.session_id}] 后台上下文压缩失败，原始历史保留")
 
     async def _maintain_context(self) -> None:
-        state = await self.bridge.request("state", sessionId=self.session_id)
-        tokens = state["contextTokens"]
-        if tokens < global_config.chat.context_prompt_token_high_watermark:
+        # The lock covers only snapshot capture and SDK checkpoint application.
+        # The slow model request uses an independent session outside that lock.
+        async with self._orchestration_lock:
+            state = await self.bridge.request("state", sessionId=self.session_id)
+            tokens = state["contextTokens"]
+            if tokens < global_config.chat.context_prompt_token_high_watermark:
+                return
+            head = state["archive"]["head"]
+            if head == self._failed_compaction_head:
+                return
+            try:
+                started = await self.bridge.request(
+                    "start_compaction", sessionId=self.session_id, expectedRevision=state["revision"],
+                    preserveUnprocessed=True, summaryTaskName="memory", summaryTimeoutMs=300000,
+                )
+            except Exception:
+                self._failed_compaction_head = head
+                raise
+        if not started["started"]:
             return
-        # These are pressure signals, not a tokenizer or hard capacity proof.
-        # No retry of the same unchanged failed batch and no fallback trimming.
-        head = state["archive"]["head"]
-        if head == self._failed_compaction_head:
-            return
+        job_id = started["jobId"]
+        logger.info(f"[{self.session_id}] 后台摘要已启动: context_tokens={tokens}；主会话继续处理新消息")
         try:
-            await self.bridge.request(
-                "compact",
-                sessionId=self.session_id,
-                expectedRevision=state["revision"],
-                preserveUnprocessed=True,
-                summaryTaskName="memory",
-                summaryTimeoutMs=300000,
-            )
+            await self.bridge.request("wait_compaction", sessionId=self.session_id, jobId=job_id)
+            async with self._orchestration_lock:
+                result = await self.bridge.request("apply_compaction", sessionId=self.session_id, jobId=job_id)
+            logger.info(f"[{self.session_id}] 后台摘要已应用: context_tokens={result['contextTokens']}；新增历史完整保留")
         except asyncio.CancelledError:
-            # This task owns the orchestration lock, so abort can only stop its
-            # summary. An interrupted summary is eligible again after chatting.
-            await asyncio.shield(self.bridge.request("abort", sessionId=self.session_id))
-            logger.info(f"[{self.session_id}] 后台压缩已中止，优先处理新消息；原始上下文保留")
+            await asyncio.shield(self.bridge.request("cancel_compaction", sessionId=self.session_id, jobId=job_id))
             raise
         except BaseException:
             self._failed_compaction_head = head
+            # Discard only this failed summary, never the main run or its input.
+            await self.bridge.request(
+                "cancel_compaction", sessionId=self.session_id, jobId=job_id,
+            )
             raise
         self._failed_compaction_head = None
 
     async def run(self, source_messages: List[Any]) -> None:
-        await self._interrupt_context_maintenance()
         async with self._orchestration_lock:
             await self.ensure_initialized()
             await self._recover_tool_results(await self.bridge.request("state", sessionId=self.session_id))
@@ -574,8 +581,7 @@ class PiGroupRunner:
                 if any(event.payload.get("piChildCompletion") for event in pending):
                     self._wake_for_child_completion()
 
-            # Return control to the message loop after durable completion. Idle
-            # maintenance is interruptible and never gates the next chat turn.
+            # Snapshot summaries run independently; new turns do not restart them.
             self._schedule_context_maintenance()
 
     async def _callback(self, method: str, params: Dict[str, Any]) -> Any:

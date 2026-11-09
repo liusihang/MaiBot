@@ -751,6 +751,114 @@ test('maintenance never summarizes the first unprocessed batch or a failed first
   assert.equal(h.wires.length, 1);
 });
 
+test('background summary completes while new chat and tools run, preserving the entire newer tail after restart', { timeout: 15000 }, async (t) => {
+  const entered = deferred(), release = deferred(); let summaries = 0, frozen;
+  t.after(() => release.resolve());
+  const h = harness(t, {
+    response: (n) => [call('reply', { text: `answer ${n}` }, `send-${n}`, `item-${n}`)],
+    execute: () => success('sent once', { finishTurn: true }),
+    summarize: async ({ request, signal }) => {
+      summaries++; frozen = structuredClone(request.summaryEntries); entered.resolve();
+      await release.promise; signal.throwIfAborted(); return 'Continuity from the fixed completed prefix';
+    },
+  });
+  await h.initialize('group-a', [tool('reply')], { requireDelivery: true });
+  await h.prompt('old completed conversation');
+  const owned = h.runtime.sessions.get('group-a');
+  const original = readFileSync(owned.manager.getSessionFile());
+  const started = await h.handle('start_compaction', { sessionId: 'group-a', preserveUnprocessed: true });
+  await entered.promise;
+  const waiting = h.handle('wait_compaction', { sessionId: 'group-a', jobId: started.jobId });
+  const duplicate = await h.handle('start_compaction', { sessionId: 'group-a', preserveUnprocessed: true });
+  assert.equal(duplicate.jobId, started.jobId);
+  const prefixLength = owned.manager.buildSessionProjection().entries.length;
+  await h.prompt('new real question', 'group-a', { references: [ref(9, 'new retrieved evidence')] });
+  await h.handle('append', { sessionId: 'group-a', additions: [{ ...user('new image'), content: [
+    { type: 'text', text: 'image during summary' }, { type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
+  ] }] });
+  const tail = structuredClone(owned.manager.buildSessionProjection().entries.slice(prefixLength).flatMap(e => e.messages));
+  assert.equal(h.calls.length, 2, 'New reply must finish before the summary is released');
+  assert.equal(JSON.stringify(frozen).includes('new real question'), false);
+  assert.equal(JSON.stringify(frozen).includes('new retrieved evidence'), false);
+  release.resolve(); await waiting;
+  const compacted = await h.handle('apply_compaction', { sessionId: 'group-a', jobId: started.jobId });
+  assert.equal(compacted.compacted, true); assert.equal(summaries, 1);
+  assert.deepEqual(compacted.messages.filter(m => m.role !== 'system').slice(1), tail);
+  assert.deepEqual(readFileSync(owned.manager.getSessionFile()).subarray(0, original.length), original);
+  const archive = await h.handle('read_archive', { sessionId: 'group-a', eventIds: [compacted.compaction.archiveHandle], limit: 12000 });
+  assert.match(archive.text, /old completed conversation/); assert.doesNotMatch(archive.text, /new real question/);
+  await h.handle('close', { sessionId: 'group-a' });
+  await h.initialize('group-a', [tool('reply')], { requireDelivery: true });
+  assert.deepEqual(JSON.parse(JSON.stringify((await h.state()).messages)), JSON.parse(JSON.stringify(compacted.messages)));
+  await h.prompt('after restart'); assert.equal(h.calls.length, 3, 'Compaction never repeats any send');
+});
+
+test('ready background summary waits for a tool boundary and tolerates inbox arrivals during its commit', { timeout: 15000 }, async (t) => {
+  const toolEntered = deferred(), releaseTool = deferred(); let summary;
+  t.after(() => releaseTool.resolve());
+  const h = harness(t, {
+    response: (n) => [call('reply', {}, `send-${n}`, `item-${n}`)],
+    execute: async ({ toolCallId }) => {
+      if (toolCallId.startsWith('send-2')) { toolEntered.resolve(); await releaseTool.promise; }
+      return success('sent', { finishTurn: true });
+    }, summarize: async () => 'completed prefix',
+  });
+  await h.initialize('group-a', [tool('reply')], { requireDelivery: true }); await h.prompt('first');
+  summary = await h.handle('start_compaction', { sessionId: 'group-a', preserveUnprocessed: true });
+  await h.handle('wait_compaction', { sessionId: 'group-a', jobId: summary.jobId });
+  const main = h.prompt('second'); await toolEntered.promise;
+  await assert.rejects(h.handle('apply_compaction', { sessionId: 'group-a', jobId: summary.jobId }), { code: 'SESSION_BUSY' });
+  releaseTool.resolve(); await main;
+  const owned = h.runtime.sessions.get('group-a');
+  const hook = owned.prepareCompaction.bind(owned);
+  owned.prepareCompaction = async (event) => {
+    const result = await hook(event);
+    await h.handle('append', { sessionId: 'group-a', additions: [user('arrival at commit')] });
+    return result;
+  };
+  const result = await h.handle('apply_compaction', { sessionId: 'group-a', jobId: summary.jobId });
+  assert.equal(result.compacted, true); assert.ok(strings(result).includes('second'));
+  assert.ok(strings(result).includes('arrival at commit')); assert.equal(h.calls.length, 2);
+});
+
+test('background failure and cancellation preserve history and never abort a running main reply', { timeout: 15000 }, async (t) => {
+  const entered = deferred(), release = deferred(); let mode = 'fail';
+  t.after(() => release.resolve());
+  const h = harness(t, { summarize: async ({ signal }) => {
+    if (mode === 'fail') throw new Error('summary failed');
+    entered.resolve(); await new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('summary cancelled')), { once: true }));
+  }, response: async (n) => { if (n === 2) await release.promise; return [answer('chat finished')]; } });
+  await h.initialize(); await h.prompt('first'); const before = await h.state();
+  const failed = await h.handle('start_compaction', { sessionId: 'group-a', preserveUnprocessed: true });
+  await assert.rejects(h.handle('wait_compaction', { sessionId: 'group-a', jobId: failed.jobId }), /summary failed/);
+  assert.deepEqual((await h.state()).messages, before.messages);
+  mode = 'cancel'; const job = await h.handle('start_compaction', { sessionId: 'group-a', preserveUnprocessed: true });
+  await entered.promise;
+  const main = h.prompt('second');
+  await h.handle('cancel_compaction', { sessionId: 'group-a', jobId: job.jobId });
+  release.resolve(); const result = await main;
+  assert.equal(result.error, null); assert.equal(result.messages.at(-1).stopReason, 'stop');
+  assert.equal(rows(h.runtime.sessions.get('group-a')).some(e => e.type === 'compaction'), false);
+});
+
+test('background summary rejects a replaced prefix and close settles its independent request', async (t) => {
+  const h = harness(t, { summarize: async () => 'fixed old prefix' });
+  await h.initialize(); await h.prompt('completed');
+  const job = await h.handle('start_compaction', { sessionId: 'group-a', preserveUnprocessed: true });
+  await h.handle('wait_compaction', { sessionId: 'group-a', jobId: job.jobId });
+  await h.handle('compact', { sessionId: 'group-a', summary: 'Explicit replacement checkpoint' });
+  const before = await h.state();
+  await assert.rejects(h.handle('apply_compaction', { sessionId: 'group-a', jobId: job.jobId }), { code: 'REVISION_CONFLICT' });
+  assert.deepEqual((await h.state()).messages, before.messages);
+  await h.prompt('new completed exchange');
+  let aborted = false;
+  h.runtime.dependencies.summarize = async ({ signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener('abort', () => { aborted = true; reject(new Error('closed')); }, { once: true });
+  });
+  await h.handle('start_compaction', { sessionId: 'group-a', preserveUnprocessed: true });
+  await h.handle('close', { sessionId: 'group-a' }); assert.equal(aborted, true);
+});
+
 test('maintenance uses a restart-safe completed boundary and preserves new text, image and reference tail exactly', async (t) => {
   const config = fixtureConfig(); config.models[0].visual = true;
   const h = harness(t, { response: (number) => number === 2 ? [answer('Summary of only the already completed conversation.')] : undefined });

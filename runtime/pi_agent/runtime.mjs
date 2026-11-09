@@ -279,7 +279,14 @@ class BusinessSession {
     manager.appendContextEdit = () => { throw new RuntimeError('CONTEXT_REWRITE_FORBIDDEN', 'Only explicit successful compaction may replace the visible prefix'); };
     const compact = manager.appendCompaction.bind(manager);
     manager.appendCompaction = (...args) => {
-      check(this.compactionRequest && manager.getLeafId() === this.compactionRequest.baseLeaf,
+      const request = this.compactionRequest;
+      const branch = manager.getBranch();
+      const base = request ? branch.findIndex((entry) => entry.id === request.baseLeaf) : -1;
+      // Intake can persist inbox records during the brief SDK commit. They are
+      // not visible until drainPending, so the selected prefix/tail stays exact.
+      const onlyInbox = request?.prepared === true && base >= 0 && branch.slice(base + 1).every((entry) =>
+        entry.type === 'custom' && ['maibot.inbox', 'maibot.pending_reference'].includes(entry.customType));
+      check(request && (manager.getLeafId() === request.baseLeaf || onlyInbox),
         'REVISION_CONFLICT', 'New input arrived during compaction; original context was retained');
       return compact(...args);
     };
@@ -553,6 +560,8 @@ class BusinessSession {
       latestReportedInputTokens: reported ? reported.input + reported.cacheRead + reported.cacheWrite : null,
       pressureIsHardBound: false,
       isRunning: this.running, isCompacting: this.transition, paused: !this.running && unresolved.length > 0,
+      backgroundCompaction: this.backgroundCompaction ? { jobId: this.backgroundCompaction.id,
+        status: this.backgroundCompaction.ready ? 'ready' : 'summarizing' } : null,
       unresolvedToolCalls: unresolved.map(({ id, name }) => ({ id, name })), terminatedByTool: this.terminated,
       pendingToolObservations: this.pendingToolObservations(),
       error: this.lastError ?? ({ error: 'Pi provider request did not complete successfully',
@@ -641,10 +650,10 @@ class BusinessSession {
     event.signal.throwIfAborted();
     return { compaction: { summary: `${summary}\n\n[Original public conversation archive: ${request.archiveHandle}. Read with read_thread_archive event_ids=["${request.archiveHandle}"] and offset/limit.]`, firstKeptEntryId: request.firstKeptEntryId ?? null,
       tokensBefore: event.preparation.tokensBefore,
-      details: { kind: 'business_summary', archiveHandle: request.archiveHandle, archiveHead: request.baseLeaf } } };
+      details: { kind: 'business_summary', archiveHandle: request.archiveHandle, archiveHead: request.archiveHead ?? request.baseLeaf } } };
   }
 
-  async compact(params) {
+  compactionPlan(params) {
     this.writable();
     check(!this.running && !this.transition, 'SESSION_BUSY', 'Explicit compaction requires an idle session');
     check(!this.unresolvedCalls().length, 'UNRESOLVED_TOOL_CALLS', 'Cannot compact unresolved business effects');
@@ -658,7 +667,7 @@ class BusinessSession {
       check(firstKeptEntryId === null, 'INVALID_COMPACTION', 'Automatic tail preservation cannot use a caller-selected cut');
       const entries = this.manager.getEntries();
       const completed = entries.findLast((entry) => entry.type === 'custom' && entry.customType === 'maibot.turn_completed');
-      if (!completed) return { ...this.snapshot(), compacted: false, reason: 'no_completed_turn' };
+      if (!completed) return { skipped: 'no_completed_turn' };
       const positions = new Map(entries.map((entry, index) => [entry.id, index]));
       const boundary = positions.get(completed.data.throughEntryId);
       check(boundary !== undefined, 'CORRUPT_SESSION', 'Completed turn boundary is absent from this session');
@@ -667,7 +676,7 @@ class BusinessSession {
       cut = visible.findIndex((entry) => entry.sourceEntry.type !== 'compaction' && positions.get(entry.sourceEntry.id) > boundary);
       if (cut < 0) cut = visible.length;
       if (!visible.slice(0, cut).some((entry) => entry.sourceEntry.type !== 'compaction')) {
-        return { ...this.snapshot(), compacted: false, reason: 'no_processed_prefix' };
+        return { skipped: 'no_processed_prefix' };
       }
       firstKeptEntryId = visible[cut]?.sourceEntry.id ?? null;
     }
@@ -683,10 +692,85 @@ class BusinessSession {
       }
       check(calls.size === 0, 'INVALID_COMPACTION', 'Compaction must retain complete tool batches');
     }
-    this.transition = true;
-    this.compactionRequest = { ...params, firstKeptEntryId, baseLeaf: this.manager.getLeafId(),
+    return { ...params, firstKeptEntryId, baseLeaf: this.manager.getLeafId(),
       archiveHandle: `pi-archive:${hash([this.id, this.manager.getSessionId(), this.manager.getLeafId()])}`,
+      prefixEntryIds: visible.slice(0, cut).map((entry) => entry.sourceEntry.id),
       summaryEntries: visible.slice(0, cut).map((entry) => publicEntry(entry.sourceEntry)) };
+  }
+
+  startCompaction(params) {
+    this.writable();
+    if (this.backgroundCompaction) return { started: true, jobId: this.backgroundCompaction.id };
+    const request = this.compactionPlan(params);
+    if (request.skipped) return { started: false, reason: request.skipped };
+    const job = { id: request.archiveHandle, request, controller: new AbortController(), ready: false };
+    this.backgroundCompaction = job;
+    // Only the frozen public prefix enters this independent AgentSession. The
+    // main session remains idle/usable and never waits on the summary provider.
+    job.promise = (async () => {
+      const summary = request.summary ?? await this.dependencies.summarize({ session: this, request, signal: job.controller.signal });
+      job.controller.signal.throwIfAborted();
+      check(typeof summary === 'string' && summary.trim(), 'INVALID_SUMMARY', 'Compaction summary must be nonempty');
+      job.summary = summary;
+      job.ready = true;
+      return { jobId: job.id, ready: true };
+    })();
+    // wait_compaction reports the original error. Keep the rejected job until
+    // that waiter observes it, without an unhandled background rejection.
+    job.promise.catch(() => {});
+    return { started: true, jobId: job.id };
+  }
+
+  compactionJob(params) {
+    const job = this.backgroundCompaction;
+    check(job && job.id === params.jobId, 'UNKNOWN_COMPACTION', 'Background compaction job is absent');
+    return job;
+  }
+
+  async waitCompaction(params) {
+    const job = this.compactionJob(params);
+    try { return await job.promise; }
+    catch (error) { if (this.backgroundCompaction === job) this.backgroundCompaction = undefined; throw error; }
+  }
+
+  async cancelCompaction(params) {
+    const job = this.backgroundCompaction;
+    if (!job || (params.jobId && job.id !== params.jobId)) return { cancelled: false };
+    job.controller.abort();
+    await job.promise.catch(() => {});
+    if (this.backgroundCompaction === job) this.backgroundCompaction = undefined;
+    return { cancelled: true };
+  }
+
+  async applyCompaction(params) {
+    this.writable();
+    check(!this.running && !this.transition, 'SESSION_BUSY', 'Apply compaction at a completed turn boundary');
+    check(!this.unresolvedCalls().length, 'UNRESOLVED_TOOL_CALLS', 'Cannot compact unresolved business effects');
+    const job = this.compactionJob(params);
+    check(job.ready, 'SUMMARY_NOT_READY', 'Background summary is not ready');
+    this.drainPending();
+    const visible = this.manager.buildSessionProjection().entries.filter((entry) => entry.messages.length);
+    const prefix = job.request.prefixEntryIds;
+    if (!prefix.every((id, index) => visible[index]?.sourceEntry.id === id)) {
+      this.backgroundCompaction = undefined;
+      throw new RuntimeError('REVISION_CONFLICT', 'The summarized prefix has changed; original history was retained');
+    }
+    const result = await this.commitCompaction({ ...job.request, summary: job.summary, prepared: true,
+      firstKeptEntryId: visible[prefix.length]?.sourceEntry.id ?? null,
+      archiveHead: job.request.baseLeaf, baseLeaf: this.manager.getLeafId() });
+    if (this.backgroundCompaction === job) this.backgroundCompaction = undefined;
+    return result;
+  }
+
+  async compact(params) {
+    const request = this.compactionPlan(params);
+    if (request.skipped) return { ...this.snapshot(), compacted: false, reason: request.skipped };
+    return this.commitCompaction(request);
+  }
+
+  async commitCompaction(request) {
+    this.transition = true;
+    this.compactionRequest = request;
     const operation = this.session.compact();
     this.compactPromise = operation;
     try { await operation; this.healthy(); }
@@ -733,7 +817,7 @@ class BusinessSession {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.closePromise = (async () => {
-      try { await this.abort(); await this.runPromise?.catch(() => {}); }
+      try { await this.cancelCompaction({}); await this.abort(); await this.runPromise?.catch(() => {}); }
       finally { this.session.dispose(); await this.releaseLock(); }
       return { sessionId: this.id, closed: true };
     })();
@@ -770,6 +854,10 @@ export class PiRuntime {
     if (method === 'append') return session.append(params.additions);
     if (method === 'prompt' || method === 'continue') return session.prompt(params);
     if (method === 'compact') return session.compact(params);
+    if (method === 'start_compaction') return session.startCompaction(params);
+    if (method === 'wait_compaction') return session.waitCompaction(params);
+    if (method === 'apply_compaction') return session.applyCompaction(params);
+    if (method === 'cancel_compaction') return session.cancelCompaction(params);
     if (method === 'resolve_tools') return session.resolveTools(params.results);
     if (method === 'read_archive') return session.readArchive(params);
     if (method === 'abort') return session.abort();
@@ -784,13 +872,13 @@ export class PiRuntime {
   }
 }
 
-async function summarizeConversation({ session: owner, event, signal }) {
-  const taskName = owner.compactionRequest.summaryTaskName ?? owner.params.summaryTaskName ?? 'planner';
+async function summarizeConversation({ session: owner, request = owner.compactionRequest, signal }) {
+  const taskName = request.summaryTaskName ?? owner.params.summaryTaskName ?? 'planner';
   const resolved = { ...owner.dependencies.resolveModel(owner.modelRuntime, taskName) };
-  if (owner.compactionRequest.summaryTimeoutMs !== undefined) {
-    check(Number.isFinite(owner.compactionRequest.summaryTimeoutMs) && owner.compactionRequest.summaryTimeoutMs > 0,
+  if (request.summaryTimeoutMs !== undefined) {
+    check(Number.isFinite(request.summaryTimeoutMs) && request.summaryTimeoutMs > 0,
       'INVALID_SUMMARY_TIMEOUT', 'Summary timeout must be a positive number of milliseconds');
-    resolved.timeoutMs = owner.compactionRequest.summaryTimeoutMs;
+    resolved.timeoutMs = request.summaryTimeoutMs;
   }
   const summary = await createIsolatedSession({ cwd: owner.cwd, agentDir: owner.agentDir,
     modelRuntime: owner.modelRuntime, resolved, sessionManager: SessionManager.inMemory(owner.cwd),
@@ -799,7 +887,7 @@ async function summarizeConversation({ session: owner, event, signal }) {
   signal.addEventListener('abort', abort, { once: true });
   try {
     signal.throwIfAborted();
-    await summary.prompt(JSON.stringify(owner.compactionRequest.summaryEntries));
+    await summary.prompt(JSON.stringify(request.summaryEntries));
     signal.throwIfAborted();
     const result = summary.messages.findLast((message) => message.role === 'assistant');
     check(result?.stopReason === 'stop', 'SUMMARY_FAILED',
